@@ -227,6 +227,11 @@ export async function initDb() {
       ssl: local ? false : { rejectUnauthorized: false },
       max: 5,
     });
+    // Keep every table in its own schema so the app can share a Supabase project with other apps safely
+    const schema = (process.env.DB_SCHEMA || 'dropship').replace(/[^a-z0-9_]/gi, '');
+    pool.on('connect', (client) => {
+      client.query(`create schema if not exists ${schema}; set search_path to ${schema}, public`).catch((e) => console.error('schema setup failed', e.message));
+    });
     impl = {
       kind: 'postgres',
       query: (text, params) => pool.query(text, params),
