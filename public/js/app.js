@@ -248,10 +248,14 @@ function setupBanner() {
   const d = state.data;
   const out = [];
   if (!d.ebay.configured)
-    out.push(`<div class="banner">${ICONS.alert}<div><b>eBay isn't connected.</b> The app has your refresh token, but it also needs your eBay <b>App ID</b> and <b>Cert ID</b>. <span class="muted">Missing: ${d.ebay.missing.join(', ')}</span></div><a class="btn sm" href="#/settings">Set up</a></div>`);
+    out.push(`<div class="banner">${ICONS.alert}<div><b>eBay isn't connected.</b> Finish setup in Settings, then click <b>Connect eBay account</b>. <span class="muted">Missing: ${d.ebay.missing.join(', ')}</span></div><a class="btn sm" href="#/settings">Set up</a></div>`);
   // Loud warnings when an automatic pull stops working, so a silent failure can't hide missing sales or costs
   const stale = (iso, hours) => !iso || Date.now() - new Date(iso).getTime() > hours * 3600_000;
-  if (d.ebay.configured && d.ebay.last && !d.ebay.last.ok)
+  if (d.ebay.needsReconnect)
+    out.push(`<div class="banner" style="background:var(--bad-soft);border-color:var(--bad)">${ICONS.alert}<div><b>eBay needs to be reconnected.</b> eBay stopped accepting the saved connection, so no new sales are coming in.</div><a class="btn sm" href="/api/ebay/connect">Reconnect eBay</a></div>`);
+  else if (d.ebay.refreshExpiresAt && new Date(d.ebay.refreshExpiresAt) - Date.now() < 30 * 86400_000)
+    out.push(`<div class="banner">${ICONS.alert}<div><b>eBay connection expires ${fmtDate(d.ebay.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}.</b> Reconnect now so syncing never stops.</div><a class="btn sm" href="/api/ebay/connect">Reconnect eBay</a></div>`);
+  else if (d.ebay.configured && d.ebay.last && !d.ebay.last.ok)
     out.push(`<div class="banner" style="background:var(--bad-soft);border-color:var(--bad)">${ICONS.alert}<div><b>eBay sync is failing.</b> New sales are not coming in. <span class="muted">${esc((d.ebay.last.message || '').slice(0, 180))}</span></div><a class="btn sm" href="#/settings">Details</a></div>`);
   else if (d.ebay.configured && d.ebay.lastSuccess && stale(d.ebay.lastSuccess, 3))
     out.push(`<div class="banner">${ICONS.alert}<div><b>eBay hasn't synced since ${fmtDateTime(d.ebay.lastSuccess)}.</b> It normally runs every 30 minutes. Check that the server is running.</div><a class="btn sm" href="#/settings">Details</a></div>`);
@@ -1064,6 +1068,11 @@ async function importPage(el) {
 
 // ---------------------------------------------------------------- SETTINGS
 async function settings(el) {
+  const ebayMsg = new URLSearchParams(location.hash.split('?')[1] || '').get('ebay');
+  if (ebayMsg) {
+    toast(ebayMsg === 'connected' ? 'eBay connected. Pulling your sales now.' : `eBay: ${ebayMsg}`, ebayMsg === 'connected' ? 'good' : 'bad');
+    history.replaceState(null, '', '#/settings');
+  }
   const d = state.data;
   const e = d.ebay;
   const demo = d.orders.filter((o) => o.order_id.startsWith('DEMO-')).length;
@@ -1072,20 +1081,7 @@ async function settings(el) {
   const mails = em.configured ? await api('/api/email/log').catch(() => []) : [];
   el.innerHTML = `<div class="grid g-12">
     <div class="c-7 stack">
-      ${card('eBay connection', e.configured ? 'Credentials found' : 'Not connected yet', `
-        ${e.configured ? `<div class="stat-row"><span class="k">Status</span><span class="v">${e.last?.ok ? '<span class="pill good">Connected</span>' : e.last ? '<span class="pill bad">Last sync failed</span>' : '<span class="pill warn">Not synced yet</span>'}</span></div>
-          <div class="stat-row"><span class="k">Last successful sync</span><span class="v">${e.lastSuccess ? fmtDateTime(e.lastSuccess) : '—'}</span></div>
-          <div class="stat-row"><span class="k">Scopes in use</span><span class="v" style="font-size:12px">${(e.scopes || []).map((s) => s.split('/').pop()).join(', ') || '—'}</span></div>
-          <div class="row mt"><button class="btn primary" id="sync-now">Sync now</button><span class="muted" style="font-size:12px">Syncs automatically every 30 minutes</span></div>`
-        : `<p class="ink2" style="margin-top:0">The token you pasted is an eBay <b>refresh token</b>. To use it, the server also needs your app's keys. On <a href="https://developer.ebay.com/my/keys" target="_blank" rel="noopener">developer.ebay.com → Application Keys → Production</a>, copy:</p>
-          <table class="simple"><tbody>
-            <tr><td class="mono">EBAY_CLIENT_ID</td><td>App ID (Client ID)</td><td>${e.missing.includes('EBAY_CLIENT_ID') ? '<span class="pill bad">missing</span>' : '<span class="pill good">set</span>'}</td></tr>
-            <tr><td class="mono">EBAY_CLIENT_SECRET</td><td>Cert ID (Client Secret)</td><td>${e.missing.includes('EBAY_CLIENT_SECRET') ? '<span class="pill bad">missing</span>' : '<span class="pill good">set</span>'}</td></tr>
-            <tr><td class="mono">EBAY_REFRESH_TOKEN</td><td>The token you already have</td><td>${e.missing.includes('EBAY_REFRESH_TOKEN') ? '<span class="pill bad">missing</span>' : '<span class="pill good">set</span>'}</td></tr>
-          </tbody></table>
-          <p class="muted" style="font-size:12.5px;margin-bottom:0">Put them in <span class="mono">.env</span> locally or in Railway → Variables, then restart. The refresh token must come from the same App ID it was issued to.</p>`}
-        ${log.length ? `<h4 style="margin:18px 0 6px;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)">Recent syncs</h4><table class="simple"><tbody>${log.slice(0, 6).map((l) => `<tr><td style="white-space:nowrap">${fmtDateTime(l.started_at)}</td><td>${l.ok ? '<span class="pill good">ok</span>' : l.finished_at ? '<span class="pill bad">failed</span>' : '<span class="pill">running</span>'}</td><td class="muted" style="font-size:12px">${esc(l.message || '')}</td></tr>`).join('')}</tbody></table>` : ''}
-      `)}
+      ${ebayCard(e, log)}
       ${emailCard(em, mails)}
       ${card('Matching rules', 'Controls how Amazon purchases link to eBay sales', `
         <label style="font-weight:600;font-size:13px">Home / personal zip codes</label>
@@ -1131,6 +1127,33 @@ async function settings(el) {
     await loadData();
     renderPage();
   });
+}
+
+function ebayCard(e, log) {
+  const h4 = (t) => `<h4 style="margin:18px 0 6px;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)">${t}</h4>`;
+  const has = (k) => !e.missing.includes(k);
+  const pill = (ok, yes = 'set', no = 'missing') => (ok ? `<span class="pill good">${yes}</span>` : `<span class="pill bad">${no}</span>`);
+  const expSoon = e.refreshExpiresAt && new Date(e.refreshExpiresAt) - Date.now() < 30 * 86400_000;
+  const connectBtn = e.canConnect
+    ? `<a class="btn primary" href="/api/ebay/connect">${e.configured ? 'Reconnect eBay' : 'Connect eBay account'}</a>`
+    : '<button class="btn" disabled title="Set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RUNAME first">Connect eBay account</button>';
+  const rows = `<table class="simple"><tbody>
+      <tr><td class="mono">EBAY_CLIENT_ID</td><td>App ID (Production)</td><td>${pill(has('EBAY_CLIENT_ID'))}</td></tr>
+      <tr><td class="mono">EBAY_CLIENT_SECRET</td><td>Cert ID (Production)</td><td>${pill(has('EBAY_CLIENT_SECRET'))}</td></tr>
+      <tr><td class="mono">EBAY_RUNAME</td><td>RuName from eBay → User Tokens → Your eBay Sign-in Settings</td><td>${pill(e.runameSet)}</td></tr>
+      <tr><td>eBay account</td><td>Click Connect and approve on eBay</td><td>${pill(e.configured, 'connected', 'not connected')}</td></tr>
+    </tbody></table>`;
+  const status = e.configured ? `
+      <div class="stat-row"><span class="k">Status</span><span class="v">${e.needsReconnect ? '<span class="pill bad">Reconnect needed</span>' : e.last?.ok ? '<span class="pill good">Syncing</span>' : e.last ? '<span class="pill bad">Last sync failed</span>' : '<span class="pill warn">Not synced yet</span>'}</span></div>
+      <div class="stat-row"><span class="k">Last successful sync</span><span class="v">${e.lastSuccess ? fmtDateTime(e.lastSuccess) : '—'}</span></div>
+      ${e.connectedAt ? `<div class="stat-row"><span class="k">Connected</span><span class="v">${fmtDateTime(e.connectedAt)}</span></div>` : ''}
+      ${e.refreshExpiresAt ? `<div class="stat-row"><span class="k">Connection valid until</span><span class="v ${expSoon ? 'neg' : ''}">${fmtDate(e.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}${expSoon ? ', reconnect soon' : ''}</span></div>` : ''}` : '';
+  const logHtml = log.length ? `${h4('Recent syncs')}<table class="simple"><tbody>${log.slice(0, 6).map((l) => `<tr><td style="white-space:nowrap">${fmtDateTime(l.started_at)}</td><td>${l.ok ? '<span class="pill good">ok</span>' : l.finished_at ? '<span class="pill bad">failed</span>' : '<span class="pill">running</span>'}</td><td class="muted" style="font-size:12px">${esc(l.message || '')}</td></tr>`).join('')}</tbody></table>` : '';
+  return card('eBay connection', e.configured ? 'Connected' : 'Not connected yet', `
+    ${status}
+    ${e.configured ? '' : rows}
+    <div class="row mt">${connectBtn}${e.configured ? '<button class="btn" id="sync-now">Sync now</button>' : ''}<span class="muted" style="font-size:12px">Syncs automatically every 30 minutes once connected</span></div>
+    ${logHtml}`);
 }
 
 function emailCard(em, mails) {

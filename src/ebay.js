@@ -24,18 +24,67 @@ const SCOPE_SETS = [
 
 let tokenCache = { token: null, exp: 0, scopes: null };
 
+// The refresh token comes from the in-app "Connect eBay" flow (stored in settings) and falls back to
+// EBAY_REFRESH_TOKEN. eBay refresh tokens last ~18 months; the dashboard warns before they expire.
+let connection = null; // { refresh_token, refresh_expires_at, connected_at, scopes }
+export async function loadEbayConnection() {
+  connection = await getSetting('ebay_oauth');
+  tokenCache = { token: null, exp: 0, scopes: null };
+  return connection;
+}
+const refreshToken = () => connection?.refresh_token || process.env.EBAY_REFRESH_TOKEN || null;
+const basicAuth = () => Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64');
+
 export function ebayConfigured() {
-  return Boolean(process.env.EBAY_REFRESH_TOKEN && process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET);
+  return Boolean(refreshToken() && process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET);
 }
 
 export function ebayMissing() {
-  return ['EBAY_CLIENT_ID', 'EBAY_CLIENT_SECRET', 'EBAY_REFRESH_TOKEN'].filter((k) => !process.env[k]);
+  const m = ['EBAY_CLIENT_ID', 'EBAY_CLIENT_SECRET'].filter((k) => !process.env[k]);
+  if (!refreshToken()) m.push('eBay account connection');
+  return m;
+}
+
+export function ebayCanConnect() {
+  return Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET && process.env.EBAY_RUNAME);
+}
+
+export function ebayConsentUrl(state) {
+  const p = new URLSearchParams({
+    client_id: process.env.EBAY_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: process.env.EBAY_RUNAME,
+    scope: SCOPE_SETS[0].join(' '),
+    state,
+  });
+  return `${process.env.EBAY_AUTH_BASE || 'https://auth.ebay.com'}/oauth2/authorize?${p}`;
+}
+
+// Authorization-code exchange after the seller approves on eBay's consent page
+export async function ebayConnectWithCode(code) {
+  const res = await fetch(`${API}/identity/v1/oauth2/token`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${basicAuth()}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: process.env.EBAY_RUNAME }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.refresh_token) throw new Error(`eBay connection failed: ${body.error || res.status} ${body.error_description || ''}`.trim());
+  const value = {
+    refresh_token: body.refresh_token,
+    refresh_expires_at: new Date(Date.now() + (body.refresh_token_expires_in || 47304000) * 1000).toISOString(),
+    connected_at: new Date().toISOString(),
+    scopes: SCOPE_SETS[0],
+  };
+  await setSetting('ebay_oauth', value);
+  connection = value;
+  tokenCache = { token: body.access_token, exp: Date.now() + (body.expires_in || 7200) * 1000, scopes: SCOPE_SETS[0] };
+  return value;
 }
 
 async function getAccessToken() {
   if (tokenCache.token && Date.now() < tokenCache.exp - 60_000) return tokenCache.token;
   if (!ebayConfigured()) throw new Error(`eBay not configured: missing ${ebayMissing().join(', ')}`);
-  const basic = Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64');
+  const basic = basicAuth();
   let lastErr;
   for (const scopes of SCOPE_SETS) {
     const res = await fetch(`${API}/identity/v1/oauth2/token`, {
@@ -43,7 +92,7 @@ async function getAccessToken() {
       headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
-        refresh_token: process.env.EBAY_REFRESH_TOKEN,
+        refresh_token: refreshToken(),
         scope: scopes.join(' '),
       }),
     });
@@ -351,6 +400,12 @@ export async function ebayStatus() {
   return {
     configured: ebayConfigured(),
     missing: ebayMissing(),
+    canConnect: ebayCanConnect(),
+    runameSet: Boolean(process.env.EBAY_RUNAME),
+    connectedAt: connection?.connected_at || null,
+    refreshExpiresAt: connection?.refresh_expires_at || null,
+    source: connection?.refresh_token ? 'connected' : process.env.EBAY_REFRESH_TOKEN ? 'env' : null,
+    needsReconnect: /invalid_grant|refresh token is invalid|token refresh failed/i.test(last?.message || '') && !last?.ok,
     running: Boolean(running),
     scopes: tokenCache.scopes,
     last,

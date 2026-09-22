@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initDb, dbKind, q, one, getSetting, setSetting } from './db.js';
-import { syncEbay, ebayStatus, ebayConfigured } from './ebay.js';
+import { syncEbay, ebayStatus, ebayConfigured, ebayCanConnect, ebayConsentUrl, ebayConnectWithCode, loadEbayConnection } from './ebay.js';
 import { importAmazonCsv } from './amazon.js';
 import { runMatcher, getSuggestions } from './matcher.js';
 import { buildDataset, buildBooks } from './dataset.js';
@@ -197,6 +197,26 @@ app.post('/api/settings', wrap(async (req, res) => {
 
 app.post('/api/sync', wrap(async (_req, res) => res.json(await syncEbay())));
 
+// ---------- Connect eBay (OAuth authorization-code flow) ----------
+// eBay Developer portal -> User Tokens -> "Get a Token from eBay via Your Application" -> add a RuName whose
+// "Your auth accepted URL" is https://<this app>/api/ebay/callback, then set EBAY_RUNAME to that RuName.
+app.get('/api/ebay/connect', wrap(async (_req, res) => {
+  if (!ebayCanConnect()) return res.status(400).send('Set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RUNAME first.');
+  const state = crypto.randomBytes(16).toString('hex');
+  await setSetting('ebay_oauth_state', { state, at: Date.now() });
+  res.redirect(ebayConsentUrl(state));
+}));
+app.get('/api/ebay/callback', wrap(async (req, res) => {
+  const saved = await getSetting('ebay_oauth_state');
+  if (req.query.error) return res.redirect(`/#/settings?ebay=${encodeURIComponent(String(req.query.error_description || req.query.error))}`);
+  if (!saved || saved.state !== req.query.state || Date.now() - saved.at > 15 * 60_000)
+    return res.redirect('/#/settings?ebay=Connection+link+expired%2C+click+Connect+eBay+again');
+  await ebayConnectWithCode(String(req.query.code || ''));
+  await setSetting('ebay_oauth_state', null);
+  syncEbay().catch((err) => console.error('first eBay sync failed', err));
+  res.redirect('/#/settings?ebay=connected');
+}));
+
 // ---------- books: operating expenses, settlements, ledger links ----------
 app.post('/api/expenses', wrap(async (req, res) => {
   for (const c of req.body?.changes || []) {
@@ -245,19 +265,23 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 const port = Number(process.env.PORT || 3000);
 const kind = await initDb();
+await loadEbayConnection();
 app.listen(port, () => {
   console.log(`Dropship dashboard on http://localhost:${port}  (db: ${kind}${PASSWORD ? ', password on' : ', NO PASSWORD'})`);
 });
 
 // Background eBay sync
 const every = Number(process.env.SYNC_INTERVAL_MINUTES || 30);
-if (ebayConfigured() && every > 0) {
-  const tick = () => syncEbay().then((r) => console.log('eBay sync:', r.log.join(' | '))).catch((e) => console.error('eBay sync error', e));
+// Always scheduled; each tick checks whether eBay is connected, so connecting in the UI starts syncing without a restart
+if (every > 0) {
+  const tick = () => {
+    if (!ebayConfigured()) return;
+    syncEbay().then((r) => console.log('eBay sync:', r.log.join(' | '))).catch((e) => console.error('eBay sync error', e));
+  };
   setTimeout(tick, 5_000);
   setInterval(tick, every * 60_000);
-} else {
-  console.log('eBay sync disabled: set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_REFRESH_TOKEN');
 }
+if (!ebayConfigured()) console.log('eBay not connected yet: set EBAY_CLIENT_ID / EBAY_CLIENT_SECRET / EBAY_RUNAME, then Settings -> Connect eBay');
 if (emailConfigured() && every > 0) {
   const tickMail = () => syncEmail().then((r) => console.log('Email sync:', r.log.join(' | '))).catch((e) => console.error('Email sync error', e));
   setTimeout(tickMail, 15_000);
