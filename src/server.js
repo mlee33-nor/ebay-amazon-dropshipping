@@ -10,6 +10,8 @@ import { runMatcher, getSuggestions } from './matcher.js';
 import { buildDataset, buildBooks } from './dataset.js';
 import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
+import { ask } from './ask.js';
+import { syncListings, listingAnalytics } from './listings.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -204,6 +206,10 @@ app.post('/api/settings', wrap(async (req, res) => {
 
 app.post('/api/sync', wrap(async (_req, res) => res.json(await syncEbay())));
 
+// ---------- eBay listing analytics (Products page) ----------
+app.get('/api/listings', wrap(async (_req, res) => res.json(await listingAnalytics())));
+app.post('/api/listings/sync', wrap(async (_req, res) => res.json(await syncListings())));
+
 // ---------- Connect eBay (OAuth authorization-code flow) ----------
 // eBay Developer portal -> User Tokens -> "Get a Token from eBay via Your Application" -> add a RuName whose
 // "Your auth accepted URL" is https://<this app>/api/ebay/callback, then set EBAY_RUNAME to that RuName.
@@ -294,6 +300,13 @@ app.post('/api/demo/clear', wrap(async (_req, res) => {
   await q("delete from amazon_lines where amazon_order_id like 'DEMO-%'");
   await q("delete from amazon_imports where filename like 'demo-%'");
   res.json({ ok: true });
+}));
+
+// ---------- Ask AI: exact figures for a question (read-only). The language model runs in the browser. ----------
+app.post('/api/ask', wrap(async (req, res) => {
+  const question = String(req.body?.question || '').slice(0, 1000);
+  if (!question.trim()) return res.status(400).json({ error: 'Ask a question' });
+  res.json(await ask(question, req.body?.context || null, req.body?.route || null));
 }));
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));

@@ -100,7 +100,7 @@ export function renderSettlement(el) {
     <div class="card settle-card c-5">
       <div class="settle-head">
         <span class="eyebrow">${ICONS.wallet} ${monthLabel(selected)} settlement</span>
-        <span class="pill ${duePillCls}" title="Settlements are due on the ${dueDay}th of the following month">${ICONS.calendar} ${due.kind === 'paid' ? due.text : due.kind === 'later' || v.paid !== null ? `Due ${due.label}` : `${due.text} · ${due.label}`}</span>
+        <span class="pill ${duePillCls}" title="Settlements are due on the ${dueDay}th of each month">${ICONS.calendar} ${due.kind === 'paid' ? due.text : due.kind === 'later' || v.paid !== null ? `Due ${due.label}` : `${due.text} · ${due.label}`}</span>
       </div>
       <div class="settle-who">${avatar(v.from)}<b>${esc(v.from)}</b><span class="muted">sends</span>${ICONS.arrowRight.replace('<svg', '<svg class="arrow"')}${avatar(v.to)}<b>${esc(v.to)}</b></div>
       <div class="settle-amt num" id="st-value">${money(v.amount, 2)}</div>

@@ -81,11 +81,12 @@ export function downloadCsv(filename, rows, columns) {
 
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-// Partner settlement for calendar month `month` (YYYY-MM) is due on `day` of the FOLLOWING month.
+// Partner settlement for calendar month `month` (YYYY-MM) is due on `day` of that SAME month (Sep is due Sep 26).
+// Sales after that day still belong to the month; whatever the payment didn't cover shows as still owed.
 export const settlementDueDate = (month, day = 26) => {
   const [y, m] = month.split('-').map(Number);
   const d = Math.min(Math.max(1, Number(day) || 26), 28);
-  return new Date(y, m, d); // m is 1-based, so index m is the next month
+  return new Date(y, m - 1, d);
 };
 export function dueStatus(due, { paid = false } = {}) {
   const days = Math.round((startOfDay(due) - startOfDay(new Date())) / DAY);

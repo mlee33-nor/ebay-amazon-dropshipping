@@ -134,6 +134,7 @@ export async function buildDataset() {
     }
     const same = byMonth.get(saleMonth) || { refund: 0, credit: 0, amazonRefund: 0 };
     const totalTxRefund = txs.reduce((s, t) => s + (num(t.amount) || 0), 0);
+    const lastRefundAt = txs.map((t) => t.transaction_at).filter(Boolean).map(iso).sort().at(-1) || rets.map((r) => r.created_at).filter(Boolean).sort().at(-1) || null;
     const totalRefund = hasTx ? totalTxRefund : num(o.refund_total) || 0;
 
     // Refunded on eBay and nothing bought on Amazon: no Amazon cost was ever incurred. Months covered by a
@@ -225,6 +226,7 @@ export async function buildDataset() {
       raw_fees: rawFees,
       fee_credit: r2(num(o.fee_credit) || 0),
       raw_refunds: r2(totalRefund),
+      last_refund_at: totalRefund > 0 ? lastRefundAt : null,
       ad_fees: adFees,
       amazon_cost: amazonCost,
       amazon_cost_unknown: amazonCostUnknown,

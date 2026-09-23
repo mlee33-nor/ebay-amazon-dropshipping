@@ -3,6 +3,10 @@
 import { q, one, getSetting, setSetting } from './db.js';
 import { runMatcher } from './matcher.js';
 import { matchLedger } from './ledger.js';
+import { syncListings } from './listings.js';
+
+// Listing data changes slowly and eBay's analytics calls are rate-limited: refresh it every few hours, not every sync
+const LISTINGS_EVERY_MS = Number(process.env.LISTINGS_SYNC_HOURS || 3) * 3600_000;
 
 // Overridable for sandbox / the end-to-end test's mock server
 const API = process.env.EBAY_API_BASE || 'https://api.ebay.com';
@@ -10,6 +14,13 @@ const APIZ = process.env.EBAY_APIZ_BASE || process.env.EBAY_API_BASE || 'https:/
 const MARKETPLACE = process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
 
 const SCOPE_SETS = [
+  [
+    'https://api.ebay.com/oauth/api_scope',
+    'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
+    'https://api.ebay.com/oauth/api_scope/sell.finances',
+    'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
+  ],
+  // Connections made before listing analytics was added: keep fees until the seller reconnects
   [
     'https://api.ebay.com/oauth/api_scope',
     'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
@@ -105,6 +116,12 @@ async function getAccessToken() {
     if (body.error !== 'invalid_scope') break; // only retry with fewer scopes on scope errors
   }
   throw new Error(`eBay token refresh failed: ${lastErr}`);
+}
+
+// OAuth user token + the scopes it was granted, for read-only modules outside this file (src/listings.js)
+export async function ebayUserToken() {
+  const token = await getAccessToken();
+  return { token, scopes: tokenCache.scopes || [] };
 }
 
 async function ebayGet(url, { iaf = false } = {}) {
@@ -405,6 +422,8 @@ export async function syncEbay() {
       const m = await runMatcher();
       log.push(`matcher: ${m.linked} new links`);
       log.push(`ledger: ${await matchLedger()} sheet rows matched to eBay orders`);
+      const lastListings = await getSetting('listings_last_sync');
+      if (!lastListings?.at || Date.now() - new Date(lastListings.at).getTime() > LISTINGS_EVERY_MS) await syncListings({ log }); // never throws
       await q('update sync_log set finished_at = now(), ok = true, message = $2, orders = $3, returns = $4 where id = $1', [
         id, log.join(' · '), orders, returns,
       ]);

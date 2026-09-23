@@ -233,6 +233,57 @@ create table if not exists amazon_refunds (
   received_at     timestamptz,
   primary key (message_id, amazon_order_id)
 );
+-- eBay listing analytics (src/listings.js)
+create table if not exists ebay_listings (
+  item_id            text primary key,
+  title              text,
+  sku                text,
+  price              numeric(12,2),
+  currency           text,
+  quantity           int,
+  quantity_available int,
+  quantity_sold      int default 0,
+  start_time         timestamptz,
+  listing_url        text,
+  listing_type       text,
+  watch_count        int,
+  hit_count          int,
+  first_seen         timestamptz default now(),
+  last_seen          timestamptz default now(),
+  ended              boolean default false,
+  ended_at           timestamptz
+);
+create index if not exists ebay_listings_ended_idx on ebay_listings(ended);
+create table if not exists listing_snapshots (
+  day            date primary key,
+  active_count   int not null default 0,
+  total_watchers int default 0,
+  total_views    int,
+  views_source   text,
+  avg_price      numeric(12,2),
+  units_sold     int default 0,
+  taken_at       timestamptz default now()
+);
+create table if not exists listing_traffic_daily (
+  day          date primary key,
+  impressions  int,
+  views        int,
+  ctr          numeric(10,4),
+  conversion   numeric(10,4),
+  transactions int,
+  synced_at    timestamptz default now()
+);
+create table if not exists listing_traffic (
+  item_id      text primary key,
+  period_start date,
+  period_end   date,
+  impressions  int,
+  views        int,
+  ctr          numeric(10,4),
+  conversion   numeric(10,4),
+  transactions int,
+  synced_at    timestamptz default now()
+);
 `;
 
 export async function initDb() {
