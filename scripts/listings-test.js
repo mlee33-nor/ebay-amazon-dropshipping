@@ -409,7 +409,8 @@ try {
   } else console.log('  SKIP  syncEbay() hand-off (runs once the ebay.js integration snippets are applied)');
   await check('read-only toward eBay: only token, GetMyeBaySelling and GET reports were called', () => {
     const allowed = new Set(['POST /identity/v1/oauth2/token', 'POST /ws/api.dll', 'GET /sell/analytics/v1/traffic_report',
-      'GET /sell/fulfillment/v1/order', 'GET /sell/finances/v1/transaction', 'GET /post-order/v2/return/search']);
+      'GET /sell/fulfillment/v1/order', 'GET /sell/finances/v1/transaction', 'GET /post-order/v2/return/search',
+      'GET /sell/marketing/v1/ad_campaign']); // Promoted Listings (read-only), covered by scripts/promotions-test.js
     assert.deepEqual([...new Set(hits)].filter((h) => !allowed.has(h)), []);
     assert.ok(tradingCalls.every((c) => c.callName === 'GetMyeBaySelling'));
   });

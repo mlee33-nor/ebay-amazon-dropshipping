@@ -12,6 +12,7 @@ import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
 import { ask } from './ask.js';
 import { syncListings, listingAnalytics } from './listings.js';
+import { promotionAnalytics, unpromotedListings } from './promotions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -209,6 +210,17 @@ app.post('/api/sync', wrap(async (_req, res) => res.json(await syncEbay())));
 // ---------- eBay listing analytics (Products page) ----------
 app.get('/api/listings', wrap(async (_req, res) => res.json(await listingAnalytics())));
 app.post('/api/listings/sync', wrap(async (_req, res) => res.json(await syncListings())));
+app.get('/api/promotions', wrap(async (_req, res) => res.json(await promotionAnalytics())));
+// Every active listing that isn't promoted, as a CSV to add them to a campaign in Seller Hub
+app.get('/api/promotions/not-promoted.csv', wrap(async (_req, res) => {
+  const cell = (v) => { const s = v === null || v === undefined ? '' : v instanceof Date ? v.toISOString().slice(0, 10) : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = await unpromotedListings();
+  const head = ['Item ID', 'Title', 'Price', 'Listed', 'Sold', 'Views (30 days)', 'Times shown (30 days)', 'Link'];
+  const body = rows.map((r) => [r.item_id, r.title, r.price, r.started, r.quantity_sold, r.views_30d, r.shown_30d, r.listing_url].map(cell).join(','));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="not-promoted-listings.csv"');
+  res.send([head.join(','), ...body].join('\n'));
+}));
 
 // ---------- Connect eBay (OAuth authorization-code flow) ----------
 // eBay Developer portal -> User Tokens -> "Get a Token from eBay via Your Application" -> add a RuName whose

@@ -7,6 +7,7 @@
 import { q, getSetting, setSetting } from './db.js';
 import { businessDay } from './time.js';
 import * as ebay from './ebay.js'; // namespace import: works before ebayUserToken is exported (clear error instead of a crash)
+import { syncPromotions } from './promotions.js';
 
 const ANALYTICS_SCOPE = 'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly';
 const api = () => process.env.EBAY_API_BASE || 'https://api.ebay.com';
@@ -343,6 +344,7 @@ export function syncListings({ log = null, auth = defaultAuth, now = () => new D
           lines.push(e.status === 401 || e.status === 403 ? `${TRAFFIC_SKIPPED} [${e.message}]` : `listing traffic: skipped (${e.message})`);
         }
       }
+      out.promotions = await syncPromotions({ token, scopes, lines, syncStart }); // never throws
       await writeSnapshot(syncStart);
       out.ok = true;
     } catch (e) {

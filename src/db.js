@@ -284,6 +284,28 @@ create table if not exists listing_traffic (
   transactions int,
   synced_at    timestamptz default now()
 );
+-- Promoted Listings (src/promotions.js)
+create table if not exists ebay_campaigns (
+  campaign_id    text primary key,
+  name           text,
+  status         text,
+  funding_model  text,
+  bid_percentage numeric(6,2),
+  rules_based    boolean default false,
+  start_date     timestamptz,
+  end_date       timestamptz,
+  synced_at      timestamptz default now()
+);
+create table if not exists listing_ads (
+  listing_id     text not null,
+  campaign_id    text not null,
+  ad_id          text,
+  ad_status      text,
+  bid_percentage numeric(6,2),
+  synced_at      timestamptz default now(),
+  primary key (listing_id, campaign_id)
+);
+create index if not exists listing_ads_campaign_idx on listing_ads(campaign_id);
 `;
 
 export async function initDb() {

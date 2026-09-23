@@ -19,6 +19,14 @@ const SCOPE_SETS = [
     'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
     'https://api.ebay.com/oauth/api_scope/sell.finances',
     'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
+    'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
+  ],
+  // Connections made before Promoted Listings was added: keep listing analytics until the seller reconnects
+  [
+    'https://api.ebay.com/oauth/api_scope',
+    'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
+    'https://api.ebay.com/oauth/api_scope/sell.finances',
+    'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
   ],
   // Connections made before listing analytics was added: keep fees until the seller reconnects
   [
