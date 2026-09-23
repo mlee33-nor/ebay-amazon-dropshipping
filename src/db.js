@@ -147,6 +147,23 @@ create table if not exists settings (
   value jsonb
 );
 
+-- Every eBay Finances money record, stored once by transaction id, so per-order fees/ad fees/refunds are
+-- always the sum of ALL records (a later sync window can never wipe an earlier charge or credit)
+create table if not exists ebay_transactions (
+  transaction_id  text primary key,
+  order_id        text,
+  type            text,
+  fee_type        text,
+  booking_entry   text,
+  amount          numeric(12,2) default 0,
+  fee_amount      numeric(12,2) default 0,
+  transaction_at  timestamptz,
+  raw             jsonb
+);
+create index if not exists ebay_transactions_order_idx on ebay_transactions(order_id);
+alter table ebay_orders add column if not exists fee_credit numeric(12,2) default 0;
+alter table order_overrides add column if not exists confirmed_separate boolean default false;
+
 create table if not exists sync_log (
   id          serial primary key,
   started_at  timestamptz default now(),

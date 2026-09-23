@@ -7,6 +7,7 @@ import { simpleParser } from 'mailparser';
 import { q, one, getSetting, setSetting } from './db.js';
 import { runMatcher } from './matcher.js';
 import { extractZip } from './amazon.js';
+import { businessDay } from './time.js';
 
 export function emailConfigured() {
   return Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASSWORD);
@@ -133,12 +134,14 @@ async function ingest(messageId, receivedAt, subject, p) {
   if (p.kind === 'order') {
     if (!p.orderIds.length) { ok = false; note = 'no order number found'; }
     else if (p.orderIds.length > 1 && p.total !== null) { ok = false; note = `one email, ${p.orderIds.length} orders, only one total. Add costs in Editor`; }
-    else if (p.total === null) { ok = false; note = 'no order total found'; }
     else {
       const id = p.orderIds[0];
       const hasCsv = await one("select 1 from amazon_lines where amazon_order_id = $1 and coalesce(source,'csv') = 'csv' limit 1", [id]);
       if (hasCsv) note = 'already imported from CSV';
       else {
+        // A $0.00 / missing Grand Total (paid with gift card balance or points) is stored as UNKNOWN cost: the
+        // order can still be linked to its sale, and the sale waits for the cost to be entered - never $0
+        if (p.total === null) { ok = false; note = 'Grand Total missing or $0.00 (gift card / points?) - enter the Amazon cost for this sale'; }
         const title = p.items.map((i) => i.title).join(' | ')
           || (p.category ? `${p.category} (${p.itemCount} item${p.itemCount > 1 ? 's' : ''}, title not in email)` : subject);
         const qty = p.items.reduce((s, i) => s + (i.quantity || 1), 0) || p.itemCount || 1;
@@ -149,7 +152,7 @@ async function ingest(messageId, receivedAt, subject, p) {
            on conflict (line_key) do update set title = excluded.title, quantity = excluded.quantity, line_total = excluded.line_total,
              tax = excluded.tax, ship_name = excluded.ship_name, ship_address = excluded.ship_address, ship_zip = excluded.ship_zip,
              ship_state = excluded.ship_state, updated_at = now()`,
-          [`${id}|email|1`, id, (receivedAt || new Date()).toISOString().slice(0, 10), title.slice(0, 500), qty, p.tax, p.total,
+          [`${id}|email|1`, id, businessDay(receivedAt || new Date()), title.slice(0, 500), qty, p.tax, p.total,
             p.shipName || null, p.shipText || null, p.zip || null, p.state || null, JSON.stringify({ subject, parsed: p })]
         );
       }

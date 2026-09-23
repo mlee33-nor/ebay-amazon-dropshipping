@@ -50,7 +50,10 @@ app.post('/api/email/inbound', async (req, res) => {
   }
 });
 app.get('/login', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'login.html')));
+// Accounting data must never be open on the internet: in production, no password means no access
+const PRODUCTION = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production');
 app.use((req, res, next) => {
+  if (!PASSWORD && PRODUCTION && req.path !== '/api/health') return res.status(503).send('DASHBOARD_PASSWORD is not set. Add it in Railway -> Variables.');
   if (!PASSWORD) return next();
   if (req.path === '/login' || req.path.startsWith('/css/') || req.path === '/favicon.svg') return next();
   if (readCookie(req, 'dd_session') === sessionValue()) return next();
@@ -126,7 +129,7 @@ app.post('/api/amazon/import', upload.array('files', 20), wrap(async (req, res) 
 }));
 
 // ---------- editor saves ----------
-const OVERRIDE_FIELDS = ['cost_override', 'extra_cost', 'amazon_refund', 'fee_override', 'refund_override', 'notes', 'excluded'];
+const OVERRIDE_FIELDS = ['cost_override', 'extra_cost', 'amazon_refund', 'fee_override', 'refund_override', 'notes', 'excluded', 'confirmed_separate'];
 
 app.post('/api/overrides', wrap(async (req, res) => {
   const changes = req.body?.changes || [];
@@ -237,6 +240,12 @@ app.post('/api/expenses', wrap(async (req, res) => {
   for (const c of req.body?.changes || []) {
     if (c._delete && c.id) { await q('delete from expenses where id = $1', [c.id]); continue; }
     if (!/^\d{4}-\d{2}$/.test(c.month || '') || !String(c.category || '').trim()) continue;
+    // Money must be a positive amount, and adding a name that already exists that month never overwrites it
+    if (!(Number(c.amount) > 0)) return res.status(400).json({ error: `Amount for "${c.category}" must be more than $0` });
+    if (!c.id) {
+      const dup = await one('select id from expenses where month = $1 and lower(trim(category)) = lower(trim($2))', [c.month, c.category]);
+      if (dup) return res.status(409).json({ error: `"${c.category}" already exists in ${c.month}. Edit its amount instead.` });
+    }
     const vals = [c.month, String(c.category).trim(), Number(c.amount) || 0, c.note || null, c.paid_by === 'amazon' ? 'amazon' : 'seller'];
     if (c.id) await q('update expenses set month=$2, category=$3, amount=$4, note=$5, paid_by=$6, updated_at=now() where id=$1', [c.id, ...vals]);
     else await q(`insert into expenses (month, category, amount, note, paid_by) values ($1,$2,$3,$4,$5)

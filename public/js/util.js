@@ -90,12 +90,41 @@ export function dueStatus(due, { paid = false } = {}) {
   const days = Math.round((startOfDay(due) - startOfDay(new Date())) / DAY);
   const label = fmtDate(due, { month: 'short', day: 'numeric', year: 'numeric' });
   const plural = (n) => `${n} day${n === 1 ? '' : 's'}`;
-  if (paid) return { kind: 'paid', days, label, text: `Due ${label}` };
+  if (paid) return { kind: 'paid', days, label, text: `${days < 0 ? 'Was due' : 'Due'} ${label}` };
   if (days < 0) return { kind: 'overdue', days, label, text: `Overdue by ${plural(-days)}` };
   if (days === 0) return { kind: 'soon', days, label, text: 'Due today' };
   if (days <= 7) return { kind: 'soon', days, label, text: `Due in ${plural(days)}` };
   return { kind: 'later', days, label, text: `Due ${label}` };
 }
+
+// Unambiguous month label for a YYYY-MM key: "Sep 2026" (short) or "September 2026" (long)
+export const monthLabel = (m, style = 'short') => {
+  const [y, mo] = String(m).split('-').map(Number);
+  return new Date(y, mo - 1, 1).toLocaleDateString('en-US', { month: style, year: 'numeric' });
+};
+
+// Direction-aware view of one settleMonth() result. sellerSends < 0 means the month lost more than the
+// Amazon partner's reimbursement, so the Amazon partner (A) owes the eBay partner (B) instead.
+// A payment in the reverse direction is stored as a negative `paid`, so balance = sellerSends - paid still holds;
+// amounts are compared by size so a positive paid entered for a reverse month still counts toward it.
+export function settleView(s, A, B) {
+  const reverse = s.sellerSends < -0.009;
+  const amount = Math.abs(s.sellerSends);
+  const paid = s.paid === null || s.paid === undefined ? null : Math.abs(s.paid);
+  const outstanding = Math.round((amount - (paid || 0)) * 100) / 100; // > 0: payer still owes, < 0: payer overpaid
+  const nothingDue = amount <= 0.009;
+  const fullyPaid = paid !== null && Math.abs(outstanding) < 0.01;
+  return {
+    reverse, amount, paid, outstanding, nothingDue, fullyPaid,
+    settled: nothingDue || (paid !== null && outstanding <= 0.009),
+    from: reverse ? A : B,
+    to: reverse ? B : A,
+    signedOwed: reverse ? -outstanding : outstanding, // > 0: B owes A, < 0: A owes B (summable across months)
+  };
+}
+
+// Human-readable id for an order. Monthly-sheet rows carry an internal "LEDGER:…" key that is never shown.
+export const orderLabel = (o) => (o.source === 'ledger' ? `Monthly sheet${o.ebay_order_id ? ` · eBay ${o.ebay_order_id}` : ''}` : o.order_id);
 
 // A sync is "in progress" while its log row has no finished_at; only a finished row can be a failure.
 export const syncInProgress = (s) => Boolean(s?.running || (s?.last && s.last.finished_at === null));

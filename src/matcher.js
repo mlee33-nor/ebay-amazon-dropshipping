@@ -3,6 +3,7 @@
 // Title similarity alone never auto-links - it only produces suggestions for manual review.
 // Amazon orders that never link are ignored by every metric.
 import { q, getSetting } from './db.js';
+import { businessDay } from './time.js';
 
 const STOP = new Set(
   'the a an and or for with of to in on by new pack pcs piece set x inch in. oz lb count ct size color black white'.split(' ')
@@ -39,10 +40,10 @@ const nameParts = (n) =>
     .split(/\s+/)
     .filter((t) => t.length > 1);
 
+// Both sides as calendar days in the business time zone (Amazon order dates are stored that way too)
 function dayDiff(amazonDate, ebayCreated) {
   const a = new Date(`${amazonDate}T12:00:00Z`).getTime();
-  const e = new Date(ebayCreated);
-  const eDay = Date.UTC(e.getUTCFullYear(), e.getUTCMonth(), e.getUTCDate(), 12);
+  const eDay = new Date(`${businessDay(ebayCreated)}T12:00:00Z`).getTime();
   return Math.round((a - eDay) / 86400_000);
 }
 
@@ -109,6 +110,39 @@ export function scorePair(az, eb, windowBefore = 1, windowAfter = 7) {
   else if (diff >= 0 && diff <= 3) score += 5;
   reasons.push(diff === 0 ? 'same day' : `${diff}d after sale`);
   return { score, evidence, strong, reasons: reasons.join(', '), titleSim: bestSim };
+}
+
+// Unlinked Amazon orders in the shape scorePair expects (also used by the dataset to avoid assuming a refunded
+// sale had no purchase when an unlinked Amazon order could belong to it)
+export async function loadUnlinkedAmazon() {
+  return (await loadCandidatesAmazon()).amazon;
+}
+
+async function loadCandidatesAmazon() {
+  const homeZips = ((await getSetting('home_zips')) || []).map((z) => String(z).slice(0, 5));
+  const azRows = await q(
+    `select l.amazon_order_id, min(l.order_date) as order_date,
+            string_agg(coalesce(l.ship_name,'') || ' ' || coalesce(l.ship_address,''), ' ') as ship_text,
+            max(l.ship_zip) as zip, max(l.ship_state) as state, sum(l.line_total) as total,
+            string_agg(coalesce(l.tracking,''), ' ') as tracking,
+            array_agg(l.title) as titles, bool_and(l.ignored) as all_ignored
+     from amazon_lines l
+     where not exists (select 1 from order_links k where k.amazon_order_id = l.amazon_order_id)
+     group by l.amazon_order_id`
+  );
+  const amazon = azRows
+    .filter((r) => !r.all_ignored && !(r.zip && homeZips.includes(r.zip)))
+    .map((r) => ({
+      amazon_order_id: r.amazon_order_id,
+      order_date: r.order_date instanceof Date ? r.order_date.toISOString().slice(0, 10) : r.order_date,
+      shipText: r.ship_text,
+      zip: r.zip,
+      state: r.state ? String(r.state).toUpperCase() : null,
+      total: r.total === null ? null : Number(r.total),
+      tracking: trackingTokens(r.tracking),
+      titles: (r.titles || []).filter((t) => t && !/title not in email/i.test(t)),
+    }));
+  return { amazon };
 }
 
 async function loadCandidates() {

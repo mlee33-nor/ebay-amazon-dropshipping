@@ -53,8 +53,8 @@ const mock = http.createServer((req, res) => {
   if (url.pathname === '/sell/fulfillment/v1/order') return send({ orders: [ebayOrder], total: 1 });
   if (url.pathname.endsWith('/shipping_fulfillment')) return send({ fulfillments: [{ shipmentTrackingNumber: 'TBA000E2E0001' }] });
   if (url.pathname === '/sell/finances/v1/transaction') return send({ total: 2, transactions: [
-    { transactionType: 'SALE', orderId, totalFeeAmount: { value: '8.52' }, amount: { value: '51.47' } },
-    { transactionType: 'NON_SALE_CHARGE', feeType: 'AD_FEE', bookingEntry: 'DEBIT', references: [{ referenceId: orderId, referenceType: 'ORDER_ID' }], amount: { value: '1.80' } },
+    { transactionId: 'TX-E2E-1', transactionDate: saleAt.toISOString(), transactionType: 'SALE', orderId, totalFeeAmount: { value: '8.52' }, amount: { value: '51.47' } },
+    { transactionId: 'TX-E2E-2', transactionDate: saleAt.toISOString(), transactionType: 'NON_SALE_CHARGE', feeType: 'AD_FEE', bookingEntry: 'DEBIT', references: [{ referenceId: orderId, referenceType: 'ORDER_ID' }], amount: { value: '1.80' } },
   ] });
   if (url.pathname === '/post-order/v2/return/search') return send({ members: [], total: 0 });
   send({ errors: [{ message: `mock: no route ${url.pathname}` }] }, 404);
@@ -166,6 +166,7 @@ try {
   await q(`delete from order_overrides where order_id like '${E}%'`);
   await q(`delete from ebay_returns where order_id like '${E}%'`);
   await q(`delete from ebay_orders where order_id like '${E}%'`);
+  await q(`delete from ebay_transactions where order_id like '${E}%'`);
   await q(`delete from amazon_lines where amazon_order_id like '${E}%'`);
   await q(`delete from amazon_refunds where amazon_order_id like '${E}%'`);
   await q(`delete from amazon_emails where message_id like '%@e2e.test%'`);

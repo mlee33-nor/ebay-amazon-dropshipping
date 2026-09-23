@@ -17,7 +17,7 @@ export function rangeFor(key, custom, month) {
       const [y, mo] = String(month || '').split('-').map(Number);
       if (!y || !mo) return { start: new Date(now.getFullYear(), now.getMonth(), 1), end };
       const mEnd = new Date(y, mo, 0, 23, 59, 59, 999);
-      return { start: new Date(y, mo - 1, 1), end: mEnd < end ? mEnd : end };
+      return { start: new Date(y, mo - 1, 1), end: mEnd < end ? mEnd : end, month: `${y}-${String(mo).padStart(2, '0')}` };
     }
     case 'custom':
       if (custom?.from && custom?.to) {
@@ -37,7 +37,7 @@ export function previousRange(r) {
 }
 
 export const inRange = (orders, r) =>
-  !r ? [] : orders.filter((o) => {
+  !r ? [] : r.month ? orders.filter((o) => (o.business_month || '') === r.month) : orders.filter((o) => {
     const t = new Date(o.created_at).getTime();
     return (!r.start || t >= r.start.getTime()) && t <= r.end.getTime();
   });
@@ -190,6 +190,7 @@ export const STATUS_META = {
   excluded: { label: 'Excluded', cls: '' },
   in_sheet: { label: 'In monthly sheet', cls: '' },
   before_start: { label: 'Before partnership', cls: '' },
+  check_sheet: { label: 'Check: maybe in sheet', cls: 'warn' },
 };
 
 // Monthly operating costs that fall in a date range. A month fully inside the range counts in full;
@@ -209,7 +210,10 @@ export function opexFor(r, expenses) {
     const to = r.end < mEnd ? r.end : mEnd;
     if (to < from) continue;
     const days = (x, y2) => Math.round((startOfDay(y2) - startOfDay(x)) / DAY) + 1;
-    const share = Math.min(1, days(from, to) / days(mStart, mEnd));
+    // A month covered in full (or the current month through today) counts in full, exactly like the settlement;
+    // a partly covered month counts by its share of the month's days
+    const fullCover = from <= mStart && to >= mEnd;
+    const share = fullCover ? 1 : Math.min(1, days(from, to) / days(mStart, mEndFull));
     const amt = (Number(e.amount) || 0) * share;
     total += amt;
     byCategory.set(e.category, (byCategory.get(e.category) || 0) + amt);

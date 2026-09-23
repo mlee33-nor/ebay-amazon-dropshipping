@@ -12,8 +12,11 @@ export const monthKey = (iso) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
+// The server decides each row's business month (Arizona time), so every viewer settles the same way
+const rowMonth = (o) => o.business_month || monthKey(o.created_at);
+
 export function settleMonth({ month, orders, expenses, settlements = [], splitAmazon = 50 }) {
-  const rows = orders.filter((o) => o.counted && monthKey(o.created_at) === month);
+  const rows = orders.filter((o) => o.counted && rowMonth(o) === month);
   let collected = 0; // what the eBay partner actually received: revenue - eBay final value fees - buyer refunds
   let cogs = 0; // what the Amazon partner paid Amazon, net of Amazon refunds
   let adFees = 0;
@@ -61,6 +64,6 @@ export function settleMonth({ month, orders, expenses, settlements = [], splitAm
 }
 
 export function allMonths(orders, expenses) {
-  const set = new Set([...orders.filter((o) => o.counted).map((o) => monthKey(o.created_at)), ...expenses.map((e) => e.month)]);
+  const set = new Set([...orders.filter((o) => o.counted).map(rowMonth), ...expenses.map((e) => e.month)]);
   return [...set].sort();
 }

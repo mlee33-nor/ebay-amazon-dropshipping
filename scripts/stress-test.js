@@ -85,7 +85,7 @@ for (let i = 0; i < 320; i++) {
   const sale = { orderId, revenue, fee, ad, returned, amazonRefund: 0 };
   ebaySales.push(sale);
 
-  if (rnd() < 0.04) { stats.noEmail++; continue; } // purchase email never arrives (yet)
+  if (rnd() < 0.04) { stats.noEmail++; if (returned) { trueCost.set(orderId, 0); sale.fee = Math.min(fee, 0.4); } continue; } // purchase email never arrives (yet)
   const lag = rnd() < 0.7 ? 0 : rnd() < 0.67 ? 1 : rnd() < 0.8 ? Math.floor(2 + rnd() * 2) : 5;
   stats.lag[Math.min(5, lag)]++;
   const buyAt = new Date(at.getTime() + lag * 86400_000 + rnd() * 3 * 3600_000);
@@ -142,16 +142,21 @@ const shouldLink = [...truth.values()].filter(Boolean).length;
 const data = await buildDataset();
 let profitMismatch = 0; let countedWrongCost = 0; let counted = 0; let computedProfit = 0; let trueProfit = 0;
 const mismatches = [];
+// A sale's profit is its own row plus any refund rows booked in later months
+const eventNet = new Map();
+for (const o of data) if (o.source === 'refund' && o.counted) eventNet.set(o.refund_of, (eventNet.get(o.refund_of) || 0) + o.net);
 for (const o of data) {
+  if (o.source !== 'ebay') continue;
   const s = ebaySales.find((x) => x.orderId === o.order_id);
   const tc = trueCost.get(o.order_id);
   if (!o.counted) continue;
   counted++;
   const refunds = s.returned ? s.revenue : 0;
   const expected = r2(s.revenue - s.fee - s.ad - tc - refunds + s.amazonRefund);
-  computedProfit += o.net; trueProfit += expected;
+  const fullNet = r2(o.net + (eventNet.get(o.order_id) || 0));
+  computedProfit += fullNet; trueProfit += expected;
   if (Math.abs(o.cost - tc) > 0.005) countedWrongCost++;
-  if (Math.abs(o.net - expected) > 0.005) { profitMismatch++; mismatches.push({ order: o.order_id, net: o.net, expected, cost: o.cost, trueCost: tc }); }
+  if (Math.abs(fullNet - expected) > 0.005) { profitMismatch++; mismatches.push({ order: o.order_id, net: fullNet, expected, cost: o.cost, trueCost: tc }); }
 }
 const awaiting = data.filter((o) => o.status === 'awaiting_cost').length;
 const review = (await getSuggestions(1000)).length;
@@ -164,7 +169,7 @@ console.log(`\nLINKS   right ${right}  WRONG ${wrong}  (personal/gift linked: ${
 console.log(`SALES   ${counted} counted in profit · ${awaiting} awaiting cost (excluded, not guessed)`);
 console.log(`PROFIT  computed $${r2(computedProfit)} vs true $${r2(trueProfit)} on counted sales · ${profitMismatch} per-sale mismatches · ${countedWrongCost} counted with wrong cost (${partial} partial multi-order)`);
 if (wrongList.length) console.log('wrong links:', wrongList.slice(0, 8));
-if (mismatches.length) console.log('profit mismatches:', mismatches.slice(0, 8));
+if (mismatches.length) { console.log('profit mismatches:', mismatches.slice(0, 8)); /*DEBUGMISMATCH*/ for (const mm of mismatches.slice(0,3)) { const o = data.find((x)=>x.order_id===mm.order); console.log(JSON.stringify({id:o.order_id, units:o.units, linkedUnits:o.amazon_units_linked, partial:o.amazon_cost_partial, source:o.cost_source, az:o.amazon_orders.map(a=>({id:a.amazon_order_id, cost:a.cost, lines:a.lines.map(l=>({q:l.quantity,st:l.status,c:l.cost}))}))})); } }
 const pass = wrong === 0 && profitMismatch === 0;
 console.log(pass ? '\nSTRESS: PASS (no wrong links, every counted sale exact)' : '\nSTRESS: FAIL');
 await closeDb();

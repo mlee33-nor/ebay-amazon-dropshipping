@@ -6,7 +6,7 @@
 import { parse } from 'csv-parse/sync';
 import { q, one } from './db.js';
 import { parseMoney } from './amazon.js';
-import { titleSimilarity } from './matcher.js';
+import { businessMonth, prevMonth } from './time.js';
 
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
@@ -15,15 +15,12 @@ export function isLedgerCsv(buffer) {
   return /TRANSACTION LOG/i.test(head) || (/^\s*"?Item Name"?\s*,/im.test(head) && /Amazon Cost/i.test(head));
 }
 
-export function monthFrom(filename, rows) {
-  const m = String(filename).toUpperCase().match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s*'?(\d{2}|\d{4})\b/);
-  if (m) {
-    const y = m[2].length === 2 ? `20${m[2]}` : m[2];
-    return `${y}-${String(MONTHS.indexOf(m[1]) + 1).padStart(2, '0')}`;
-  }
-  const t = (rows[0] || []).join(' ').toUpperCase().match(/(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{4})/);
-  if (t) return `${t[2]}-${String(MONTHS.indexOf(t[1]) + 1).padStart(2, '0')}`;
-  return null;
+export function monthFrom(filename) {
+  // Only the file name is trusted: every sheet's title row says "JULY 2026" even for other months
+  const m = String(filename).toUpperCase().match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*[\s_-]*'?(\d{2}|\d{4})\b/);
+  if (!m) return null;
+  const y = m[2].length === 2 ? `20${m[2]}` : m[2];
+  return `${y}-${String(MONTHS.indexOf(m[1]) + 1).padStart(2, '0')}`;
 }
 
 const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 90);
@@ -37,9 +34,9 @@ export function parseLedgerCsv(buffer, filename) {
   let text = buffer.toString('utf8');
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   const rows = parse(text, { relax_column_count: true, relax_quotes: true, skip_empty_lines: false });
-  const month = monthFrom(filename, rows);
+  const month = monthFrom(filename);
   if (!month) {
-    const err = new Error('Could not tell which month this sheet is for. Put the month in the file name, e.g. "SEP 26".');
+    const err = new Error('Which month is this sheet? Put the month in the file name (e.g. "infinity business - SEP 26.csv") and upload again. Nothing was changed.');
     err.status = 400;
     throw err;
   }
@@ -208,12 +205,11 @@ export async function matchLedger() {
   );
   const pairs = [];
   for (const e of entries) {
-    const [y, m] = e.month.split('-').map(Number);
-    const from = Date.UTC(y, m - 1, 1) - (e.is_refund ? 45 : 3) * 86400_000;
-    const to = Date.UTC(y, m, 1) + 3 * 86400_000;
+    // Sale rows pair only with a sale from the same business month; a refund row can point at a sale from
+    // the same month or the month before (the refund often lands a few weeks after the sale)
+    const allowed = e.is_refund ? new Set([e.month, prevMonth(e.month)]) : new Set([e.month]);
     for (const o of orders) {
-      const t = new Date(o.created_at).getTime();
-      if (t < from || t > to) continue;
+      if (!allowed.has(businessMonth(o.created_at))) continue;
       const sim = sheetTitleMatch(e.title, o.title);
       if (sim < 0.6) continue;
       if (e.is_refund) {

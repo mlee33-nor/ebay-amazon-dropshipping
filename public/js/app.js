@@ -1,4 +1,4 @@
-import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, ago, api, toast, downloadCsv, ICONS, DAY, ymd, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed } from './util.js';
+import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, ago, api, toast, downloadCsv, ICONS, DAY, ymd, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel } from './util.js';
 import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor } from './metrics.js';
 import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer } from './charts.js';
 import { renderEditor } from './editor.js';
@@ -110,6 +110,11 @@ function renderRangeSeg() {
   $('#month-pick').classList.toggle('hidden', state.range !== 'month');
   $('#from-date').value = state.custom.from;
   $('#to-date').value = state.custom.to;
+  requestAnimationFrame(() => {
+    const on = $('#range-seg button.on');
+    if (on && $('#range-seg').scrollWidth > $('#range-seg').clientWidth) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    updateSegFade($('#range-seg'));
+  });
 }
 $('#range-seg').addEventListener('click', (e) => {
   const b = e.target.closest('button');
@@ -122,10 +127,33 @@ $('#range-seg').addEventListener('click', (e) => {
 $('#month-pick').addEventListener('change', (e) => { state.month = e.target.value; store('dd_month', state.month); renderPage(); });
 for (const id of ['#from-date', '#to-date'])
   $(id).addEventListener('change', () => {
-    state.custom = { from: $('#from-date').value, to: $('#to-date').value };
+    let from = $('#from-date').value;
+    let to = $('#to-date').value;
+    const valid = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v);
+    // A cleared or half-typed date keeps the previous range instead of silently falling back to 30 days
+    if (!valid(from) || !valid(to)) {
+      $('#from-date').value = state.custom.from;
+      $('#to-date').value = state.custom.to;
+      toast('Pick both a From and a To date. The previous range is kept.', 'bad');
+      return;
+    }
+    if (from > to) { [from, to] = [to, from]; toast('From was after To, so the dates were swapped'); }
+    state.custom = { from, to };
+    $('#from-date').value = from;
+    $('#to-date').value = to;
     store('dd_custom', state.custom);
     renderPage();
   });
+
+// Range bar on phones: fade whichever edge has more presets hidden behind it, so it reads as scrollable
+function updateSegFade(seg) {
+  if (!seg) return;
+  const over = seg.scrollWidth - seg.clientWidth > 2;
+  seg.classList.toggle('scroll-fade-l', over && seg.scrollLeft > 2);
+  seg.classList.toggle('scroll-fade-r', over && seg.scrollLeft < seg.scrollWidth - seg.clientWidth - 2);
+}
+$('#range-seg').addEventListener('scroll', () => updateSegFade($('#range-seg')), { passive: true });
+window.addEventListener('resize', () => updateSegFade($('#range-seg')));
 
 function setThemeIcon() {
   const dark = (document.documentElement.dataset.theme || 'dark') === 'dark';
@@ -203,7 +231,7 @@ export function renderPage() {
   const p = PAGES.find((x) => x.id === state.page);
   $('#page-title').textContent = p.label;
   const r = range();
-  $('#page-sub').textContent = p.noRange ? p.sub : `${p.sub} · ${r.start ? `${fmtDate(r.start)} – ${fmtDate(r.end)}` : 'All time'}`;
+  $('#page-sub').textContent = p.noRange ? p.sub : `${p.sub} · ${r.start ? rangeText(r) : 'All time'}`;
   $('#range-seg').parentElement.querySelector('.seg').classList.toggle('hidden', Boolean(p.noRange));
   $('#custom-range').classList.toggle('hidden', Boolean(p.noRange) || state.range !== 'custom');
   $('#month-pick').classList.toggle('hidden', Boolean(p.noRange) || state.range !== 'month');
@@ -217,6 +245,13 @@ export function renderPage() {
   if (!state.data) { el.innerHTML = skeleton(); return; }
   const fn = { overview, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
+}
+
+// "Sep 1 – Sep 22", or with years when the range crosses a year boundary / isn't this year: "Sep 23, 2025 – Sep 22, 2026"
+function rangeText(r) {
+  const withYear = r.start.getFullYear() !== r.end.getFullYear() || r.end.getFullYear() !== new Date().getFullYear();
+  const f = withYear ? { month: 'short', day: 'numeric', year: 'numeric' } : undefined;
+  return `${fmtDate(r.start, f)} – ${fmtDate(r.end, f)}`;
 }
 
 const skeleton = () => `<div class="sk-grid" aria-busy="true" aria-label="Loading">
@@ -256,7 +291,20 @@ const card = (title, sub, body, { cls = '', right = '', id = '' } = {}) =>
 
 const legend = (items) => `<div class="legend">${items.map(([c, l, line]) => `<span><i class="${line ? 'line' : ''}" style="background:var(${c})"></i>${l}</span>`).join('')}</div>`;
 
-function statusPill(s) {
+// Refund money split by what it really is: refunded to buyers (eBay orders) vs the eBay refund fee that
+// monthly-sheet refund rows record (the sheet's -$0.40 lines)
+export function refundSplit(orders) {
+  let buyer = 0;
+  let fee = 0;
+  for (const o of orders) {
+    if (o.source === 'ledger') fee += o.refunds || 0;
+    else buyer += o.refunds || 0;
+  }
+  return { buyer, fee };
+}
+const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded to buyer');
+
+export function statusPill(s) {
   const m = STATUS_META[s] || { label: s, cls: '' };
   return `<span class="pill ${m.cls}">${m.label}</span>`;
 }
@@ -276,7 +324,7 @@ function bindGran(el) {
 }
 const bucketLabel = (k, gran) => {
   if (k.includes('T')) { const h = Number(k.slice(11, 13)); return h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`; }
-  if (gran === 'month') { const [y, m] = k.split('-'); return new Date(+y, +m - 1, 1).toLocaleDateString('en-US', { month: 'short', year: '2-digit' }); }
+  if (gran === 'month') return monthLabel(k);
   const [y, m, d] = k.split('-').map(Number);
   const s = new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   return gran === 'week' ? `Wk ${s}` : s;
@@ -340,6 +388,14 @@ function overview(el) {
   const oxPrev = r.start ? opexFor(previousRange(r), expenses) : { total: 0 };
   const biz = s.net - ox.total;
   const bizPrev = p.net - oxPrev.total;
+  // Monthly-sheet rows are eBay payouts after fees, and their refund rows carry eBay's refund fee, not a buyer refund
+  const split = refundSplit(all.filter((o) => o.counted));
+  const refundFees = split.fee;
+  const sheetRows = all.some((o) => o.counted && o.source === 'ledger');
+  const adPart = `ad fees ${money(s.adFees, 2)}`;
+  const feeFoot = s.fees < 0.005 && sheetRows
+    ? `sheet rows are already net of eBay fees · ${adPart}`
+    : `${pct(s.revenue ? s.fees / s.revenue : null)} of revenue${sheetRows ? ' · sheet rows already net' : ''} · ${adPart}`;
 
   // goal + run rate
   const now = new Date();
@@ -363,32 +419,41 @@ function overview(el) {
   const settleArgs = { orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) };
   const dueDay = state.data.settings.settlement_day ?? 26;
   const allSettled = allMonths(state.data.orders, state.data.books.expenses).map((m) => settleMonth({ month: m, ...settleArgs }));
-  const owedAll = allSettled.reduce((t, x) => t + x.balance, 0);
-  const thisDue = dueStatus(settlementDueDate(monthKey(now), dueDay), { paid: thisSettle.paid !== null && Math.abs(thisSettle.balance) < 0.01 });
+  const view = (x) => settleView(x, A, B);
+  // Net position across every month: > 0 means B owes A, < 0 means A owes B (a loss month can flip the direction)
+  const owedAll = Math.round(allSettled.reduce((t, x) => t + view(x).signedOwed, 0) * 100) / 100;
+  // The card shows the month picked in the range bar (Month range), otherwise the current month
+  const pickedMonth = state.range === 'month' && /^\d{4}-\d{2}$/.test(state.month || '') ? state.month : null;
+  const cardMonth = pickedMonth || monthKey(now);
+  const cardSettle = cardMonth === monthKey(now) ? thisSettle : settleMonth({ month: cardMonth, ...settleArgs });
+  const cv = view(cardSettle);
+  const cardDue = dueStatus(settlementDueDate(cardMonth, dueDay), { paid: cv.fullyPaid });
   const settleStatus = (() => {
-    if (thisSettle.paid === null) {
-      if (thisSettle.sellerSends <= 0.009) return { cls: '', icon: ICONS.info, t: 'Nothing due yet', s: 'No settled sales this month so far' };
-      if (thisDue.kind === 'overdue') return { cls: 'bad', icon: ICONS.alert, t: thisDue.text, s: `Was due ${thisDue.label}` };
-      return { cls: 'warn', icon: ICONS.clock, t: thisDue.kind === 'soon' ? thisDue.text : 'Not paid yet', s: `${esc(B)} sends by ${thisDue.label}` };
+    if (cv.paid === null) {
+      if (cv.nothingDue) return { cls: '', icon: ICONS.info, t: cardMonth === monthKey(now) ? 'Nothing due yet' : 'Nothing to send', s: cardMonth === monthKey(now) ? 'No settled sales this month so far' : 'No amount due for this month' };
+      if (cardDue.kind === 'overdue') return { cls: 'bad', icon: ICONS.alert, t: cardDue.text, s: `${esc(cv.from)} sends ${esc(cv.to)} · was due ${cardDue.label}` };
+      return { cls: 'warn', icon: ICONS.clock, t: cardDue.kind === 'soon' ? cardDue.text : 'Not paid yet', s: `${esc(cv.from)} sends by ${cardDue.label}` };
     }
-    if (Math.abs(thisSettle.balance) < 0.01) return { cls: 'good', icon: ICONS.check, t: 'Paid in full', s: thisSettle.paidAt ? `on ${fmtDate(`${thisSettle.paidAt}T12:00`)}` : 'Recorded on the monthly sheet' };
-    if (thisSettle.balance > 0) return { cls: thisDue.kind === 'overdue' ? 'bad' : 'warn', icon: ICONS.clock, t: `${money(thisSettle.balance, 2)} still owed`, s: `${money(thisSettle.paid, 2)} paid so far · ${thisDue.text.toLowerCase()}` };
-    return { cls: 'info', icon: ICONS.info, t: `Overpaid by ${money(-thisSettle.balance, 2)}`, s: `${money(thisSettle.paid, 2)} paid` };
+    if (cv.fullyPaid) return { cls: 'good', icon: ICONS.check, t: 'Paid in full', s: cardSettle.paidAt ? `on ${fmtDate(`${cardSettle.paidAt}T12:00`)}` : 'Recorded on the monthly sheet' };
+    if (cv.outstanding > 0) return { cls: cardDue.kind === 'overdue' ? 'bad' : 'warn', icon: ICONS.clock, t: `${money(cv.outstanding, 2)} still owed`, s: `${money(cv.paid, 2)} paid so far · ${cardDue.text.toLowerCase()}` };
+    return { cls: 'info', icon: ICONS.info, t: `Overpaid by ${money(-cv.outstanding, 2)}`, s: `${money(cv.paid, 2)} paid by ${esc(cv.from)}` };
   })();
 
   // "What we owe each other": the most recent month still owed, plus anything older that is also outstanding
-  const unpaid = allSettled.filter((x) => x.balance > 0.009);
+  const unpaid = allSettled.filter((x) => view(x).outstanding > 0.009 && !view(x).nothingDue);
   const latestUnpaid = unpaid[unpaid.length - 1];
   const olderUnpaid = unpaid.slice(0, -1);
   const settleCallout = (() => {
     if (!latestUnpaid) return '';
+    const lv = view(latestUnpaid);
     const due = dueStatus(settlementDueDate(latestUnpaid.month, dueDay));
-    const [uy, um] = latestUnpaid.month.split('-').map(Number);
-    const mLabel = new Date(uy, um - 1, 1).toLocaleDateString('en-US', { month: 'long' });
-    const older = olderUnpaid.length ? ` <span class="muted">plus ${money(olderUnpaid.reduce((t, x) => t + x.balance, 0), 2)} from ${olderUnpaid.length} earlier month${olderUnpaid.length > 1 ? 's' : ''}${olderUnpaid.some((x) => dueStatus(settlementDueDate(x.month, dueDay)).kind === 'overdue') ? ', overdue' : ''}</span>` : '';
+    // Older months can point either way, so describe them by their net direction
+    const olderNet = Math.round(olderUnpaid.reduce((t, x) => t + view(x).signedOwed, 0) * 100) / 100;
+    const olderDir = olderNet > 0 ? `${esc(B)} → ${esc(A)}` : `${esc(A)} → ${esc(B)}`;
+    const older = olderUnpaid.length ? ` <span class="muted">plus ${Math.abs(olderNet) >= 0.01 ? `${money(Math.abs(olderNet), 2)}${(olderNet > 0) !== !lv.reverse ? ` (${olderDir})` : ''} ` : ''}from ${olderUnpaid.length} earlier month${olderUnpaid.length > 1 ? 's' : ''}${olderUnpaid.some((x) => dueStatus(settlementDueDate(x.month, dueDay)).kind === 'overdue') ? ', overdue' : ''}</span>` : '';
     return `<a class="callout ${due.kind}" href="#/settlement">
       <span class="callout-ic">${ICONS.wallet}</span>
-      <span class="callout-body"><b>${esc(B)} ${ICONS.arrow.replace('<svg', '<svg class="arr"')} ${esc(A)}</b> <span class="callout-amt num">${money(latestUnpaid.balance, 2)}</span> <span class="muted">for ${mLabel}</span>${older}</span>
+      <span class="callout-body"><b>${esc(lv.from)} ${ICONS.arrow.replace('<svg', '<svg class="arr"')} ${esc(lv.to)}</b> <span class="callout-amt num">${money(lv.outstanding, 2)}</span> <span class="muted">for ${monthLabel(latestUnpaid.month, 'long')}</span>${older}</span>
       <span class="pill ${due.kind === 'overdue' ? 'bad' : due.kind === 'soon' ? 'warn' : 'info'}">${due.kind === 'later' ? `Due ${fmtDate(settlementDueDate(latestUnpaid.month, dueDay))}` : due.text}</span>
       <span class="callout-go">Open settlement ${ICONS.chevron}</span>
     </a>`;
@@ -416,27 +481,26 @@ function overview(el) {
 
   <div class="grid g-12 mt">
     <div class="card hero owe c-4" style="padding-bottom:20px">
-      <div class="hero-eyebrow">${ICONS.wallet.replace('<svg', '<svg style="width:13px;height:13px"')} Partner settlement · ${now.toLocaleDateString('en-US', { month: 'long' })}</div>
-      <div class="muted" style="font-size:12.5px;margin-top:10px">${esc(B)} sends ${esc(A)}</div>
-      <div class="hero-value num" id="settle-value" style="font-size:36px;margin-top:2px">${money(thisSettle.sellerSends, 2)}</div>
-      <div class="hero-meta" style="margin-top:8px"><span>Reimbursement <b>${money(thisSettle.cogs + thisSettle.opexAmazon, 2)}</b></span><span>${thisSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(thisSettle.shareAmazon), 2)}</b></span></div>
-      <div class="status-card ${settleStatus.cls}" style="margin-top:14px"><div class="ic">${settleStatus.icon}</div><div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>${thisSettle.sellerSends > 0.009 ? `<span class="pill" title="Settlements are due on the ${dueDay}th of the following month">Due ${fmtDate(settlementDueDate(monthKey(now), dueDay))}</span>` : ''}</div>
+      <div class="hero-eyebrow">${ICONS.wallet.replace('<svg', '<svg style="width:13px;height:13px"')} Partner settlement · ${monthLabel(cardMonth, 'long')}</div>
+      <div class="muted" style="font-size:11.5px;margin-top:4px">${pickedMonth ? 'The month picked in the range bar' : 'This month so far · pick <b>Month</b> in the range bar to see another'}</div>
+      <div class="muted" style="font-size:12.5px;margin-top:10px">${esc(cv.from)} sends ${esc(cv.to)}</div>
+      <div class="hero-value num" id="settle-value" style="font-size:36px;margin-top:2px">${money(cv.amount, 2)}</div>
+      <div class="hero-meta" style="margin-top:8px"><span>Reimbursement <b>${money(cardSettle.cogs + cardSettle.opexAmazon, 2)}</b></span><span>${cardSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(cardSettle.shareAmazon), 2)}</b></span></div>
+      <div class="status-card ${settleStatus.cls}" style="margin-top:14px"><div class="ic">${settleStatus.icon}</div><div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>${!cv.nothingDue ? `<span class="pill" title="Settlements are due on the ${dueDay}th of the following month">${cardDue.kind === 'paid' ? cardDue.text : `Due ${cardDue.label}`}</span>` : ''}</div>
       <div class="settle-track" role="list" aria-label="Settlement by month">${[...allSettled].reverse().slice(0, 6).map((x) => {
-        const [ty, tm] = x.month.split('-').map(Number);
-        const label = new Date(ty, tm - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-        const settled = x.sellerSends <= 0.009 || (x.paid !== null && x.balance <= 0.009);
+        const xv = view(x);
         const d = dueStatus(settlementDueDate(x.month, dueDay));
-        const badge = settled
+        const badge = xv.settled
           ? `<span class="pill good">${ICONS.check} Settled</span>`
           : d.kind === 'overdue' ? `<span class="pill bad">${ICONS.alert} Overdue</span>`
           : `<span class="pill warn">${ICONS.clock} Due ${fmtDate(settlementDueDate(x.month, dueDay))}</span>`;
-        return `<a class="settle-row ${settled ? 'ok' : d.kind}" role="listitem" href="#/settlement" data-month="${x.month}">
-          <span class="m">${label}</span>
-          <span class="amt num">${money(x.sellerSends, 2)}</span>
+        return `<a class="settle-row ${xv.settled ? 'ok' : d.kind}${x.month === cardMonth ? ' sel' : ''}" role="listitem" href="#/settlement" data-month="${x.month}" title="${esc(`${xv.from} sends ${xv.to} ${money(xv.amount, 2)}`)}">
+          <span class="m">${monthLabel(x.month)}</span>
+          <span class="amt num">${xv.reverse ? `<span class="muted" style="font-size:11px;font-weight:500">${esc(xv.from)} → ${esc(xv.to)}</span> ` : ''}${money(xv.amount, 2)}</span>
           ${badge}
         </a>`;
       }).join('')}</div>
-      <div class="stat-row" style="margin-top:8px"><span class="k">Owed across all months</span><span class="v ${owedAll > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? money(owedAll, 2) : 'All settled ✓'}</span></div>
+      <div class="stat-row" style="margin-top:8px"><span class="k">Owed across all months</span><span class="v ${Math.abs(owedAll) > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? `${esc(B)} owes ${esc(A)} ${money(owedAll, 2)}` : owedAll < -0.009 ? `${esc(A)} owes ${esc(B)} ${money(-owedAll, 2)}` : 'All settled ✓'}</span></div>
       <div style="margin-top:12px"><a class="btn sm" href="#/settlement">Open settlement ${ICONS.arrow}</a></div>
     </div>
     ${card('This month', now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), `
@@ -459,9 +523,10 @@ function overview(el) {
 
   <div class="kpis mt">
     ${kpi({ label: 'Amazon cost', sw: '--s-cost', value: moneyShort(s.cost), deltaHtml: hasPrev ? delta(s.cost, p.cost, { invert: true }) : '', foot: `avg ${money(s.avgCost)}` })}
-    ${kpi({ label: 'eBay fees', sw: '--s-fees', value: moneyShort(s.fees), deltaHtml: hasPrev ? delta(s.feeRate, p.feeRate, { invert: true, isPct: true }) : '', foot: `${pct(s.feeRate)} of revenue incl. ads` })}
+    ${kpi({ label: 'eBay fees', sw: '--s-fees', value: moneyShort(s.fees), deltaHtml: hasPrev && p.fees ? delta(s.fees, p.fees, { invert: true }) : '', foot: feeFoot,
+      tip: 'Final value fees on synced eBay orders (the waterfall’s “eBay fees” bar). Monthly-sheet rows record the eBay payout after fees, so their fees are already out of revenue. Promoted-listing (ad) fees are counted separately.' })}
     ${kpi({ label: 'Operating costs', sw: '--s-ops', value: money(ox.total, 2), deltaHtml: hasPrev ? delta(ox.total, oxPrev.total, { invert: true }) : '', foot: `subscriptions, tools, proxies · ${count(ox.byCategory.size)} items`, tip: 'Monthly operating costs from the sheets / Editor → Operating expenses. Partly covered months are prorated by day.' })}
-    ${kpi({ label: 'Refunds', sw: '--s-refunds', value: moneyShort(s.refunds), foot: s.amazonRefund ? `${money(s.amazonRefund)} recovered` : 'to buyers' })}
+    ${kpi({ label: 'Refunds', sw: '--s-refunds', value: moneyShort(s.refunds), foot: [refundFees ? (split.buyer ? `${money(split.buyer, 2)} to buyers · ${money(refundFees, 2)} eBay refund fees` : 'eBay refund fees on sheet refund rows') : 'to buyers', s.amazonRefund ? `${money(s.amazonRefund)} recovered` : ''].filter(Boolean).join(' · '), tip: 'Money refunded to buyers on eBay orders, plus the eBay refund fee recorded on monthly-sheet refund rows.' })}
     ${kpi({ label: 'Avg order value', value: money(s.aov), deltaHtml: hasPrev ? delta(s.aov, p.aov) : '' })}
     ${kpi({ label: 'Item profit / order', value: money(s.profitPerOrder), deltaHtml: hasPrev ? delta(s.profitPerOrder, p.profitPerOrder) : '', foot: 'before operating costs' })}
     ${kpi({ label: 'Return rate', value: pct(s.returnRate), deltaHtml: hasPrev ? delta(s.returnRate, p.returnRate, { invert: true, isPct: true }) : '', foot: `${count(s.returnCount)} orders` })}
@@ -485,7 +550,7 @@ function overview(el) {
   </div>`;
 
   countUp($('#hero-value'), biz, (v) => money(v, 2));
-  countUp($('#settle-value'), thisSettle.sellerSends, (v) => money(v, 2), 700);
+  countUp($('#settle-value'), cv.amount, (v) => money(v, 2), 700);
 
   // hero spark
   sparkline($('#hero-spark'), dailyForSpark.map((b) => b.net), c.profit);
@@ -593,7 +658,7 @@ function overview(el) {
   // top products
   const tp = [...top].reverse();
   // Refund note for product tooltips: refunds are part of this product's net, so say so
-  const refundNote = (x) => (x.returnCount ? `<div style="margin-top:5px;color:var(--warn-ink, var(--warn))">↩ ${x.returnCount} refunded${x.refunds ? ` · ${money(x.refunds)} back to buyer` : ''}${x.amazonRefund ? ` · ${money(x.amazonRefund)} recovered from Amazon` : ''}</div>` : '');
+  const refundNote = productRefundNote;
   mount($('#ch-top'), {
     grid: { left: 8, right: 70, top: 4, bottom: 4, containLabel: true },
     tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } },
@@ -880,7 +945,7 @@ function products(el) {
     const col = lbKey === 'orders' ? c.accent : lbKey === 'revenueAll' ? c.revenue : c.profit;
     lbChart = mount($('#ch-lb'), {
       grid: { left: 8, right: 56, top: 4, bottom: 4, containLabel: true },
-      tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => { const x = list[ps[0].dataIndex]; return ttHead(trunc(x.title, 60)) + ttRow(c.profit, 'Net', money(x.net)) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6">${x.orders} orders · ${pct(x.margin)} margin</div>` + (x.returnCount ? `<div style="margin-top:5px;color:var(--warn-ink, var(--warn))">↩ ${x.returnCount} refunded${x.refunds ? ` · ${money(x.refunds)} back to buyer` : ''}</div>` : ''); } },
+      tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => { const x = list[ps[0].dataIndex]; return ttHead(trunc(x.title, 60)) + ttRow(c.profit, 'Net', money(x.net)) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6">${x.orders} orders · ${pct(x.margin)} margin</div>` + productRefundNote(x); } },
       xAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: fmt } },
       yAxis: { type: 'category', data: list.map((x) => x.title), ...axisBase({ splitLine: { show: false } }), axisLabel: { color: c.ink2, fontSize: 11, width: 150, overflow: 'truncate' } },
       series: [{ type: 'bar', data: list.map((x) => ({ value: x[lbKey], itemStyle: { color: x[lbKey] < 0 ? c.bad : col } })), barWidth: 12, itemStyle: { borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: c.ink2, fontSize: 11, formatter: (p) => fmt(p.value) } }],
@@ -896,27 +961,38 @@ function products(el) {
   });
 
   const t = trackTable(new Tabulator('#prod-table', {
-    data: prods.map((p) => ({ ...p, orders_n: p.orders, returnsN: p.returnCount })),
+    data: prods.map((p) => ({ ...p, orders_n: p.orders, returnsN: p.returnCount, feesAll: p.fees + p.adFees })),
     layout: 'fitColumns',
     height: 520,
     placeholder: 'No products',
     initialSort: [{ column: 'net', dir: 'desc' }],
     columns: [
       { title: 'Product', field: 'title', minWidth: 260, widthGrow: 3, formatter: (cell) => `<span title="${esc(cell.getValue())}">${esc(cell.getValue())}</span>` },
-      { title: 'Orders', field: 'orders_n', hozAlign: 'right', width: 90 },
-      { title: 'Units', field: 'units', hozAlign: 'right', width: 80 },
-      { title: 'Revenue', field: 'revenueAll', hozAlign: 'right', formatter: (c) => money(c.getValue()), width: 115 },
-      { title: 'Avg sale', field: 'avgSale', hozAlign: 'right', formatter: (c) => money(c.getValue()), width: 100 },
-      { title: 'Avg cost', field: 'avgCostPer', hozAlign: 'right', formatter: (c) => money(c.getValue()), width: 100 },
-      { title: 'Fees', field: 'fees', hozAlign: 'right', formatter: (c) => money(c.getRow().getData().fees + c.getRow().getData().adFees), width: 100 },
-      { title: 'Net profit', field: 'net', hozAlign: 'right', formatter: (c) => `<b class="${c.getValue() < 0 ? 'neg' : ''}">${money(c.getValue())}</b>`, width: 120 },
-      { title: 'Margin', field: 'margin', hozAlign: 'right', formatter: (c) => pct(c.getValue()), width: 90 },
-      { title: 'Returns', field: 'returnsN', hozAlign: 'right', formatter: (c) => { const d = c.getRow().getData(); return d.returnCount ? `${d.returnCount} <span class="muted">(${pct(d.returnRate, 0)})</span>` : '<span class="muted">0</span>'; }, width: 105 },
+      { title: 'Orders', field: 'orders_n', hozAlign: 'right', sorter: 'number', width: 90 },
+      { title: 'Units', field: 'units', hozAlign: 'right', sorter: 'number', width: 80 },
+      { title: 'Revenue', field: 'revenueAll', hozAlign: 'right', sorter: 'number', formatter: (c) => money(c.getValue()), width: 115 },
+      { title: 'Avg sale', field: 'avgSale', hozAlign: 'right', sorter: 'number', formatter: (c) => money(c.getValue()), width: 100 },
+      { title: 'Avg cost', field: 'avgCostPer', hozAlign: 'right', sorter: 'number', formatter: (c) => money(c.getValue()), width: 100 },
+      { title: 'Fees', field: 'feesAll', hozAlign: 'right', sorter: 'number', formatter: (c) => money(c.getValue()), width: 100 },
+      { title: 'Net profit', field: 'net', hozAlign: 'right', sorter: 'number', formatter: (c) => `<b class="${c.getValue() < 0 ? 'neg' : ''}">${money(c.getValue())}</b>`, width: 120 },
+      { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', formatter: (c) => pct(c.getValue()), width: 90 },
+      { title: 'Returns', field: 'returnsN', hozAlign: 'right', sorter: 'number', formatter: (c) => { const d = c.getRow().getData(); return d.returnCount ? `${d.returnCount} <span class="muted">(${pct(d.returnRate, 0)})</span>` : '<span class="muted">0</span>'; }, width: 105 },
       { title: 'Last sold', field: 'lastSold', formatter: (c) => fmtDate(c.getValue()), width: 100 },
     ],
   }));
   $('#prod-q').addEventListener('input', (e) => { const v = e.target.value.toLowerCase(); t.setFilter((d) => d.title.toLowerCase().includes(v) || (d.sku || '').toLowerCase().includes(v)); });
   $('#prod-dl').onclick = () => t.download('csv', 'products.csv');
+}
+
+// Product tooltip refund line. Sheet refund rows carry eBay's refund fee, which is not money back to the buyer.
+function productRefundNote(x) {
+  if (!x.returnCount) return '';
+  const { buyer, fee } = refundSplit(x.orders.filter((o) => o.counted));
+  const parts = [`↩ ${x.returnCount} refunded`];
+  if (buyer) parts.push(`${money(buyer, 2)} back to buyer`);
+  if (fee) parts.push(`${money(fee, 2)} eBay refund fee`);
+  if (x.amazonRefund) parts.push(`${money(x.amazonRefund, 2)} recovered from Amazon`);
+  return `<div style="margin-top:5px;color:var(--warn-ink, var(--warn))">${parts.join(' · ')}</div>`;
 }
 
 const trunc = (s, n) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s || '');
@@ -945,20 +1021,20 @@ function orders(el) {
     initialSort: [{ column: 'created_at', dir: 'desc' }],
     columns: [
       { title: 'Date', field: 'created_at', width: 120, formatter: (c) => `${fmtDate(c.getValue())}<div class="muted" style="font-size:11px">${new Date(c.getValue()).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>` },
-      { title: 'Item', field: 'title', minWidth: 240, widthGrow: 3, formatter: (c) => { const d = c.getRow().getData(); return `<div style="white-space:normal;line-height:1.3">${esc(trunc(d.title, 90))}</div><div class="mono muted" style="font-size:11px">${esc(d.order_id)}${d.units > 1 ? ` · ×${d.units}` : ''}</div>`; } },
+      { title: 'Item', field: 'title', minWidth: 240, widthGrow: 3, formatter: (c) => { const d = c.getRow().getData(); return `<div style="white-space:normal;line-height:1.3">${esc(trunc(d.title, 90))}</div><div class="${d.source === 'ledger' ? '' : 'mono '}muted" style="font-size:11px">${esc(orderLabel(d))}${d.units > 1 ? ` · ×${d.units}` : ''}</div>`; } },
       { title: 'Buyer', field: 'buyer', width: 130, formatter: (c) => { const d = c.getRow().getData(); return `${esc(d.buyer || '')}<div class="muted" style="font-size:11px">${esc([d.ship_city, d.ship_state].filter(Boolean).join(', '))}</div>`; } },
-      { title: 'Revenue', field: 'revenue', hozAlign: 'right', width: 100, formatter: (c) => money(c.getValue()) },
-      { title: 'Amazon', field: 'cost', hozAlign: 'right', width: 100, formatter: (c) => (c.getRow().getData().has_cost ? money(c.getValue()) : '<span class="muted">—</span>') },
-      { title: 'Fees', field: 'fees', hozAlign: 'right', width: 90, formatter: (c) => money(c.getValue() + c.getRow().getData().ad_fees) },
-      { title: 'Refund', field: 'refunds', hozAlign: 'right', width: 90, formatter: (c) => (c.getValue() ? money(c.getValue()) : '<span class="muted">—</span>') },
-      { title: 'Net', field: 'net', hozAlign: 'right', width: 105, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : '<span class="muted">pending</span>'; } },
-      { title: 'Margin', field: 'margin', hozAlign: 'right', width: 85, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
+      { title: 'Revenue', field: 'revenue', hozAlign: 'right', sorter: 'number', width: 100, formatter: (c) => money(c.getValue()) },
+      { title: 'Amazon', field: 'cost', hozAlign: 'right', sorter: 'number', width: 100, formatter: (c) => (c.getRow().getData().has_cost ? money(c.getValue()) : '<span class="muted">—</span>') },
+      { title: 'Fees', field: 'fees', hozAlign: 'right', width: 90, sorter: (a, b, ra, rb) => (a + ra.getData().ad_fees) - (b + rb.getData().ad_fees), formatter: (c) => money(c.getValue() + c.getRow().getData().ad_fees) },
+      { title: 'Refund', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 90, formatter: (c) => (c.getValue() ? `<span title="${refundWord(c.getRow().getData())}">${money(c.getValue(), 2)}</span>` : '<span class="muted">—</span>') },
+      { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 105, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : '<span class="muted">pending</span>'; } },
+      { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 85, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
       { title: 'Status', field: 'status', width: 150, formatter: (c) => statusPill(c.getValue()) },
     ],
   }));
   const apply = () => {
     const v = ($('#ord-q').value || '').toLowerCase();
-    t.setFilter((d) => matchFilter(d, state.ordersFilter) && (!v || [d.order_id, d.title, d.buyer, d.ship_name, ...d.amazon_orders.map((a) => a.amazon_order_id)].some((x) => (x || '').toLowerCase().includes(v))));
+    t.setFilter((d) => matchFilter(d, state.ordersFilter) && (!v || [d.source === 'ledger' ? 'monthly sheet' : d.order_id, d.ebay_order_id, d.title, d.buyer, d.ship_name, ...d.amazon_orders.map((a) => a.amazon_order_id)].some((x) => (x || '').toLowerCase().includes(v))));
   };
   t.on('tableBuilt', apply);
   t.on('rowClick', (_e, row) => openOrder(row.getData().order_id));
@@ -973,10 +1049,12 @@ function orders(el) {
   $('#ord-dl').onclick = () => downloadCsv('orders.csv', t.getData('active'), ORDER_EXPORT);
 }
 
-const matchFilter = (o, f) => f === 'all' || o.status === f || (f === 'loss' && o.status === 'cancelled_after_purchase') || (f === 'cancelled' && o.status === 'cancelled_after_purchase');
+// "Loss" means what the Overview counts as loss-making: any counted order with a negative net (a returned or
+// cancelled-after-purchase order can be a loss too). Other filters follow the order's status.
+const matchFilter = (o, f) => (f === 'loss' ? Boolean(o.counted) && o.net < 0 : f === 'all' || o.status === f || (f === 'cancelled' && o.status === 'cancelled_after_purchase'));
 
 export const ORDER_EXPORT = [
-  { title: 'Date', get: (o) => o.created_at }, { title: 'eBay order', get: (o) => o.order_id }, { title: 'Item', get: (o) => o.title },
+  { title: 'Date', get: (o) => o.created_at }, { title: 'eBay order', get: (o) => (o.source === 'ledger' ? orderLabel(o) : o.order_id) }, { title: 'Item', get: (o) => o.title },
   { title: 'Units', get: (o) => o.units }, { title: 'Buyer', get: (o) => o.buyer }, { title: 'State', get: (o) => o.ship_state },
   { title: 'Revenue', get: (o) => o.revenue }, { title: 'Amazon cost', get: (o) => o.cost }, { title: 'eBay fees', get: (o) => o.fees },
   { title: 'Ad fees', get: (o) => o.ad_fees }, { title: 'Refunds', get: (o) => o.refunds }, { title: 'Amazon refund', get: (o) => o.amazon_refund },
@@ -989,11 +1067,12 @@ export function openOrder(id) {
   const o = state.data.orders.find((x) => x.order_id === id);
   if (!o) return;
   const c = colors();
+  const sheet = o.source === 'ledger'; // monthly-sheet row: revenue is the eBay payout after fees
   const row = (k, v, color, cls = '') => `<div class="calc-row ${cls}"><span class="k">${color ? `<i style="background:${color}"></i>` : ''}${k}</span><span>${v}</span></div>`;
   $('#drawer').innerHTML = `
     <div class="drawer-h">
       <div style="min-width:0">
-        <div class="row" style="gap:8px">${statusPill(o.status)}<span class="mono muted">${esc(o.order_id)}</span></div>
+        <div class="row" style="gap:8px">${statusPill(o.status)}<span class="${o.source === 'ledger' ? '' : 'mono '}muted">${esc(orderLabel(o))}</span></div>
         <div style="font-weight:650;font-size:15px;margin-top:8px;line-height:1.35">${esc(o.title)}</div>
         <div class="muted" style="font-size:12.5px;margin-top:4px">${[
           o.approx_date ? `${new Date(o.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (from monthly sheet, exact date unknown)` : fmtDateTime(o.created_at),
@@ -1005,24 +1084,24 @@ export function openOrder(id) {
     </div>
     <div class="drawer-b">
       <div class="drawer-summary">
-        <div><div class="k"><i class="sw" style="background:${c.revenue}"></i>Revenue</div><div class="v">${money(o.revenue)}</div></div>
+        <div><div class="k"><i class="sw" style="background:${c.revenue}"></i>${sheet ? 'eBay payout' : 'Buyer paid'}</div><div class="v">${money(o.revenue)}</div></div>
         <div><div class="k"><i class="sw" style="background:${c.cost}"></i>Amazon cost</div><div class="v">${o.has_cost ? money(o.cost) : '<span class="muted">—</span>'}</div></div>
         <div><div class="k"><i class="sw" style="background:${o.net < 0 ? c.bad : c.profit}"></i>Net profit</div><div class="v ${o.has_cost && !o.excluded ? (o.net < 0 ? 'neg' : 'pos') : 'muted'}">${o.has_cost && !o.excluded ? money(o.net) : 'pending'}</div></div>
       </div>
       <h4>Profit math</h4>
-      ${row('Revenue (buyer paid, excl. tax)', money(o.revenue), c.revenue)}
-      ${row('Amazon cost', o.has_cost ? `−${money(o.cost)}` : '<span class="muted">not linked yet</span>', c.cost)}
-      ${row('eBay fees', `−${money(o.fees)}${o.overrides.fee_override !== null ? ' <span class="pill">edited</span>' : ''}`, c.fees)}
+      ${row(sheet ? 'eBay payout (after fees)' : 'Buyer paid (excl. tax)', money(o.revenue), c.revenue)}
+      ${row(sheet ? 'Amazon cost (from sheet)' : 'Amazon cost', o.has_cost ? `−${money(o.cost)}` : '<span class="muted">not linked yet</span>', c.cost)}
+      ${sheet && !o.fees ? row('eBay fees', '<span class="muted">already out of the payout</span>', c.fees) : row('eBay fees', `−${money(o.fees)}${o.overrides.fee_override !== null ? ' <span class="pill">edited</span>' : ''}`, c.fees)}
       ${o.ad_fees ? row('Promoted listing fee', `−${money(o.ad_fees)}`, c.ads) : ''}
-      ${o.refunds ? row('Refunded to buyer', `−${money(o.refunds)}`, c.refunds) : ''}
+      ${o.refunds ? row(refundWord(o), `−${money(o.refunds, 2)}`, c.refunds) : ''}
       ${o.amazon_refund ? row('Recovered from Amazon', `+${money(o.amazon_refund)}`, c.good) : ''}
       ${o.extra_cost ? row('Other costs', `−${money(o.extra_cost)}`, c.ink3) : ''}
       ${row('Net profit', o.has_cost && !o.excluded ? `<span class="${o.net < 0 ? 'neg' : 'pos'}">${money(o.net)}</span>` : '<span class="muted">pending</span>', null, 'total')}
       <div class="muted" style="font-size:12px">${o.has_cost ? `${pct(o.margin)} margin · ${pct(o.roi)} ROI` : 'Profit shows once an Amazon purchase is linked or a cost is entered in the Editor.'}${o.tax_collected ? ` · ${money(o.tax_collected)} sales tax collected by eBay (not revenue)` : ''}</div>
 
-      ${o.ledger ? `<h4>Monthly sheet row</h4><div class="sub-card"><div class="t">${esc(o.ledger.title)}</div><div class="m"><span>${esc(o.ledger.month)}</span><span>Amazon cost ${money(o.ledger.amazon_cost)}</span><span>eBay payout ${money(o.ledger.sale_price)}</span>${o.ledger.note ? `<span>${esc(o.ledger.note)}</span>` : ''}</div><div class="m" style="margin-top:6px">${o.source === 'ledger' ? 'Revenue here is the eBay payout after eBay fees, as the sheet records it. When eBay syncs this sale, it is matched automatically and the real order takes over.' : 'This eBay order was matched to the sheet row. Its Amazon cost comes from the sheet.'}</div></div>` : ''}
+      ${o.ledger ? `<h4>Monthly sheet row</h4><div class="sub-card"><div class="t">${esc(o.ledger.title)}</div><div class="m"><span>${monthLabel(o.ledger.month, 'long')}</span><span>Amazon cost ${money(o.ledger.amazon_cost, 2)}</span><span>${o.ledger.sale_price < 0 ? `eBay refund fee ${money(-o.ledger.sale_price, 2)}` : `eBay payout ${money(o.ledger.sale_price, 2)}`}</span>${o.ledger.note ? `<span>${esc(o.ledger.note)}</span>` : ''}</div><div class="m" style="margin-top:6px">${o.source === 'ledger' ? 'Revenue here is the eBay payout after eBay fees, as the sheet records it. When eBay syncs this sale, it is matched automatically and the real order takes over.' : 'This eBay order was matched to the sheet row. Its Amazon cost comes from the sheet.'}</div></div>` : ''}
       <h4>eBay items</h4>
-      ${o.items.map((i) => `<div class="sub-card"><div class="t">${esc(i.title)}</div><div class="m"><span>Qty ${i.quantity}</span><span>${money(i.unit_price)} each</span>${i.sku ? `<span class="mono">SKU ${esc(i.sku)}</span>` : ''}${i.item_id ? `<a href="https://www.ebay.com/itm/${esc(i.item_id)}" target="_blank" rel="noopener">View listing ↗</a>` : ''}</div></div>`).join('')}
+      ${o.items.map((i) => `<div class="sub-card"><div class="t">${esc(i.title)}</div><div class="m"><span>Qty ${i.quantity}</span>${sheet ? (i.unit_price > 0 ? `<span>${money(i.unit_price, 2)} payout (after fees)</span>` : '') : `<span>${money(i.unit_price)} each</span>`}${i.sku ? `<span class="mono">SKU ${esc(i.sku)}</span>` : ''}${i.item_id ? `<a href="https://www.ebay.com/itm/${esc(i.item_id)}" target="_blank" rel="noopener">View listing ↗</a>` : ''}</div></div>`).join('')}
 
       <h4>Linked Amazon purchases</h4>
       ${o.amazon_orders.length ? o.amazon_orders.map((a) => `<div class="sub-card">
@@ -1032,13 +1111,16 @@ export function openOrder(id) {
           <div style="margin-top:8px"><button class="btn sm danger" data-unlink="${esc(a.amazon_order_id)}">Unlink</button></div>
         </div>`).join('') : '<div class="muted" style="font-size:13px">None yet. Purchases arrive from the <a href="#/settings?focus=email">Amazon email import</a>; you can also link one by hand in Editor → Amazon purchases, or type a cost override in the spreadsheet.</div>'}
 
-      ${o.returns.length ? `<h4>Returns</h4>${o.returns.map((r) => `<div class="sub-card"><div class="row"><b>${esc((r.reason || 'Return').replace(/_/g, ' ').toLowerCase())}</b><span class="pill warn" style="margin-left:auto">${esc((r.status || r.state || '').replace(/_/g, ' ').toLowerCase())}</span></div><div class="m"><span>Opened ${r.created_at ? fmtDate(r.created_at) : '—'}</span><span>Refund ${money(r.refund_amount)}</span></div></div>`).join('')}` : ''}
+      ${o.returns.length ? `<h4>Returns</h4>${o.returns.map((r) => `<div class="sub-card"><div class="row"><b>${esc((r.reason || 'Return').replace(/_/g, ' ').toLowerCase())}</b><span class="pill warn" style="margin-left:auto">${esc((r.status || r.state || '').replace(/_/g, ' ').toLowerCase())}</span></div><div class="m"><span>${sheet ? 'Month of' : 'Opened'} ${r.created_at ? (sheet ? monthLabel(o.ledger?.month || '', 'long') : fmtDate(r.created_at)) : '—'}</span><span>${sheet ? 'eBay refund fee' : 'Refund'} ${money(r.refund_amount, 2)}</span></div></div>`).join('')}` : ''}
 
       ${o.overrides.notes ? `<h4>Notes</h4><div class="sub-card">${esc(o.overrides.notes)}</div>` : ''}
       <div class="row" style="margin-top:22px"><a class="btn" href="#/editor?order=${encodeURIComponent(o.order_id)}">${ICONS.editor} Edit in spreadsheet</a></div>
     </div>`;
+  if (!$('#drawer').classList.contains('open')) drawerReturnFocus = document.activeElement;
   $('#drawer').classList.add('open');
+  $('#drawer').setAttribute('aria-hidden', 'false');
   $('#scrim').classList.add('open');
+  requestAnimationFrame(() => $('#drawer-x')?.focus({ preventScroll: true }));
   $('#drawer-x').onclick = closeDrawer;
   $$('[data-unlink]').forEach((b) => (b.onclick = async () => {
     if (!confirm('Unlink this Amazon order from the sale? It won\'t be auto-matched to this sale again.')) return;
@@ -1049,9 +1131,23 @@ export function openOrder(id) {
     openOrder(id);
   }));
 }
-export function closeDrawer() { $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); }
+let drawerReturnFocus = null;
+export function closeDrawer() {
+  const wasOpen = $('#drawer').classList.contains('open');
+  $('#drawer').classList.remove('open');
+  $('#drawer').setAttribute('aria-hidden', 'true');
+  $('#scrim').classList.remove('open');
+  if (wasOpen && drawerReturnFocus?.isConnected) drawerReturnFocus.focus({ preventScroll: true });
+  drawerReturnFocus = null;
+}
 $('#scrim').addEventListener('click', closeDrawer);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+// Capture phase so a focused table/editor can't swallow Escape; an open cell editor keeps Escape to cancel its edit
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !$('#drawer').classList.contains('open')) return;
+  if (e.target.closest?.('.tabulator-editing')) return;
+  e.preventDefault();
+  closeDrawer();
+}, true);
 $('#drawer').addEventListener('click', (e) => { if (e.target.closest('a[href^="#/"]')) closeDrawer(); });
 
 // ---------------------------------------------------------------- RETURNS
@@ -1066,13 +1162,14 @@ function returns(el) {
   const open = ret.filter((o) => o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
   const recovered = ret.reduce((a, o) => a + o.amazon_refund, 0);
   const needRecovery = ret.filter((o) => o.has_cost && !o.amazon_refund && o.cost > 0);
+  const rs = refundSplit(all.filter((o) => o.counted));
   el.innerHTML = `
   <div class="kpis six">
     ${kpi({ label: 'Returned orders', sw: '--s-refunds', value: count(ret.length), foot: `${count(open.length)} still open` })}
     ${kpi({ label: 'Return rate', value: pct(s.returnRate), foot: 'of orders in range' })}
-    ${kpi({ label: 'Refunded to buyers', value: money(s.refunds, 0) })}
-    ${kpi({ label: 'Recovered from Amazon', sw: '--good', value: money(recovered, 0), foot: 'entered in Editor' })}
-    ${kpi({ label: 'Net loss on returns', value: `<span class="${lossOnReturns < 0 ? 'neg' : ''}">${money(lossOnReturns, 0)}</span>` })}
+    ${kpi({ label: 'Refunded to buyers', value: money(rs.buyer, 2), foot: rs.fee ? `+ ${money(rs.fee, 2)} eBay refund fees on sheet rows` : 'eBay orders', tip: 'Monthly-sheet refund rows record the eBay refund fee (e.g. $0.40), not money sent back to the buyer, so they are listed separately.' })}
+    ${kpi({ label: 'Recovered from Amazon', sw: '--good', value: money(recovered, 2), foot: 'entered in Editor' })}
+    ${kpi({ label: 'Net loss on returns', value: `<span class="${lossOnReturns < 0 ? 'neg' : ''}">${money(lossOnReturns, 2)}</span>` })}
     ${kpi({ label: 'Awaiting Amazon refund', value: count(needRecovery.length), foot: 'returns with no recovery logged', tip: 'Returned orders where you have not entered an Amazon refund yet' })}
   </div>
   <div class="grid g-12 mt">
@@ -1089,7 +1186,7 @@ function returns(el) {
   const labels = bs.map((b) => bucketLabel(b.key, gran));
   mount($('#ch-ret'), {
     grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
-    tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => { const b = bs[ps[0].dataIndex]; return ttHead(labels[ps[0].dataIndex]) + ttRow(c.refunds, 'Returned orders', count(b.returnCount)) + ttRow(c.ink3, 'Return rate', pct(b.returnRate)) + ttRow(c.ink3, 'Refunded', money(b.refunds)); } },
+    tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => { const b = bs[ps[0].dataIndex]; const x = refundSplit(b.orders.filter((o) => o.counted)); return ttHead(labels[ps[0].dataIndex]) + ttRow(c.refunds, 'Returned orders', count(b.returnCount)) + ttRow(c.ink3, 'Return rate', pct(b.returnRate)) + ttRow(c.ink3, 'Refunded to buyers', money(x.buyer, 2)) + (x.fee ? ttRow(c.ink3, 'eBay refund fees', money(x.fee, 2)) : ''); } },
     xAxis: { type: 'category', data: labels, ...axisBase({ splitLine: { show: false } }) },
     yAxis: { type: 'value', ...axisBase(), axisLine: { show: false }, minInterval: 1 },
     series: [{ type: 'bar', data: bs.map((b) => b.returnCount), barMaxWidth: 22, itemStyle: { color: c.refunds, borderRadius: [4, 4, 0, 0] } }],
@@ -1107,7 +1204,7 @@ function returns(el) {
 
   const prodRet = byProduct(all).filter((p) => p.returnCount > 0).sort((a, b) => b.returnCount - a.returnCount || b.returnRate - a.returnRate).slice(0, 12);
   $('#ret-prod').innerHTML = prodRet.length ? `<table class="simple"><thead><tr><th>Product</th><th class="r">Returns</th><th class="r">Rate</th><th class="r">Net</th></tr></thead><tbody>
-    ${prodRet.map((p) => `<tr><td title="${esc(p.title)}">${esc(trunc(p.title, 48))}</td><td class="r">${p.returnCount}</td><td class="r ${p.returnRate > 0.1 ? 'neg' : ''}">${pct(p.returnRate, 0)}</td><td class="r ${p.net < 0 ? 'neg' : ''}">${money(p.net)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No returns in this range 🎉</div>';
+    ${prodRet.map((p) => `<tr><td title="${esc(p.title)}">${esc(trunc(p.title, 48))}</td><td class="r">${p.returnCount}</td><td class="r ${p.returnRate > 0.1 ? 'neg' : ''}">${pct(p.returnRate, 0)}</td><td class="r ${p.net < 0 ? 'neg' : ''}">${money(p.net, 2)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No returns in this range 🎉</div>';
 
   const t = trackTable(new Tabulator('#ret-table', {
     data: ret, layout: 'fitColumns', height: 420, placeholder: 'No returns in this range',
@@ -1115,8 +1212,8 @@ function returns(el) {
     columns: [
       { title: 'Sold', field: 'created_at', width: 90, formatter: (c) => fmtDate(c.getValue()) },
       { title: 'Item', field: 'title', minWidth: 160, formatter: (c) => esc(trunc(c.getValue(), 50)) },
-      { title: 'Refund', field: 'refunds', hozAlign: 'right', width: 90, formatter: (c) => money(c.getValue()) },
-      { title: 'Net', field: 'net', hozAlign: 'right', width: 90, formatter: (c) => (c.getRow().getData().has_cost ? `<span class="${c.getValue() < 0 ? 'neg' : 'pos'}">${money(c.getValue())}</span>` : '—') },
+      { title: 'Refund / fee', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 110, formatter: (c) => { const d = c.getRow().getData(); return `<span title="${refundWord(d)}">${money(c.getValue(), 2)}</span>${d.source === 'ledger' && c.getValue() ? '<div class="muted" style="font-size:11px">eBay refund fee</div>' : ''}`; } },
+      { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 90, formatter: (c) => (c.getRow().getData().has_cost ? `<span class="${c.getValue() < 0 ? 'neg' : 'pos'}">${money(c.getValue(), 2)}</span>` : '—') },
     ],
   }));
   t.on('rowClick', (_e, row) => openOrder(row.getData().order_id));
@@ -1267,7 +1364,8 @@ async function settings(el) {
       <div class="section-h"><h2>Data</h2></div>
       ${card('Storage', '', `
         <div class="stat-row"><span class="k">Database</span><span class="v">${d.db === 'local-postgres' ? 'Local embedded Postgres' : 'Supabase Postgres'}</span></div>
-        <div class="stat-row"><span class="k">eBay orders stored</span><span class="v">${count(d.orders.length)}</span></div>
+        <div class="stat-row"><span class="k">eBay orders stored</span><span class="v">${count(d.orders.filter((o) => o.source === 'ebay').length)}</span></div>
+        <div class="stat-row"><span class="k">Monthly-sheet sales rows</span><span class="v">${count(d.orders.filter((o) => o.source === 'ledger').length)}${d.orders.some((o) => o.source === 'ledger' && o.ebay_order_id) ? ` <span class="muted">(${count(d.orders.filter((o) => o.source === 'ledger' && o.ebay_order_id).length)} matched to eBay)</span>` : ''}</span></div>
         <div class="stat-row"><span class="k">Amazon orders stored</span><span class="v">${count(d.amazon.orders)} (${count(d.amazon.linked)} linked)</span></div>
         <div class="row mt"><button class="btn" id="export-all">${ICONS.down} Export all orders (CSV)</button>
         ${demo ? `<button class="btn danger" id="clear-demo">Remove ${count(demo)} demo orders</button>` : ''}</div>`, { cls: 'set-card' })}

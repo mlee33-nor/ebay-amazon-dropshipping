@@ -579,6 +579,26 @@ table.simple td:last-child, table.simple th:last-child { padding-right: 4px; }
 .pay-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .pay-form .full { grid-column: 1 / -1; }
 .pay-form .actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.pay-form[hidden] { display: none; }
+.form-err { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; background: var(--bad-soft, color-mix(in srgb, var(--bad) 12%, transparent)); color: var(--bad-ink, var(--bad)); }
+.form-err[hidden] { display: none; }
+/* Operating costs tables: amount input + delete stay visible on narrow screens (payer/note fold under the name) */
+.ox-table .ox-amt { width: 110px; height: 30px; text-align: right; }
+.ox-table .ox-sub { display: none; font-size: 11.5px; margin-top: 2px; white-space: normal; }
+.ox-table .ox-del-cell { width: 1%; }
+@media (max-width: 640px) {
+  .ox-table .ox-payer, .ox-table .ox-note { display: none; }
+  .ox-table .ox-sub { display: block; }
+  .ox-table .ox-what { white-space: normal; word-break: break-word; }
+  .ox-table .ox-amt { width: 84px; padding-left: 6px; padding-right: 6px; }
+  .ox-table td.ox-amt-cell, .ox-table td.ox-del-cell { padding-left: 4px; padding-right: 4px; }
+}
+/* Range bar: when the date presets overflow on a phone, fade the clipped edge so it reads as scrollable */
+.seg.scroll-fade-r { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+.seg.scroll-fade-l { -webkit-mask-image: linear-gradient(90deg, transparent, #000 28px); mask-image: linear-gradient(90deg, transparent, #000 28px); }
+.seg.scroll-fade-l.scroll-fade-r { -webkit-mask-image: linear-gradient(90deg, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
+table.simple tfoot td { border-top: 1px solid var(--line-strong); border-bottom: 0; font-weight: 600; background: var(--surface-2); }
+table.simple td.bad-input .input, .input[aria-invalid='true'] { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 22%, transparent); }
 .paid-bar { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin: 10px 0 0; }
 .paid-bar > div { height: 100%; border-radius: 999px; background: var(--good-ink); transition: width 0.9s var(--ease); }
 .paid-bar.over > div { background: var(--warn); }
@@ -763,3 +783,4 @@ table.simple td:last-child, table.simple th:last-child { padding-right: 4px; }
 .settle-row.ok { border-left: 3px solid var(--good); }
 .settle-row.overdue { border-left: 3px solid var(--bad); }
 .settle-row.soon, .settle-row.later { border-left: 3px solid var(--warn); }
+.settle-row.sel { box-shadow: inset 0 0 0 1px var(--accent); }

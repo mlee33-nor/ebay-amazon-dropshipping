@@ -281,14 +281,15 @@ async function syncFinances(log) {
     log.push('finances: skipped (token lacks sell.finances scope; using order-level fees, no ad fees)');
     return;
   }
-  const last = await getSetting('ebay_last_finance_sync');
+  // First run with the transactions table (or an empty one) backfills the whole history
+  const hasAny = (await q('select 1 from ebay_transactions limit 1')).length > 0;
+  const last = hasAny ? await getSetting('ebay_last_finance_sync') : null;
   const from = last
     ? new Date(new Date(last).getTime() - 7 * 86400_000)
     : new Date(Date.now() - Number(process.env.EBAY_BACKFILL_DAYS || 365) * 86400_000);
   const startedAt = new Date().toISOString();
-  const saleFees = new Map();
-  const adFees = new Map();
-  const refunds = new Map();
+  const touched = new Set();
+  let stored = 0;
   let offset = 0;
   while (true) {
     const filter = `transactionDate:[${from.toISOString()}..${startedAt}]`;
@@ -296,25 +297,50 @@ async function syncFinances(log) {
     const page = await ebayGet(url);
     for (const t of page.transactions || []) {
       const orderRef = t.orderId || t.references?.find((r) => r.referenceType === 'ORDER_ID')?.referenceId;
-      if (!orderRef) continue;
-      if (t.transactionType === 'SALE') {
-        saleFees.set(orderRef, (saleFees.get(orderRef) || 0) + money(t.totalFeeAmount));
-      } else if (t.transactionType === 'NON_SALE_CHARGE' && /AD_FEE/i.test(t.feeType || '')) {
-        const amt = money(t.amount) * (t.bookingEntry === 'CREDIT' ? -1 : 1);
-        adFees.set(orderRef, (adFees.get(orderRef) || 0) + amt);
-      } else if (t.transactionType === 'REFUND') {
-        refunds.set(orderRef, (refunds.get(orderRef) || 0) + money(t.amount));
-      }
+      if (!orderRef || !t.transactionId) continue;
+      // Fee on a SALE is what eBay charged; on a REFUND it is the fee eBay credits back (per order line)
+      const lineFees = (t.orderLineItems || []).reduce((s, li) => s + (li.marketplaceFees || []).reduce((x, f) => x + money(f.amount), 0), 0);
+      const fee = money(t.totalFeeAmount) || lineFees;
+      await q(
+        `insert into ebay_transactions (transaction_id, order_id, type, fee_type, booking_entry, amount, fee_amount, transaction_at, raw)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+         on conflict (transaction_id) do update set order_id = excluded.order_id, type = excluded.type, fee_type = excluded.fee_type,
+           booking_entry = excluded.booking_entry, amount = excluded.amount, fee_amount = excluded.fee_amount,
+           transaction_at = excluded.transaction_at, raw = excluded.raw`,
+        [t.transactionId, orderRef, t.transactionType || null, t.feeType || null, t.bookingEntry || null,
+          money(t.amount), Math.abs(fee), t.transactionDate || null, JSON.stringify(t)]
+      );
+      touched.add(orderRef);
+      stored++;
     }
     offset += 1000;
     if (!page.next || offset >= (page.total || 0)) break;
   }
-  for (const [id, fee] of saleFees) await q('update ebay_orders set ebay_fees = $2 where order_id = $1', [id, fee]);
-  for (const [id, fee] of adFees) await q('update ebay_orders set ad_fees = $2 where order_id = $1', [id, Math.max(0, fee)]);
-  for (const [id, amt] of refunds)
-    await q('update ebay_orders set refund_total = greatest(refund_total, $2) where order_id = $1', [id, amt]);
+  await applyFinanceTotals([...touched]);
   await setSetting('ebay_last_finance_sync', startedAt);
-  log.push(`finances: fees on ${saleFees.size}, ad fees on ${adFees.size}, refunds on ${refunds.size}`);
+  log.push(`finances: ${stored} records on ${touched.size} orders`);
+}
+
+// Per-order totals from ALL stored Finances records: sale fees, ad fees net of ad credits, buyer refunds,
+// and the fees eBay credited back on refunds.
+export async function applyFinanceTotals(orderIds) {
+  if (!orderIds.length) return;
+  const rows = await q(
+    `select order_id,
+            sum(case when type = 'SALE' then fee_amount else 0 end) as sale_fees,
+            sum(case when type = 'NON_SALE_CHARGE' and fee_type ilike '%AD_FEE%'
+                     then case when booking_entry = 'CREDIT' then -amount else amount end else 0 end) as ad_fees,
+            sum(case when type = 'REFUND' then amount else 0 end) as refunds,
+            sum(case when type = 'REFUND' then fee_amount else 0 end) as fee_credit,
+            bool_or(type = 'SALE') as has_sale
+     from ebay_transactions where order_id = any($1) group by order_id`,
+    [orderIds]
+  );
+  for (const r of rows) {
+    if (r.has_sale) await q('update ebay_orders set ebay_fees = $2 where order_id = $1', [r.order_id, Number(r.sale_fees)]);
+    await q('update ebay_orders set ad_fees = $2, fee_credit = $3 where order_id = $1', [r.order_id, Math.max(0, Number(r.ad_fees)), Number(r.fee_credit)]);
+    if (Number(r.refunds) > 0) await q('update ebay_orders set refund_total = greatest(refund_total, $2) where order_id = $1', [r.order_id, Number(r.refunds)]);
+  }
 }
 
 async function syncReturns(log) {
