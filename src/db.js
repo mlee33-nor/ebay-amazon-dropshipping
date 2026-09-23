@@ -238,6 +238,8 @@ export async function initDb() {
       exec: (text) => pool.query(text),
       close: () => pool.end(),
     };
+  } else if (process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production') {
+    throw new Error('DATABASE_URL is not set. Add your Supabase Session pooler connection string in Railway -> Variables.');
   } else {
     // Local dev: a real embedded PostgreSQL (crash-safe) in ./.localdb on a private port.
     // If another local process already started it (server + a script), just connect to it.
