@@ -79,12 +79,12 @@ export function renderOpex(el) {
       return `<div class="card"><div class="card-h"><div><h3>${monthLabel(m)}</h3><div class="sub">${list.length} ${list.length === 1 ? 'cost' : 'costs'}</div></div><div class="right"><b class="num">${money(total(m), 2)}</b></div></div>
         <div class="card-b table-wrap">${list.length ? `<table class="simple ox-table"><thead><tr><th>What</th><th class="ox-payer">Paid by</th><th class="ox-note">Note</th><th class="r">Amount</th><th><span class="sr-only">Delete</span></th></tr></thead><tbody>
           ${list.map((e) => `<tr data-id="${e.id}">
-            <td class="ox-what">${esc(e.category)}${e.source === 'sheet' ? ' <span class="pill">from sheet</span>' : ''}<div class="ox-sub muted">${payer(e.paid_by)}${e.note ? ` · ${esc(e.note)}` : ''}</div></td>
+            <td class="ox-what">${esc(e.category)}${e.source === 'sheet' ? ` <span class="pill">${ICONS.sheet} from sheet</span>` : ''}<div class="ox-sub muted">${payer(e.paid_by)}${e.note ? ` · ${esc(e.note)}` : ''}</div></td>
             <td class="ox-payer">${payer(e.paid_by)}</td>
             <td class="ox-note muted">${esc(e.note || '')}</td>
             <td class="r ox-amt-cell"><input class="input num ox-amt" type="number" step="0.01" min="0.01" inputmode="decimal" value="${e.amount}" aria-label="Amount for ${esc(e.category)}" /></td>
-            <td class="r ox-del-cell"><button class="btn sm ghost ox-del" title="Delete" aria-label="Delete ${esc(e.category)}">${ICONS.x}</button></td>
-          </tr>`).join('')}</tbody></table>` : '<div class="empty" style="padding:18px">Nothing for this month yet.</div>'}</div></div>`;
+            <td class="r ox-del-cell"><button class="btn sm ghost danger ox-del" title="Delete" aria-label="Delete ${esc(e.category)}">${ICONS.trash}</button></td>
+          </tr>`).join('')}</tbody></table>` : `<div class="empty" style="padding:22px 16px"><div class="ic" style="width:36px;height:36px;border-radius:10px;margin-bottom:8px">${ICONS.wallet.replace('<svg', '<svg style="width:16px;height:16px"')}</div><div class="t" style="font-size:13.5px">Nothing for this month yet</div>Add a cost above, or copy last month's recurring costs.</div>`}</div></div>`;
     }).join('')}
   </div>`;
 

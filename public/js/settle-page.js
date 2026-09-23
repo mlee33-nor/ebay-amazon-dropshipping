@@ -29,8 +29,8 @@ function paidState(s, v, due) {
 // Due-date pill for the All-months table
 function duePill(v, due) {
   if (v.fullyPaid || v.nothingDue) return `<span class="muted">${fmtDate(due.dueDate)}</span>`;
-  if (due.kind === 'overdue') return `<span class="pill bad" title="${due.label}">${fmtDate(due.dueDate)} · ${due.text.toLowerCase()}</span>`;
-  if (due.kind === 'soon') return `<span class="pill warn" title="${due.label}">${fmtDate(due.dueDate)} · ${due.text.toLowerCase()}</span>`;
+  if (due.kind === 'overdue') return `<span class="pill bad" title="${due.label}">${ICONS.alert} ${fmtDate(due.dueDate)} · ${due.text.toLowerCase()}</span>`;
+  if (due.kind === 'soon') return `<span class="pill warn" title="${due.label}">${ICONS.clock} ${fmtDate(due.dueDate)} · ${due.text.toLowerCase()}</span>`;
   return `<span>${fmtDate(due.dueDate)}</span>`;
 }
 
@@ -42,7 +42,7 @@ export function renderSettlement(el) {
   const split = Number(d.settings.split_amazon);
   const months = allMonths(d.orders, expenses);
   if (!months.length) {
-    el.innerHTML = `<div class="card"><div class="empty"><div class="ic">${ICONS.settle}</div><div class="t">Nothing to settle yet</div>Upload a <a href="#/import">monthly sheet</a> or connect eBay first.</div></div>`;
+    el.innerHTML = `<div class="card"><div class="empty lg"><div class="ic">${ICONS.settle}</div><div class="t">Nothing to settle yet</div><p>The monthly partner settlement is computed from counted sales and operating costs. Once either exists, the month appears here.</p><div class="actions"><a class="btn primary" href="#/import">${ICONS.sheet} Upload a monthly sheet</a><a class="btn" href="#/settings">${ICONS.settings} Connect eBay</a></div></div></div>`;
     return;
   }
   if (!selected || !months.includes(selected)) selected = months[months.length - 1];
@@ -63,10 +63,21 @@ export function renderSettlement(el) {
   const hasOther = all.some((x) => Math.abs(x.otherCosts) > 0.009);
   const statusPill = (x) => {
     const w = view(x);
-    if (w.paid === null) return w.nothingDue ? '<span class="pill">Nothing due</span>' : '<span class="pill warn">Unpaid</span>';
+    if (w.paid === null) return w.nothingDue ? `<span class="pill">${ICONS.minus} Nothing due</span>` : `<span class="pill warn">${ICONS.clock} Unpaid</span>`;
     if (w.fullyPaid) return `<span class="pill good">${ICONS.check} Paid</span>`;
-    return w.outstanding > 0 ? `<span class="pill warn">${money(w.outstanding, 2)} owed</span>` : `<span class="pill info">Overpaid ${money(-w.outstanding, 2)}</span>`;
+    return w.outstanding > 0 ? `<span class="pill warn">${ICONS.clock} ${money(w.outstanding, 2)} owed</span>` : `<span class="pill info">${ICONS.info} Overpaid ${money(-w.outstanding, 2)}</span>`;
   };
+  // Presentation of the selected month's state: a loud label, an icon and the day count next to the words
+  const stLabel = st.cls === 'good' ? 'Settled' : st.cls === 'bad' ? 'Overdue' : st.cls === 'warn' ? (v.paid !== null ? 'Partly paid' : 'Due') : st.cls === 'info' ? 'Overpaid' : 'Nothing due';
+  const stIcon = st.cls === 'good' ? ICONS.circleCheck : st.cls === 'bad' ? ICONS.alert : st.cls === 'warn' ? ICONS.clock : st.cls === 'info' ? ICONS.info : ICONS.minus;
+  const stSide = (() => {
+    if (v.nothingDue || v.fullyPaid || due.kind === 'paid') return '';
+    const n = due.days;
+    if (n < 0) return `<div class="side"><div class="big num">${-n}</div><div class="sm">${-n === 1 ? 'day' : 'days'} overdue</div></div>`;
+    if (n === 0) return '<div class="side"><div class="big">Today</div><div class="sm">due date</div></div>';
+    return `<div class="side"><div class="big num">${n}</div><div class="sm">${n === 1 ? 'day' : 'days'} left</div></div>`;
+  })();
+  const avatar = (name) => `<span class="avatar ${name === A ? '' : 'b'}" aria-hidden="true">${esc(String(name || '?').trim().charAt(0).toUpperCase())}</span>`;
   const sendsCell = (x) => { const w = view(x); return `${w.reverse ? `<span class="muted" style="font-size:11px;font-weight:500">${esc(w.from)} → ${esc(w.to)}</span> ` : ''}<b>${money(w.amount, 2)}</b>`; };
   const tot = {
     orders: all.reduce((t, x) => t + x.orders, 0), collected: sumCents(all, (x) => x.collected), cogs: sumCents(all, (x) => x.cogs), adFees: sumCents(all, (x) => x.adFees),
@@ -86,16 +97,19 @@ export function renderSettlement(el) {
   </div>
 
   <div class="grid g-12">
-    <div class="card hero owe c-5" style="padding-bottom:22px">
-      <div class="hero-eyebrow">${ICONS.wallet.replace('<svg', '<svg style="width:13px;height:13px"')} ${monthLabel(selected)} settlement <span class="pill ${duePillCls}" style="margin-left:auto;text-transform:none;letter-spacing:0" title="Settlements are due on the ${dueDay}th of the following month">${ICONS.clock} ${due.kind === 'paid' ? due.text : due.kind === 'later' || v.paid !== null ? `Due ${due.label}` : `${due.text} · ${due.label}`}</span></div>
-      <div class="muted" style="margin-top:14px;font-size:13px;font-weight:500">${sendsLine}</div>
-      <div class="hero-value num" id="st-value" style="margin-top:4px">${money(v.amount, 2)}</div>
-      <div class="hero-meta">
+    <div class="card settle-card c-5">
+      <div class="settle-head">
+        <span class="eyebrow">${ICONS.wallet} ${monthLabel(selected)} settlement</span>
+        <span class="pill ${duePillCls}" title="Settlements are due on the ${dueDay}th of the following month">${ICONS.calendar} ${due.kind === 'paid' ? due.text : due.kind === 'later' || v.paid !== null ? `Due ${due.label}` : `${due.text} · ${due.label}`}</span>
+      </div>
+      <div class="settle-who">${avatar(v.from)}<b>${esc(v.from)}</b><span class="muted">sends</span>${ICONS.arrowRight.replace('<svg', '<svg class="arrow"')}${avatar(v.to)}<b>${esc(v.to)}</b></div>
+      <div class="settle-amt num" id="st-value">${money(v.amount, 2)}</div>
+      <div class="settle-math">
         <span>Reimbursement <b>${money(s.cogs + s.opexAmazon, 2)}</b></span>
         <span>${s.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s ${split}% share <b>${money(Math.abs(s.shareAmazon), 2)}</b></span>
       </div>
-      ${v.reverse ? `<div class="muted" style="font-size:12px;margin-top:8px">${esc(A)}'s share of this month's loss is bigger than ${esc(A)}'s reimbursement, so ${esc(A)} pays ${esc(B)} the difference.</div>` : ''}
-      <div class="status-card ${st.cls}" style="margin-top:18px"><div class="ic">${st.icon}</div><div><div class="t">${st.t}</div><div class="s">${esc(st.s)}</div></div></div>
+      ${v.reverse ? `<div class="settle-hint">${esc(A)}'s share of this month's loss is bigger than ${esc(A)}'s reimbursement, so ${esc(A)} pays ${esc(B)} the difference.</div>` : ''}
+      <div class="state ${st.cls}" role="status"><div class="ic">${stIcon}</div><div><div class="lbl"><span class="live"></span>${stLabel}</div><div class="t">${st.t}</div><div class="s">${esc(st.s)}</div></div>${stSide}</div>
       ${paidPct !== null ? `<div class="paid-bar ${v.outstanding < -0.009 ? 'over' : ''}" title="${paidPct.toFixed(0)}% of the amount due"><div style="width:${paidPct.toFixed(1)}%"></div></div>` : ''}
       <div class="settle-sec" style="margin-top:20px">
         <div class="row" style="justify-content:space-between;gap:8px"><h4 style="margin:0">${v.fullyPaid ? 'Payment recorded' : 'Record a payment'}</h4>${v.fullyPaid ? `<button class="btn sm ghost" type="button" id="pay-edit" aria-expanded="false" aria-controls="pay-form">${ICONS.editor} Edit payment</button>` : ''}</div>
@@ -120,7 +134,7 @@ export function renderSettlement(el) {
             ${line('Net item profit', money(s.orderProfit, 2), { total: true, cls: s.orderProfit < 0 ? 'neg' : '' })}
           </div>
           <div class="settle-sec">${sec(2, 'Operating costs')}
-            ${s.expenses.length ? s.expenses.map((e) => line(`${esc(e.category)}${e.note ? ` <span class="muted" style="font-size:11.5px">${esc(e.note)}</span>` : ''}${e.paid_by === 'amazon' ? ` <span class="pill">${esc(A)} paid</span>` : ''}`, money(e.amount, 2))).join('') : '<div class="muted" style="font-size:13px;padding:6px 0">None entered</div>'}
+            ${s.expenses.length ? s.expenses.map((e) => line(`${esc(e.category)}${e.note ? ` <span class="muted" style="font-size:11.5px">${esc(e.note)}</span>` : ''}${e.paid_by === 'amazon' ? ` <span class="pill">${ICONS.wallet} ${esc(A)} paid</span>` : ''}`, money(e.amount, 2))).join('') : '<div class="muted" style="font-size:13px;padding:6px 0">None entered</div>'}
             ${line('Total operating expenses', money(s.opex, 2), { total: true })}
           </div>
         </div>

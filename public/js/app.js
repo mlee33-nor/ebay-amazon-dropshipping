@@ -1,6 +1,6 @@
 import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, ago, api, toast, downloadCsv, ICONS, DAY, ymd, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel } from './util.js';
 import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor } from './metrics.js';
-import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer } from './charts.js';
+import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer, crosshair, areaFade } from './charts.js';
 import { renderEditor } from './editor.js';
 import { renderSettlement } from './settle-page.js';
 import { renderOpex } from './opex-page.js';
@@ -164,10 +164,17 @@ $('#theme-btn').addEventListener('click', () => {
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem('dd_theme', next); } catch {}
   setThemeIcon();
+  syncThemeColor();
   renderPage();
 });
+// Keep the browser chrome (mobile address bar) the same colour as the page background
+function syncThemeColor() {
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.content = getComputedStyle(document.documentElement).getPropertyValue('--page').trim() || '#09090b';
+}
 if (!document.documentElement.dataset.theme) document.documentElement.dataset.theme = 'dark';
 setThemeIcon();
+syncThemeColor();
 
 $('#sync-btn').addEventListener('click', async () => {
   const btn = $('#sync-btn');
@@ -254,12 +261,20 @@ function rangeText(r) {
   return `${fmtDate(r.start, f)} – ${fmtDate(r.end, f)}`;
 }
 
+// Loading placeholders mirror the layout they stand in for (hero + settlement card, KPI strip, two charts)
+const skCard = (inner) => `<div class="sk-card">${inner}</div>`;
 const skeleton = () => `<div class="sk-grid" aria-busy="true" aria-label="Loading">
-  <div class="skeleton sk-hero"></div>
-  <div class="sk-side">${'<div class="skeleton"></div>'.repeat(4)}</div>
-  ${'<div class="skeleton sk-kpi"></div>'.repeat(4)}
-  <div class="skeleton sk-chart"></div><div class="skeleton sk-chart2"></div>
+  <div class="sk-hero">${skCard('<div class="sk w40"></div><div class="sk num"></div><div class="sk w60"></div><div class="sk chart"></div>')}</div>
+  <div class="sk-side">${skCard('<div class="sk w60"></div><div class="sk w40"></div><div class="sk num"></div><div class="sk w80"></div><div class="sk line"></div><div class="sk w80"></div><div class="sk w60"></div><div class="sk w80"></div>')}</div>
+  ${'<div class="sk-kpi">' + skCard('<div class="sk w40"></div><div class="sk w60" style="height:22px"></div>') + '</div>'}
+  ${'<div class="sk-kpi">' + skCard('<div class="sk w40"></div><div class="sk w60" style="height:22px"></div>') + '</div>'}
+  ${'<div class="sk-kpi">' + skCard('<div class="sk w40"></div><div class="sk w60" style="height:22px"></div>') + '</div>'}
+  ${'<div class="sk-kpi">' + skCard('<div class="sk w40"></div><div class="sk w60" style="height:22px"></div>') + '</div>'}
+  <div class="sk-chart">${skCard('<div class="sk w40"></div><div class="sk w60"></div><div class="sk chart" style="height:260px"></div>')}</div>
+  <div class="sk-chart2">${skCard('<div class="sk w60"></div><div class="sk w40"></div><div class="sk chart" style="height:260px"></div>')}</div>
 </div>`;
+// Table / list placeholder for panels that fetch on their own (settings log, editor sheets, match review)
+export const skeletonRows = (n = 6) => `<div class="sk-rows" aria-busy="true" aria-label="Loading">${'<div class="sk"></div>'.repeat(n)}</div>`;
 
 // ---------------------------------------------------------------- shared bits
 function delta(cur, prev, { invert = false, isPct = false } = {}) {
@@ -274,13 +289,30 @@ function delta(cur, prev, { invert = false, isPct = false } = {}) {
   }
   if (Math.abs(d) < 0.0005) return '<span class="delta flat">0%</span>';
   const good = invert ? d < 0 : d > 0;
-  return `<span class="delta ${good ? 'up' : 'down'}" title="vs previous period">${d >= 0 ? '▲' : '▼'} ${label}</span>`;
+  return `<span class="delta ${good ? 'up' : 'down'}" title="vs previous period">${d >= 0 ? ICONS.arrowUp : ICONS.arrowDown}${label}</span>`;
 }
 
-function kpi({ label, value, sw, deltaHtml = '', foot = '', tip = '', id = '' }) {
+// Count-up registry: kpi() and the hero stats register a number + the exact formatter used for the static
+// text, and flushCounts() animates each one after the page HTML is in place. The final frame always renders
+// format(target), so the value that settles on screen is identical to the static string.
+let counters = [];
+let counterId = 0;
+function countable(raw, fmt) {
+  if (raw === null || raw === undefined || !Number.isFinite(Number(raw)) || typeof fmt !== 'function') return '';
+  const id = `cu-${++counterId}`;
+  counters.push([id, Number(raw), fmt]);
+  return `id="${id}"`;
+}
+function flushCounts(ms = 750) {
+  const list = counters;
+  counters = [];
+  for (const [id, v, f] of list) countUp(document.getElementById(id), v, f, ms);
+}
+
+function kpi({ label, value, sw, deltaHtml = '', foot = '', tip = '', id = '', raw, fmt }) {
   return `<div class="card kpi" ${tip ? `title="${esc(tip)}"` : ''}>
     <div class="kpi-top">${sw ? `<span class="sw" style="background:var(${sw})"></span>` : ''}${esc(label)}</div>
-    <div class="kpi-val num">${value}</div>
+    <div class="kpi-val num" ${countable(raw, fmt)}>${value}</div>
     <div class="kpi-foot">${deltaHtml}<span>${foot}</span></div>
     ${id ? `<div class="mini" id="${id}"></div>` : ''}
   </div>`;
@@ -304,9 +336,15 @@ export function refundSplit(orders) {
 }
 const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded to buyer');
 
+// Every status pill carries an icon as well as a colour, so state never relies on colour alone
+const STATUS_ICON = {
+  profitable: 'trendUp', loss: 'trendDown', returned: 'return', awaiting_cost: 'clock', cancelled: 'x',
+  cancelled_after_purchase: 'circleX', excluded: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert',
+};
 export function statusPill(s) {
   const m = STATUS_META[s] || { label: s, cls: '' };
-  return `<span class="pill ${m.cls}">${m.label}</span>`;
+  const ic = ICONS[STATUS_ICON[s]] || '';
+  return `<span class="pill ${m.cls}">${ic}${m.label}</span>`;
 }
 
 const granLabel = { hour: 'Hourly', day: 'Daily', week: 'Weekly', month: 'Monthly' };
@@ -331,11 +369,16 @@ const bucketLabel = (k, gran) => {
 };
 
 function emptyState(el) {
-  el.innerHTML = `<div class="card"><div class="empty">
-    <div class="ic">${ICONS.orders}</div>
-    <div class="t">No eBay sales in this date range</div>
-    <div>${state.data.orders.length ? 'Try a wider range, like <b>All</b>.' : 'Connect eBay and the Amazon email import in <a href="#/settings">Settings</a>, or upload a <a href="#/import">monthly sheet</a>.'}</div>
+  const has = state.data.orders.length > 0;
+  el.innerHTML = `<div class="card"><div class="empty lg">
+    <div class="ic">${has ? ICONS.calendar : ICONS.orders}</div>
+    <div class="t">${has ? 'No eBay sales in this date range' : 'No sales yet'}</div>
+    <p>${has ? 'Nothing was sold between these dates. Widen the range or pick another month.' : 'Connect eBay and the Amazon email import, or upload a monthly settlement sheet, and the numbers appear here.'}</p>
+    <div class="actions">${has
+      ? '<button class="btn" data-range="30d">Last 30 days</button><button class="btn" data-range="all">All time</button>'
+      : `<a class="btn primary" href="#/settings">${ICONS.settings} Open Settings</a><a class="btn" href="#/import">${ICONS.sheet} Upload a monthly sheet</a>`}</div>
   </div></div>`;
+  $$('[data-range]', el).forEach((b) => b.addEventListener('click', () => { state.range = b.dataset.range; store('dd_range', state.range); renderRangeSeg(); renderPage(); }));
 }
 
 // One compact notice per issue. Soft setup hints get an × (remembered for the session); failures never do.
@@ -459,10 +502,36 @@ function overview(el) {
     </a>`;
   })();
 
+  // Settlement state block: one loud, unambiguous label (SETTLED / DUE / OVERDUE …) plus the day count
+  const stateLabel = settleStatus.cls === 'good' ? 'Settled' : settleStatus.cls === 'bad' ? 'Overdue'
+    : settleStatus.cls === 'warn' ? (cv.paid !== null ? 'Partly paid' : 'Due') : settleStatus.cls === 'info' ? 'Overpaid' : 'Nothing due';
+  const stateIcon = settleStatus.cls === 'good' ? ICONS.circleCheck : settleStatus.cls === 'bad' ? ICONS.alert : settleStatus.cls === 'warn' ? ICONS.clock : settleStatus.cls === 'info' ? ICONS.info : ICONS.minus;
+  const stateSide = (() => {
+    if (cv.nothingDue || cv.settled || cardDue.kind === 'paid') return '';
+    const d = cardDue.days;
+    if (d < 0) return `<div class="side"><div class="big num">${-d}</div><div class="sm">${-d === 1 ? 'day' : 'days'} overdue</div></div>`;
+    if (d === 0) return '<div class="side"><div class="big">Today</div><div class="sm">due date</div></div>';
+    return `<div class="side"><div class="big num">${d}</div><div class="sm">${d === 1 ? 'day' : 'days'} left</div></div>`;
+  })();
+  const avatar = (name) => `<span class="avatar ${name === A ? '' : 'b'}" aria-hidden="true">${esc(String(name || '?').trim().charAt(0).toUpperCase())}</span>`;
+  const rangeLabel = r.start ? rangeText(r) : 'All time';
+  const hstat = ({ label, sw, value, raw, fmt, deltaHtml = '', foot = '', tip = '', id = '' }) => `<div class="hstat" ${tip ? `title="${esc(tip)}"` : ''}>
+      <div class="k">${sw ? `<span class="sw" style="background:var(${sw})"></span>` : ''}${esc(label)}</div>
+      <div class="v num" ${countable(raw, fmt)}>${value}</div>
+      <div class="f">${deltaHtml}<span>${foot}</span></div>
+      ${id ? `<div class="mini" id="${id}"></div>` : ''}
+    </div>`;
+  const marginNow = s.revenue ? biz / s.revenue : null;
+  const roiNow = s.cost ? biz / s.cost : null;
+
   el.innerHTML = `${setupBanner()}${settleCallout}
   <div class="grid g-12">
-    <div class="card hero c-7">
-      <div class="hero-label"><span class="hero-eyebrow"><span class="sw" style="background:var(--s-profit)"></span>Net business profit</span>${hasPrev ? delta(biz, bizPrev) : ''}</div>
+    <div class="card hero c-8 ${biz < 0 ? 'loss' : ''}">
+      <div class="hero-top">
+        <span class="hero-eyebrow"><span class="sw" style="background:var(${biz < 0 ? '--bad' : '--s-profit'})"></span>Net business profit</span>
+        <span class="muted" style="font-size:12px">${esc(rangeLabel)}</span>
+        ${hasPrev ? delta(biz, bizPrev) : ''}
+      </div>
       <div class="hero-value num ${biz < 0 ? 'neg' : ''}" id="hero-value">${money(biz, 2)}</div>
       <div class="hero-meta">
         <span>Item profit <b>${money(s.net, 2)}</b></span>
@@ -470,23 +539,29 @@ function overview(el) {
         <span><b>${count(s.countedOrders)}</b> costed of <b>${count(s.orders)}</b> sales</span>
       </div>
       <div class="spark" id="hero-spark"></div>
+      <div class="hero-stats">
+        ${hstat({ label: 'Revenue', sw: '--s-revenue', value: moneyShort(s.revenueAll), raw: s.revenueAll, fmt: moneyShort, deltaHtml: hasPrev ? delta(s.revenueAll, p.revenueAll) : '', foot: 'buyer paid, excl. tax', id: 'k-rev' })}
+        ${hstat({ label: 'Orders', value: count(s.orders), raw: s.orders, fmt: count, deltaHtml: hasPrev ? delta(s.orders, p.orders) : '', foot: `${count(s.units)} units`, id: 'k-ord' })}
+        ${hstat({ label: 'Profit margin', value: pct(marginNow), raw: marginNow, fmt: pct, deltaHtml: hasPrev && p.revenue ? delta(biz / s.revenue, bizPrev / p.revenue, { isPct: true }) : '', foot: `item ${pct(s.margin)}`, tip: 'After operating costs. Item margin (before operating costs) shown underneath.' })}
+        ${hstat({ label: 'ROI', value: pct(roiNow), raw: roiNow, fmt: pct, deltaHtml: hasPrev && p.cost ? delta(biz / s.cost, bizPrev / p.cost, { isPct: true }) : '', foot: `item ${pct(s.roi)}`, tip: 'Business profit ÷ Amazon cost. Item ROI (before operating costs) shown underneath.' })}
+      </div>
     </div>
-    <div class="c-5 side-kpis">
-      ${kpi({ label: 'Revenue', sw: '--s-revenue', value: moneyShort(s.revenueAll), deltaHtml: hasPrev ? delta(s.revenueAll, p.revenueAll) : '', foot: 'buyer paid, excl. tax', id: 'k-rev' })}
-      ${kpi({ label: 'Orders', value: count(s.orders), deltaHtml: hasPrev ? delta(s.orders, p.orders) : '', foot: `${count(s.units)} units`, id: 'k-ord' })}
-      ${kpi({ label: 'Profit margin', value: pct(s.revenue ? biz / s.revenue : null), deltaHtml: hasPrev && p.revenue ? delta(biz / s.revenue, bizPrev / p.revenue, { isPct: true }) : '', foot: `business profit ÷ revenue · item ${pct(s.margin)}`, tip: 'After operating costs. Item margin (before operating costs) shown underneath.' })}
-      ${kpi({ label: 'ROI', value: pct(s.cost ? biz / s.cost : null), deltaHtml: hasPrev && p.cost ? delta(biz / s.cost, bizPrev / p.cost, { isPct: true }) : '', foot: `business profit ÷ Amazon cost · item ${pct(s.roi)}` })}
-    </div>
-  </div>
 
-  <div class="grid g-12 mt">
-    <div class="card hero owe c-4" style="padding-bottom:20px">
-      <div class="hero-eyebrow">${ICONS.wallet.replace('<svg', '<svg style="width:13px;height:13px"')} Partner settlement · ${monthLabel(cardMonth, 'long')}</div>
-      <div class="muted" style="font-size:11.5px;margin-top:4px">${pickedMonth ? 'The month picked in the range bar' : 'This month so far · pick <b>Month</b> in the range bar to see another'}</div>
-      <div class="muted" style="font-size:12.5px;margin-top:10px">${esc(cv.from)} sends ${esc(cv.to)}</div>
-      <div class="hero-value num" id="settle-value" style="font-size:36px;margin-top:2px">${money(cv.amount, 2)}</div>
-      <div class="hero-meta" style="margin-top:8px"><span>Reimbursement <b>${money(cardSettle.cogs + cardSettle.opexAmazon, 2)}</b></span><span>${cardSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(cardSettle.shareAmazon), 2)}</b></span></div>
-      <div class="status-card ${settleStatus.cls}" style="margin-top:14px"><div class="ic">${settleStatus.icon}</div><div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>${!cv.nothingDue ? `<span class="pill" title="Settlements are due on the ${dueDay}th of the following month">${cardDue.kind === 'paid' ? cardDue.text : `Due ${cardDue.label}`}</span>` : ''}</div>
+    <div class="card settle-card c-4">
+      <div class="settle-head">
+        <span class="eyebrow">${ICONS.wallet} Partner settlement</span>
+        <span class="pill">${ICONS.calendar} ${monthLabel(cardMonth, 'long')}</span>
+      </div>
+      <div class="settle-who">${avatar(cv.from)}<b>${esc(cv.from)}</b><span class="muted">sends</span>${ICONS.arrowRight.replace('<svg', '<svg class="arrow"')}${avatar(cv.to)}<b>${esc(cv.to)}</b></div>
+      <div class="settle-amt num" id="settle-value">${money(cv.amount, 2)}</div>
+      <div class="settle-math"><span>Reimbursement <b>${money(cardSettle.cogs + cardSettle.opexAmazon, 2)}</b></span><span>${cardSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(cardSettle.shareAmazon), 2)}</b></span></div>
+      <div class="settle-hint">${pickedMonth ? 'The month picked in the range bar' : 'This month so far · pick <b>Month</b> in the range bar to see another'}</div>
+      <div class="state ${settleStatus.cls}" role="status" title="${!cv.nothingDue ? esc(`Settlements are due on the ${dueDay}th of the following month`) : ''}">
+        <div class="ic">${stateIcon}</div>
+        <div><div class="lbl"><span class="live"></span>${stateLabel}</div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>
+        ${stateSide}
+      </div>
+      <div class="settle-track-h"><span>Month by month</span><span>${allSettled.length > 6 ? `latest 6 of ${allSettled.length}` : ''}</span></div>
       <div class="settle-track" role="list" aria-label="Settlement by month">${[...allSettled].reverse().slice(0, 6).map((x) => {
         const xv = view(x);
         const d = dueStatus(settlementDueDate(x.month, dueDay));
@@ -496,15 +571,18 @@ function overview(el) {
           : `<span class="pill warn">${ICONS.clock} Due ${fmtDate(settlementDueDate(x.month, dueDay))}</span>`;
         return `<a class="settle-row ${xv.settled ? 'ok' : d.kind}${x.month === cardMonth ? ' sel' : ''}" role="listitem" href="#/settlement" data-month="${x.month}" title="${esc(`${xv.from} sends ${xv.to} ${money(xv.amount, 2)}`)}">
           <span class="m">${monthLabel(x.month)}</span>
-          <span class="amt num">${xv.reverse ? `<span class="muted" style="font-size:11px;font-weight:500">${esc(xv.from)} → ${esc(xv.to)}</span> ` : ''}${money(xv.amount, 2)}</span>
+          <span class="amt num">${xv.reverse ? `<span class="dir">${esc(xv.from)} → ${esc(xv.to)}</span>` : ''}${money(xv.amount, 2)}</span>
           ${badge}
         </a>`;
       }).join('')}</div>
-      <div class="stat-row" style="margin-top:8px"><span class="k">Owed across all months</span><span class="v ${Math.abs(owedAll) > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? `${esc(B)} owes ${esc(A)} ${money(owedAll, 2)}` : owedAll < -0.009 ? `${esc(A)} owes ${esc(B)} ${money(-owedAll, 2)}` : 'All settled ✓'}</span></div>
+      <div class="stat-row" style="margin-top:10px"><span class="k">Owed across all months</span><span class="v ${Math.abs(owedAll) > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? `${esc(B)} owes ${esc(A)} ${money(owedAll, 2)}` : owedAll < -0.009 ? `${esc(A)} owes ${esc(B)} ${money(-owedAll, 2)}` : `${ICONS.check.replace('<svg', '<svg style="width:13px;height:13px"')} All settled`}</span></div>
       <div style="margin-top:12px"><a class="btn sm" href="#/settlement">Open settlement ${ICONS.arrow}</a></div>
     </div>
+  </div>
+
+  <div class="grid g-12 mt">
     ${card('This month', now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), `
-      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0">${money(ms.net, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
+      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0" ${countable(ms.net, (v) => money(v, 0))}>${money(ms.net, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
       <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, ms.net / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
       ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (ms.net / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
       <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${thisSettle.businessProfit < 0 ? 'neg' : ''}">${money(thisSettle.businessProfit, 2)}</span></div>
@@ -517,25 +595,24 @@ function overview(el) {
       ${alertItem('info', ICONS.clock, 'Sales waiting on Amazon cost', `${oldAwaiting.length} older than 3 days · check the email import or enter a cost in the Editor`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/settings?focus=email')}
       ${alertItem('warn', ICONS.link, 'Suggested matches to review', 'Title-only matches need a human yes/no', state.data.amazon.suggestions || 0, '#/editor?tab=matches')}
       ${alertItem('warn', ICONS.return, 'Open returns', 'Returns not closed yet', openReturns.length, '#/returns')}
-      ${alertItem('good', ICONS.check, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
+      ${alertItem('good', ICONS.users, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
     </div>`, { cls: 'c-4' })}
-  </div>
-
-  <div class="kpis mt">
-    ${kpi({ label: 'Amazon cost', sw: '--s-cost', value: moneyShort(s.cost), deltaHtml: hasPrev ? delta(s.cost, p.cost, { invert: true }) : '', foot: `avg ${money(s.avgCost)}` })}
-    ${kpi({ label: 'eBay fees', sw: '--s-fees', value: moneyShort(s.fees), deltaHtml: hasPrev && p.fees ? delta(s.fees, p.fees, { invert: true }) : '', foot: feeFoot,
-      tip: 'Final value fees on synced eBay orders (the waterfall’s “eBay fees” bar). Monthly-sheet rows record the eBay payout after fees, so their fees are already out of revenue. Promoted-listing (ad) fees are counted separately.' })}
-    ${kpi({ label: 'Operating costs', sw: '--s-ops', value: money(ox.total, 2), deltaHtml: hasPrev ? delta(ox.total, oxPrev.total, { invert: true }) : '', foot: `subscriptions, tools, proxies · ${count(ox.byCategory.size)} items`, tip: 'Monthly operating costs from the sheets / Editor → Operating expenses. Partly covered months are prorated by day.' })}
-    ${kpi({ label: 'Refunds', sw: '--s-refunds', value: moneyShort(s.refunds), foot: [refundFees ? (split.buyer ? `${money(split.buyer, 2)} to buyers · ${money(refundFees, 2)} eBay refund fees` : 'eBay refund fees on sheet refund rows') : 'to buyers', s.amazonRefund ? `${money(s.amazonRefund)} recovered` : ''].filter(Boolean).join(' · '), tip: 'Money refunded to buyers on eBay orders, plus the eBay refund fee recorded on monthly-sheet refund rows.' })}
-    ${kpi({ label: 'Avg order value', value: money(s.aov), deltaHtml: hasPrev ? delta(s.aov, p.aov) : '' })}
-    ${kpi({ label: 'Item profit / order', value: money(s.profitPerOrder), deltaHtml: hasPrev ? delta(s.profitPerOrder, p.profitPerOrder) : '', foot: 'before operating costs' })}
-    ${kpi({ label: 'Return rate', value: pct(s.returnRate), deltaHtml: hasPrev ? delta(s.returnRate, p.returnRate, { invert: true, isPct: true }) : '', foot: `${count(s.returnCount)} orders` })}
-    ${kpi({ label: 'Awaiting cost', value: count(s.awaitingCount), foot: `${moneyShort(s.awaitingRevenue)} in sales not in profit yet`, tip: 'eBay sales with no linked Amazon purchase yet. Excluded from profit until linked.' })}
+    ${card('Where every dollar goes', 'Revenue broken into costs and what you keep', '<div class="chart tall" id="ch-waterfall"></div>', { cls: 'c-4' })}
   </div>
 
   <div class="grid g-12 mt">
-    ${card('Revenue, cost &amp; item profit', `${granLabel[gran]} · item profit before operating costs · red = loss period`, `${legend([['--s-revenue', 'Revenue', 1], ['--s-cost', 'Amazon cost', 1], ['--s-profit', 'Item profit']])}<div class="chart tall" id="ch-main"></div>`, { cls: 'c-8', right: granSeg() })}
-    ${card('Where every dollar goes', 'Revenue broken into costs and what you keep', '<div class="chart tall" id="ch-waterfall"></div>', { cls: 'c-4' })}
+    ${card('Revenue, cost &amp; item profit', `${granLabel[gran]} · item profit before operating costs · red = loss period`, `${legend([['--s-revenue', 'Revenue', 1], ['--s-cost', 'Amazon cost', 1], ['--s-profit', 'Item profit']])}<div class="chart tall" id="ch-main"></div>`, { cls: 'c-8 fill', right: granSeg() })}
+    <div class="c-4 kpis two kpi-block">
+      ${kpi({ label: 'Amazon cost', sw: '--s-cost', value: moneyShort(s.cost), raw: s.cost, fmt: moneyShort, deltaHtml: hasPrev ? delta(s.cost, p.cost, { invert: true }) : '', foot: `avg ${money(s.avgCost)}` })}
+      ${kpi({ label: 'eBay fees', sw: '--s-fees', value: moneyShort(s.fees), raw: s.fees, fmt: moneyShort, deltaHtml: hasPrev && p.fees ? delta(s.fees, p.fees, { invert: true }) : '', foot: feeFoot,
+        tip: 'Final value fees on synced eBay orders (the waterfall’s “eBay fees” bar). Monthly-sheet rows record the eBay payout after fees, so their fees are already out of revenue. Promoted-listing (ad) fees are counted separately.' })}
+      ${kpi({ label: 'Operating costs', sw: '--s-ops', value: money(ox.total, 2), raw: ox.total, fmt: (v) => money(v, 2), deltaHtml: hasPrev ? delta(ox.total, oxPrev.total, { invert: true }) : '', foot: `subscriptions, tools, proxies · ${count(ox.byCategory.size)} items`, tip: 'Monthly operating costs from the sheets / Editor → Operating expenses. Partly covered months are prorated by day.' })}
+      ${kpi({ label: 'Refunds', sw: '--s-refunds', value: moneyShort(s.refunds), raw: s.refunds, fmt: moneyShort, foot: [refundFees ? (split.buyer ? `${money(split.buyer, 2)} to buyers · ${money(refundFees, 2)} eBay refund fees` : 'eBay refund fees on sheet refund rows') : 'to buyers', s.amazonRefund ? `${money(s.amazonRefund)} recovered` : ''].filter(Boolean).join(' · '), tip: 'Money refunded to buyers on eBay orders, plus the eBay refund fee recorded on monthly-sheet refund rows.' })}
+      ${kpi({ label: 'Avg order value', value: money(s.aov), raw: s.aov, fmt: money, deltaHtml: hasPrev ? delta(s.aov, p.aov) : '' })}
+      ${kpi({ label: 'Item profit / order', value: money(s.profitPerOrder), raw: s.profitPerOrder, fmt: money, deltaHtml: hasPrev ? delta(s.profitPerOrder, p.profitPerOrder) : '', foot: 'before operating costs' })}
+      ${kpi({ label: 'Return rate', value: pct(s.returnRate), raw: s.returnRate, fmt: pct, deltaHtml: hasPrev ? delta(s.returnRate, p.returnRate, { invert: true, isPct: true }) : '', foot: `${count(s.returnCount)} orders` })}
+      ${kpi({ label: 'Awaiting cost', value: count(s.awaitingCount), raw: s.awaitingCount, fmt: count, foot: `${moneyShort(s.awaitingRevenue)} in sales not in profit yet`, tip: 'eBay sales with no linked Amazon purchase yet. Excluded from profit until linked.' })}
+    </div>
   </div>
 
   <div class="grid g-12 mt">
@@ -551,6 +628,7 @@ function overview(el) {
 
   countUp($('#hero-value'), biz, (v) => money(v, 2));
   countUp($('#settle-value'), cv.amount, (v) => money(v, 2), 700);
+  flushCounts();
 
   // hero spark
   sparkline($('#hero-spark'), dailyForSpark.map((b) => b.net), c.profit);
@@ -562,7 +640,7 @@ function overview(el) {
   mount($('#ch-main'), {
     grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
     tooltip: {
-      ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'line', lineStyle: { color: c.axis } },
+      ...tooltipBase(), trigger: 'axis', axisPointer: crosshair(),
       formatter: (ps) => {
         const b = series[ps[0].dataIndex];
         return ttHead(labels[ps[0].dataIndex]) + ttRow(c.revenue, 'Revenue', money(b.revenueAll)) + ttRow(c.cost, 'Amazon cost', money(b.cost)) +
@@ -574,9 +652,9 @@ function overview(el) {
     yAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: moneyShort }, axisLine: { show: false } },
     series: [
       { name: 'Net profit', type: 'bar', data: series.map((b) => ({ value: +b.net.toFixed(2), itemStyle: { color: b.net < 0 ? c.bad : c.profit, borderRadius: b.net < 0 ? [0, 0, 4, 4] : [4, 4, 0, 0] } })), barMaxWidth: 22, z: 2 },
-      { name: 'Revenue', type: 'line', data: series.map((b) => +b.revenueAll.toFixed(2)), smooth: 0.3, symbol: 'circle', symbolSize: 6, showSymbol: false, lineStyle: { width: 2, color: c.revenue }, itemStyle: { color: c.revenue },
-        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: `${c.revenue}30` }, { offset: 1, color: `${c.revenue}00` }]) } },
-      { name: 'Amazon cost', type: 'line', data: series.map((b) => +b.cost.toFixed(2)), smooth: 0.3, symbol: 'circle', symbolSize: 6, showSymbol: false, lineStyle: { width: 2, color: c.cost }, itemStyle: { color: c.cost } },
+      { name: 'Revenue', type: 'line', data: series.map((b) => +b.revenueAll.toFixed(2)), smooth: 0.3, symbol: 'circle', symbolSize: 6, showSymbol: false, lineStyle: { width: 1.75, color: c.revenue }, itemStyle: { color: c.revenue, borderColor: c.surface, borderWidth: 2 },
+        areaStyle: { color: areaFade(c.revenue, 0.16) } },
+      { name: 'Amazon cost', type: 'line', data: series.map((b) => +b.cost.toFixed(2)), smooth: 0.3, symbol: 'circle', symbolSize: 6, showSymbol: false, lineStyle: { width: 1.75, color: c.cost }, itemStyle: { color: c.cost, borderColor: c.surface, borderWidth: 2 } },
     ],
   });
   bindGran(el);
@@ -633,8 +711,8 @@ function overview(el) {
     tooltip: { ...tooltipBase(), trigger: 'axis', formatter: (ps) => ttHead(cumLabels[ps[0].dataIndex]) + ttRow(c.profit, 'Business profit to date', money(ps[0].value), true) },
     xAxis: { type: 'category', data: cumLabels, boundaryGap: false, ...axisBase({ splitLine: { show: false } }) },
     yAxis: { type: 'value', ...axisBase(), axisLine: { show: false }, axisLabel: { ...axisBase().axisLabel, formatter: moneyShort } },
-    series: [{ type: 'line', data: cum.map((v) => +v.toFixed(2)), smooth: 0.25, showSymbol: false, lineStyle: { width: 2.2, color: c.profit },
-      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: `${c.profit}40` }, { offset: 1, color: `${c.profit}00` }]) } }],
+    series: [{ type: 'line', data: cum.map((v) => +v.toFixed(2)), smooth: 0.25, showSymbol: false, lineStyle: { width: 1.75, color: c.profit }, itemStyle: { color: c.profit, borderColor: c.surface, borderWidth: 2 },
+      areaStyle: { color: areaFade(c.profit, 0.24) } }],
   });
 
   // outcomes donut (status colors + labels)
@@ -645,7 +723,8 @@ function overview(el) {
     ['Awaiting cost', all.filter((o) => o.status === 'awaiting_cost').length, c.accent],
     ['Cancelled', all.filter((o) => o.status === 'cancelled').length, c.ink3],
   ].filter((x) => x[1] > 0);
-  mount($('#ch-outcomes'), {
+  if (!outcome.length) $('#ch-outcomes').outerHTML = `<div class="empty"><div class="ic">${ICONS.orders}</div><div class="t">No orders to chart</div>Order outcomes appear once sales land in this range.</div>`;
+  else mount($('#ch-outcomes'), {
     tooltip: { ...tooltipBase(), trigger: 'item', formatter: (p) => ttHead(p.name) + `${count(p.value)} orders · ${p.percent.toFixed(1)}%` },
     legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: c.ink2, fontSize: 11.5 } },
     series: [{ type: 'pie', radius: ['52%', '76%'], center: ['50%', '42%'], padAngle: 2, itemStyle: { borderRadius: 5, borderColor: c.surface, borderWidth: 2 },
@@ -695,7 +774,7 @@ function overview(el) {
 }
 
 function alertItem(kind, icon, title, sub, n, href) {
-  return `<div class="alert" data-href="${href}" role="link" tabindex="0"><div class="alert-ic ${n ? kind : ''}" ${n ? '' : 'style="background:var(--surface-3);color:var(--ink-4)"'}>${icon}</div><div><div class="alert-t">${title}</div><div class="alert-s">${sub}</div></div><div class="n ${n ? '' : 'zero'}">${count(n)}</div>${ICONS.chevron.replace('<svg', '<svg class="chev"')}</div>`;
+  return `<div class="alert" data-href="${href}" role="link" tabindex="0"><div class="alert-ic ${n ? kind : 'zero'}">${icon}</div><div><div class="alert-t">${title}</div><div class="alert-s">${sub}</div></div><div class="n ${n ? '' : 'zero'}">${count(n)}</div>${ICONS.chevron.replace('<svg', '<svg class="chev"')}</div>`;
 }
 
 // ---------------------------------------------------------------- ANALYTICS
@@ -881,13 +960,13 @@ function lineChart(el, labels, lines, fmt, axisFmt) {
   const c = colors();
   return mount(el, {
     grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
-    tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'line', lineStyle: { color: c.axis } }, formatter: (ps) => ttHead(labels[ps[0].dataIndex]) + ps.map((p) => ttRow(p.color, p.seriesName, p.value === null ? '—' : fmt(p.value))).join('') },
+    tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: crosshair(), formatter: (ps) => ttHead(labels[ps[0].dataIndex]) + ps.map((p) => ttRow(p.color, p.seriesName, p.value === null ? '—' : fmt(p.value))).join('') },
     xAxis: { type: 'category', data: labels, boundaryGap: false, ...axisBase({ splitLine: { show: false } }) },
     yAxis: { type: 'value', ...axisBase(), axisLine: { show: false }, axisLabel: { ...axisBase().axisLabel, formatter: axisFmt || moneyShort } },
     series: lines.map((l) => ({
       name: l.name, type: 'line', data: l.data.map((v) => (v === null ? null : +v.toFixed(4))), smooth: 0.3, connectNulls: true, showSymbol: false, symbolSize: 8,
-      lineStyle: { width: 2, color: l.color }, itemStyle: { color: l.color },
-      areaStyle: l.area ? { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: `${l.color}40` }, { offset: 1, color: `${l.color}00` }]) } : undefined,
+      lineStyle: { width: 1.75, color: l.color }, itemStyle: { color: l.color, borderColor: c.surface, borderWidth: 2 },
+      areaStyle: l.area ? { color: areaFade(l.color, 0.24) } : undefined,
     })),
   });
 }
@@ -1020,16 +1099,16 @@ function orders(el) {
     selectableRows: false,
     initialSort: [{ column: 'created_at', dir: 'desc' }],
     columns: [
-      { title: 'Date', field: 'created_at', width: 120, formatter: (c) => `${fmtDate(c.getValue())}<div class="muted" style="font-size:11px">${new Date(c.getValue()).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>` },
-      { title: 'Item', field: 'title', minWidth: 240, widthGrow: 3, formatter: (c) => { const d = c.getRow().getData(); return `<div style="white-space:normal;line-height:1.3">${esc(trunc(d.title, 90))}</div><div class="${d.source === 'ledger' ? '' : 'mono '}muted" style="font-size:11px">${esc(orderLabel(d))}${d.units > 1 ? ` · ×${d.units}` : ''}</div>`; } },
-      { title: 'Buyer', field: 'buyer', width: 130, formatter: (c) => { const d = c.getRow().getData(); return `${esc(d.buyer || '')}<div class="muted" style="font-size:11px">${esc([d.ship_city, d.ship_state].filter(Boolean).join(', '))}</div>`; } },
-      { title: 'Revenue', field: 'revenue', hozAlign: 'right', sorter: 'number', width: 100, formatter: (c) => money(c.getValue()) },
-      { title: 'Amazon', field: 'cost', hozAlign: 'right', sorter: 'number', width: 100, formatter: (c) => (c.getRow().getData().has_cost ? money(c.getValue()) : '<span class="muted">—</span>') },
-      { title: 'Fees', field: 'fees', hozAlign: 'right', width: 90, sorter: (a, b, ra, rb) => (a + ra.getData().ad_fees) - (b + rb.getData().ad_fees), formatter: (c) => money(c.getValue() + c.getRow().getData().ad_fees) },
-      { title: 'Refund', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 90, formatter: (c) => (c.getValue() ? `<span title="${refundWord(c.getRow().getData())}">${money(c.getValue(), 2)}</span>` : '<span class="muted">—</span>') },
-      { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 105, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : '<span class="muted">pending</span>'; } },
-      { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 85, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
-      { title: 'Status', field: 'status', width: 150, formatter: (c) => statusPill(c.getValue()) },
+      { title: 'Date', field: 'created_at', width: 108, minWidth: 100, formatter: (c) => `${fmtDate(c.getValue())}<div class="muted" style="font-size:11px">${new Date(c.getValue()).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>` },
+      { title: 'Item', field: 'title', minWidth: 186, widthGrow: 3, formatter: (c) => { const d = c.getRow().getData(); return `<div style="white-space:normal;line-height:1.3">${esc(trunc(d.title, 90))}</div><div class="${d.source === 'ledger' ? '' : 'mono '}muted" style="font-size:11px">${esc(orderLabel(d))}${d.units > 1 ? ` · ×${d.units}` : ''}</div>`; } },
+      { title: 'Buyer', field: 'buyer', width: 120, minWidth: 110, formatter: (c) => { const d = c.getRow().getData(); return `${esc(d.buyer || '')}<div class="muted" style="font-size:11px">${esc([d.ship_city, d.ship_state].filter(Boolean).join(', '))}</div>`; } },
+      { title: 'Revenue', field: 'revenue', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 92, formatter: (c) => money(c.getValue()) },
+      { title: 'Amazon', field: 'cost', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 92, formatter: (c) => (c.getRow().getData().has_cost ? money(c.getValue()) : '<span class="muted">—</span>') },
+      { title: 'Fees', field: 'fees', hozAlign: 'right', width: 82, minWidth: 78, sorter: (a, b, ra, rb) => (a + ra.getData().ad_fees) - (b + rb.getData().ad_fees), formatter: (c) => money(c.getValue() + c.getRow().getData().ad_fees) },
+      { title: 'Refund', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 90, minWidth: 86, formatter: (c) => (c.getValue() ? `<span title="${refundWord(c.getRow().getData())}">${money(c.getValue(), 2)}</span>` : '<span class="muted">—</span>') },
+      { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 90, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : '<span class="muted">pending</span>'; } },
+      { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 86, minWidth: 82, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
+      { title: 'Status', field: 'status', width: 160, minWidth: 156, formatter: (c) => statusPill(c.getValue()) },
     ],
   }));
   const apply = () => {
@@ -1303,7 +1382,7 @@ async function importPage(el) {
     if (!files.length) return;
     const fd = new FormData();
     files.forEach((f) => fd.append('files', f));
-    $('#import-result').innerHTML = `<div class="card"><div class="card-b row"><span class="dot spin"></span>Reading ${files.length} sheet${files.length > 1 ? 's' : ''} and matching rows to eBay sales…</div></div>`;
+    $('#import-result').innerHTML = `<div class="card"><div class="card-b"><div class="row" style="margin-bottom:6px"><span class="dot spin"></span>Reading ${files.length} sheet${files.length > 1 ? 's' : ''} and matching rows to eBay sales…</div>${skeletonRows(4).replace('class="sk-rows"', 'class="sk-rows" style="padding:8px 0 0"')}</div></div>`;
     try {
       const results = await api('/api/amazon/import', { method: 'POST', body: fd });
       $('#import-result').innerHTML = results.map((r) => r.kind === 'ledger' ? card(`${okIcon} ${esc(r.filename)}`, `Monthly settlement sheet · ${monthName(r.month)}`, `
@@ -1336,6 +1415,7 @@ async function settings(el) {
   const d = state.data;
   const e = d.ebay;
   const demo = d.orders.filter((o) => o.order_id.startsWith('DEMO-')).length;
+  el.innerHTML = skeleton(); // the page waits on two log fetches; show its shape rather than a blank screen
   const log = await api('/api/sync-log').catch(() => []);
   const em = d.email;
   const mails = em.configured ? await api('/api/email/log').catch(() => []) : [];

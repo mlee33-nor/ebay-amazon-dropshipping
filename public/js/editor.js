@@ -1,7 +1,7 @@
 // Editor tab: spreadsheet mode (range select, copy/paste, undo) over eBay orders and Amazon purchases,
 // plus a match-review queue. Edits are staged locally (highlighted) until Save.
 import { $, $$, esc, money, pct, fmtDate, api, toast, downloadCsv, ICONS, monthLabel } from './util.js';
-import { state, loadData, renderPage, trackTable, openOrder, ORDER_EXPORT, statusPill } from './app.js';
+import { state, loadData, renderPage, trackTable, openOrder, ORDER_EXPORT, statusPill, skeletonRows } from './app.js';
 
 let tab = 'ebay';
 const dirty = new Map(); // key -> {field: value}
@@ -134,13 +134,13 @@ function ebaySheet(focusOrder) {
       { title: 'Date', field: 'created_at', width: 110, formatter: (c) => fmtDate(c.getValue(), dateFmt), cssClass: 'cell-ro' },
       { title: 'eBay order', field: 'order_id', width: 170, cssClass: 'cell-ro', formatter: (c) => { const d = c.getRow().getData(); return d.source === 'ledger' ? `<span title="Row from the monthly settlement sheet">Monthly sheet</span>${d.ebay_order_id ? ` <span class="mono muted">${esc(d.ebay_order_id)}</span>` : ''}` : `<span class="mono">${esc(c.getValue())}</span>`; } },
       { title: 'Item', field: 'title', width: 280, cssClass: 'cell-ro', formatter: (c) => `<span title="${esc(c.getValue())}">${esc(c.getValue())}</span>` },
-      { title: 'Status', field: 'view_status', width: 150, cssClass: 'cell-ro', formatter: (c) => statusPill(c.getValue()) },
+      { title: 'Status', field: 'view_status', width: 172, cssClass: 'cell-ro', formatter: (c) => statusPill(c.getValue()) },
       { title: 'Revenue', field: 'revenue', hozAlign: 'right', width: 95, sorter: 'number', formatter: (c) => `<span title="${c.getRow().getData().source === 'ledger' ? 'eBay payout after fees (monthly sheet)' : 'Buyer paid, excl. tax'}">${moneyFmt(c)}</span>`, cssClass: 'cell-ro' },
       { title: 'Amazon cost', field: 'amazon_cost', hozAlign: 'right', width: 145, sorter: 'number', cssClass: 'cell-ro', formatter: (c) => {
         const d = c.getRow().getData();
         if (d.status === 'in_sheet') return '<span class="muted" title="This eBay sale is covered by its monthly-sheet row, which carries the cost">in monthly sheet</span>';
         if (d.status === 'before_start') return '<span class="muted" title="Sold before the partnership started; not counted">before partnership</span>';
-        if (d.cost_origin === 'sheet') return `${money(c.getValue())} <span class="pill" title="Amazon cost from the monthly settlement sheet">sheet</span>`;
+        if (d.cost_origin === 'sheet') return `${money(c.getValue())} <span class="pill" title="Amazon cost from the monthly settlement sheet">${ICONS.sheet} sheet</span>`;
         return d.has_link ? money(c.getValue()) : '<span class="muted">not linked</span>';
       } },
       { title: 'Cost override', field: 'cost_override', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
@@ -221,7 +221,7 @@ function ebaySheet(focusOrder) {
 // ------------------------------------------------------------------ Amazon sheet
 async function amazonSheet() {
   toolbar(`<select class="select" id="ed-filter" style="height:28px;font-size:12px"><option value="all">All purchases</option><option value="linked">Linked to eBay</option><option value="unlinked">Not linked (ignored)</option><option value="ignored">Marked personal</option></select>`);
-  $('#ed-body').innerHTML = '<div class="empty"><span class="dot spin" style="display:inline-block"></span> Loading purchases…</div>';
+  $('#ed-body').innerHTML = skeletonRows(12);
   const linkChanges = new Map();
   const rows = (await api('/api/amazon')).map((r) => ({ ...r, order_date: r.order_date ? String(r.order_date).slice(0, 10) : null, line_total: r.line_total === null ? null : Number(r.line_total), cost_override: r.cost_override === null ? null : Number(r.cost_override), ebay_order_id_orig: r.ebay_order_id }));
   $('#ed-body').innerHTML = '';
@@ -257,7 +257,7 @@ async function amazonSheet() {
       { title: 'Cost override', field: 'cost_override', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
       { title: 'Personal', field: 'ignored', hozAlign: 'center', width: 90, editor: 'tickCross', formatter: 'tickCross', formatterParams: { crossElement: '<span class="muted">·</span>' }, cssClass: 'cell-edit' },
       { title: 'Linked eBay order', field: 'ebay_order_id', width: 190, editor: 'input', cssClass: 'cell-edit', formatter: (c) => (c.getValue() ? `<span class="mono">${esc(c.getValue())}</span>` : '<span class="muted">not linked: ignored</span>') },
-      { title: 'Link', field: 'link_method', width: 110, cssClass: 'cell-ro', formatter: (c) => (c.getValue() === 'manual' ? '<span class="pill info">by hand</span>' : c.getValue() ? `<span class="pill good" title="${esc(c.getRow().getData().link_reasons || '')}">auto</span>` : '') },
+      { title: 'Link', field: 'link_method', width: 110, cssClass: 'cell-ro', formatter: (c) => (c.getValue() === 'manual' ? `<span class="pill info">${ICONS.check} by hand</span>` : c.getValue() ? `<span class="pill good" title="${esc(c.getRow().getData().link_reasons || '')}">${ICONS.link} auto</span>` : '') },
       { title: 'Ship to', field: 'ship_name', width: 200, cssClass: 'cell-ro', formatter: (c) => { const d = c.getRow().getData(); return esc([d.ship_name, d.ship_state, d.ship_zip].filter(Boolean).join(' · ')); } },
       { title: 'Status', field: 'order_status', width: 110, cssClass: 'cell-ro' },
     ],
@@ -314,9 +314,9 @@ async function amazonSheet() {
 async function matchReview() {
   $('#ed-tools').innerHTML = '';
   $('#ed-help').textContent = 'These Amazon orders look like they might belong to an eBay sale, but there is not enough proof (zip, name or tracking) to link them automatically. Until you link one, it stays out of the numbers.';
-  $('#ed-body').innerHTML = '<div class="empty"><span class="dot spin" style="display:inline-block"></span> Finding candidates…</div>';
+  $('#ed-body').innerHTML = skeletonRows(8);
   const list = await api('/api/suggestions');
-  if (!list.length) { $('#ed-body').innerHTML = '<div class="empty"><div class="t">Nothing to review</div>Every Amazon purchase is either linked or has no plausible eBay sale.</div>'; return; }
+  if (!list.length) { $('#ed-body').innerHTML = `<div class="empty lg"><div class="ic">${ICONS.circleCheck}</div><div class="t">Nothing to review</div><p>Every Amazon purchase is either linked to an eBay sale or has no plausible match. New candidates show up here after each email check.</p></div>`; return; }
   $('#ed-body').innerHTML = list.map((s) => `<div class="match-card" data-az="${esc(s.amazon_order_id)}">
       <div>
         <div class="muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:.06em">Amazon purchase</div>
@@ -383,8 +383,8 @@ function expensesSheet() {
       { title: 'Amount', field: 'amount', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
       { title: 'Paid by', field: 'paid_by', width: 200, editor: 'list', editorParams: { values: payer }, formatter: (c) => esc(payer[c.getValue()] || payer.seller), cssClass: 'cell-edit' },
       { title: 'Note', field: 'note', minWidth: 180, widthGrow: 2, editor: 'input', cssClass: 'cell-edit' },
-      { title: 'Source', field: 'source', width: 110, cssClass: 'cell-ro', formatter: (c) => (c.getValue() === 'sheet' ? '<span class="pill">sheet</span>' : '<span class="pill info">manual</span>') },
-      { title: '', field: '_del', width: 60, hozAlign: 'center', headerSort: false, cssClass: 'cell-ro', formatter: () => `<button class="btn sm ghost" title="Delete">${ICONS.x}</button>`,
+      { title: 'Source', field: 'source', width: 110, cssClass: 'cell-ro', formatter: (c) => (c.getValue() === 'sheet' ? `<span class="pill">${ICONS.sheet} sheet</span>` : `<span class="pill info">${ICONS.editor} manual</span>`) },
+      { title: '', field: '_del', width: 60, hozAlign: 'center', headerSort: false, cssClass: 'cell-ro', formatter: () => `<button class="btn sm ghost danger" title="Delete" aria-label="Delete row">${ICONS.trash}</button>`,
         cellClick: (_e, cell) => { const d = cell.getRow().getData(); if (d.id) dirty.set(`del:${d.id}`, { id: d.id, _delete: true }); cell.getRow().delete(); markDirty(dirty.size); } },
     ],
   }));

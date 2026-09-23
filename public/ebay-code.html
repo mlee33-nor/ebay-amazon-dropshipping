@@ -2,43 +2,68 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Finish eBay connection · Dropship Ledger</title>
+  <meta name="theme-color" content="#09090b" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/app.css" />
+  <script>
+    try { const t = localStorage.getItem('dd_theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+  </script>
   <style>
-    body { display: grid; place-items: center; min-height: 100vh; padding: 16px; background: var(--page); }
-    .box { width: min(560px, 100%); padding: 28px; }
-    h1 { margin: 0 0 6px; font-size: 20px; }
-    ol { color: var(--ink-2); font-size: 13.5px; padding-left: 18px; line-height: 1.6; }
-    textarea { width: 100%; min-height: 110px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--ink); font: 12px var(--mono, monospace); }
+    body { display: grid; place-items: center; min-height: 100vh; min-height: 100dvh; padding: 20px; background: radial-gradient(720px 360px at 50% -10%, color-mix(in srgb, var(--s-revenue) 14%, transparent), transparent 70%), var(--page); }
+    .box { width: min(600px, 100%); padding: 28px; box-shadow: var(--el-3); animation: pageIn 0.45s var(--ease-out) both; }
+    .head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+    .head .ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
+    .head .ic svg { width: 20px; height: 20px; }
+    h1 { margin: 0; font-size: 19px; letter-spacing: -0.02em; font-weight: 600; }
+    .sub { color: var(--ink-3); font-size: 13px; margin-top: 2px; }
+    .steps { list-style: none; margin: 0; padding: 0; counter-reset: s; }
+    .steps li { position: relative; padding: 10px 0 10px 40px; color: var(--ink-2); font-size: 13.5px; line-height: 1.55; border-bottom: 1px dashed var(--line); }
+    .steps li:last-child { border-bottom: 0; }
+    .steps li::before { counter-increment: s; content: counter(s); position: absolute; left: 0; top: 10px; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: var(--surface-3); color: var(--ink); font-size: 12px; font-weight: 700; }
+    .steps b { color: var(--ink); }
+    textarea { width: 100%; min-height: 110px; padding: 10px 12px; margin-top: 14px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--ink); font: 12px/1.5 var(--mono); resize: vertical; transition: border-color 0.15s, box-shadow 0.15s; }
+    textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
     .row2 { display: flex; gap: 10px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
-    .msg { font-size: 13.5px; margin-top: 12px; min-height: 20px; }
+    .msg { font-size: 13.5px; margin-top: 12px; min-height: 20px; display: flex; align-items: center; gap: 8px; }
+    .msg svg { width: 15px; height: 15px; flex: none; }
+    .msg:empty { display: none; }
   </style>
 </head>
 <body>
   <div class="card box">
-    <h1>Finish connecting eBay</h1>
-    <ol>
-      <li><a href="/api/ebay/connect" target="_blank" rel="noopener"><b>Click here to open eBay</b></a>, sign in to the seller account and click <b>Agree</b>.</li>
+    <div class="head">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></div>
+      <div><h1>Finish connecting eBay</h1><div class="sub">Three steps, about a minute.</div></div>
+    </div>
+    <ol class="steps">
+      <li><a href="/api/ebay/connect" target="_blank" rel="noopener"><b>Open eBay in a new tab</b></a>, sign in to the seller account and click <b>Agree</b>.</li>
       <li>eBay shows <i>"Authorization successfully completed"</i>. Copy the <b>full address</b> from that tab's address bar.</li>
       <li>Paste it below and click <b>Connect</b> within 5 minutes.</li>
     </ol>
-    <textarea id="u" placeholder="https://auth2.ebay.com/oauth2/ThirdPartyAuthSucessFailure?isAuthSuccessful=true&code=..."></textarea>
-    <div class="row2"><button class="btn primary" id="go">Connect</button><a class="btn" href="/#/settings">Back to dashboard</a></div>
-    <div class="msg" id="m"></div>
+    <textarea id="u" placeholder="https://auth2.ebay.com/oauth2/ThirdPartyAuthSucessFailure?isAuthSuccessful=true&code=..." aria-label="Paste the eBay address here"></textarea>
+    <div class="row2">
+      <button class="btn primary" id="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg> Connect</button>
+      <a class="btn ghost" href="/#/settings">Back to dashboard</a>
+    </div>
+    <div class="msg" id="m" aria-live="polite"></div>
   </div>
   <script>
+    const OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+    const BAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>';
     document.getElementById('go').onclick = async () => {
       const m = document.getElementById('m');
       m.textContent = 'Connecting…';
-      m.className = 'msg';
+      m.className = 'msg muted';
       const r = await fetch('/api/ebay/code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: document.getElementById('u').value }) });
       if (r.status === 401) { location.href = '/login'; return; }
       const b = await r.json().catch(() => ({}));
-      if (r.ok) { m.textContent = 'eBay connected. Pulling your sales now…'; m.className = 'msg pos'; setTimeout(() => (location.href = '/#/settings?ebay=connected'), 1500); }
-      else { m.textContent = (b.error || 'Failed') + ' — if it says the code expired, repeat step 1.'; m.className = 'msg neg'; }
+      if (r.ok) { m.innerHTML = `${OK}<span>eBay connected. Pulling your sales now…</span>`; m.className = 'msg pos'; setTimeout(() => (location.href = '/#/settings?ebay=connected'), 1500); }
+      else { m.innerHTML = `${BAD}<span>${(b.error || 'Failed')} — if it says the code expired, repeat step 1.</span>`; m.className = 'msg neg'; }
     };
   </script>
 </body>
