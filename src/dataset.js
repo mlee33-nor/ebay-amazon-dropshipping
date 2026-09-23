@@ -97,8 +97,10 @@ export async function buildDataset() {
     // Refunded on eBay and nothing bought on Amazon: no Amazon cost was ever incurred, and eBay credits back the
     // final value fee except its fixed $0.40 per-order fee. (If an Amazon purchase is linked, its cost still counts.)
     const rawRevenue = num(o.revenue) || 0;
-    const refundedNoPurchase = !cancelled && rawRevenue > 0 && (num(o.refund_total) || 0) >= 0.8 * rawRevenue
-      && !amazonOrders.length && num(ov.cost_override) === null && !led;
+    // Months covered by a sheet already decided every sale, so this rule only applies outside sheet months
+    const inSheetMonth = sheetMonths.has(businessMonth(o.created_at));
+    const mostlyRefunded = !cancelled && rawRevenue > 0 && (num(o.refund_total) || 0) >= 0.8 * rawRevenue;
+    const refundedNoPurchase = mostlyRefunded && !inSheetMonth && !amazonOrders.length && num(ov.cost_override) === null && !led;
     const costSource = num(ov.cost_override) !== null ? 'override' : amazonOrders.length ? 'amazon' : led ? 'ledger' : refundedNoPurchase ? 'refunded' : null;
     const hasCost = costSource !== null;
     const cost = num(ov.cost_override) ?? (amazonOrders.length ? amazonCost : led ? num(led.amazon_cost) : 0);
@@ -124,6 +126,7 @@ export async function buildDataset() {
     else if (inSheet) status = 'in_sheet';
     else if (ov.excluded) status = 'excluded';
     else if (cancelled) status = hasCost && cost > 0 ? 'cancelled_after_purchase' : 'cancelled';
+    else if (!hasCost && mostlyRefunded && inSheetMonth) status = 'returned'; // refunded, and the sheet left it out
     else if (!hasCost) status = 'awaiting_cost';
     else if (refunds > 0 || rets.length) status = 'returned';
     else if (net < 0) status = 'loss';

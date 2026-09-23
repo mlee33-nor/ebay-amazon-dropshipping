@@ -36,6 +36,7 @@ const ebay = [
   ['11-00001-00009', '2026-10-05T18:00:00Z', 'October sale refunded before we bought it', 40.0, 40.0],
   ['11-00001-00010', '2026-09-05T18:00:00Z', 'Vitaliq Korean Silk Peptide Serum Deep Collagen', 34.99, 30.2], // refunded
   ['11-00001-00011', '2026-09-17T18:00:00Z', 'Vitaliq Korean Silk Peptide Serum Deep Collagen', 34.99, 0],
+  ['11-00001-00013', '2026-09-03T18:00:00Z', 'USR 92-95 Toyota Pickup Clear Corner Lights Pair', 71.95, 65.0], // refunded, not in the sheet
   ['11-00001-00012', '2026-09-08T18:00:00Z', 'Vitaliq Korean Silk Peptide Serum Deep Collagen 2 Pack', 69.98, 0],
 ];
 for (const [id, at, title, price, refund] of ebay) {
@@ -89,6 +90,10 @@ check('refunded on eBay with no Amazon purchase: cost $0, only the $0.40 fee los
   assert.equal(o.cost, 0);
   assert.equal(o.cost_source, 'refunded');
   assert.equal(o.net, -0.4);
+});
+check('refunded sale missing from a sheet month is not counted (sheet total unchanged)', () => {
+  assert.equal(byId('11-00001-00013').counted, false);
+  assert.equal(byId('11-00001-00013').status, 'returned');
 });
 check('sales before the partnership are set aside', () => {
   assert.equal(byId('11-00001-00007').status, 'before_start');
