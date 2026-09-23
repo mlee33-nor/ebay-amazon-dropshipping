@@ -65,6 +65,7 @@ const TOPIC_HELP = `topic — pick exactly one:
 - recent_sales: the latest sales, or what sold on a day
 - awaiting_amazon: sales not yet bought on Amazon / waiting for the Amazon email
 - best_period: best or worst day, week or month
+- promotions: promoted listings, campaigns, ad rates, what share of listings is promoted
 - other: anything else`;
 const EXAMPLES = [
   ['why are we down this month', { topic: 'why_change', period: 'this month', compare_to: '', product: '' }],
@@ -76,7 +77,7 @@ const EXAMPLES = [
 const ROUTE_SCHEMA = {
   type: 'object',
   properties: {
-    topic: { type: 'string', enum: ['why_change', 'listings_vs_sales', 'listings', 'profit', 'sales_count', 'revenue', 'amazon_cost', 'fees', 'margin', 'average_order', 'refunds', 'expenses', 'settlement', 'top_products', 'worst_products', 'product', 'compare', 'recent_sales', 'awaiting_amazon', 'best_period', 'other'] },
+    topic: { type: 'string', enum: ['why_change', 'listings_vs_sales', 'listings', 'profit', 'sales_count', 'revenue', 'amazon_cost', 'fees', 'margin', 'average_order', 'refunds', 'expenses', 'settlement', 'top_products', 'worst_products', 'product', 'compare', 'recent_sales', 'awaiting_amazon', 'best_period', 'promotions', 'other'] },
     period: { type: 'string' }, compare_to: { type: 'string' }, product: { type: 'string' },
   },
   required: ['topic', 'period', 'compare_to', 'product'],

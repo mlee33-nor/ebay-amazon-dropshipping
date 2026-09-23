@@ -6,6 +6,7 @@ import { renderSettlement } from './settle-page.js';
 import { renderOpex } from './opex-page.js';
 import { renderAsk } from './ask-page.js';
 import { renderListingsPanel } from './listings-panel.js';
+import { renderPromotionsPanel } from './promotions-panel.js';
 import { renderWatch } from './watch-page.js';
 import { renderReports } from './reports-page.js';
 import { settleMonth, monthKey, allMonths } from './settlement.js';
@@ -1094,9 +1095,10 @@ function lineChart(el, labels, lines, fmt, axisFmt) {
 function products(el) {
   // Two views: the eBay store's listings (views, watchers, what to refresh) and the sales each product made
   const tab = store('dd_prod_tab') || 'listings';
-  const tabs = `<div class="seg prod-tabs" id="prod-tabs" role="tablist" aria-label="Products view"><button role="tab" data-t="listings" class="${tab === 'listings' ? 'on' : ''}" aria-selected="${tab === 'listings'}">${ICONS.package} Listings</button><button role="tab" data-t="sales" class="${tab === 'sales' ? 'on' : ''}" aria-selected="${tab === 'sales'}">${ICONS.trends} Sales</button></div>`;
+  const tabs = `<div class="seg prod-tabs" id="prod-tabs" role="tablist" aria-label="Products view"><button role="tab" data-t="listings" class="${tab === 'listings' ? 'on' : ''}" aria-selected="${tab === 'listings'}">${ICONS.package} Listings</button><button role="tab" data-t="promo" class="${tab === 'promo' ? 'on' : ''}" aria-selected="${tab === 'promo'}">${ICONS.target} Promotional</button><button role="tab" data-t="sales" class="${tab === 'sales' ? 'on' : ''}" aria-selected="${tab === 'sales'}">${ICONS.trends} Sales</button></div>`;
   const bindTabs = () => $('#prod-tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && b.dataset.t !== tab) { store('dd_prod_tab', b.dataset.t); renderPage(); } });
   if (tab === 'listings') { el.innerHTML = `${tabs}<div id="listings-panel"></div>`; bindTabs(); renderListingsPanel($('#listings-panel')); return; }
+  if (tab === 'promo') { el.innerHTML = `${tabs}<div id="promo-panel"></div>`; bindTabs(); renderPromotionsPanel($('#promo-panel')); return; }
   const all = scoped();
   if (!all.length) { el.innerHTML = `${tabs}<div id="prod-empty"></div>`; bindTabs(); return emptyState($('#prod-empty')); }
   const c = colors();

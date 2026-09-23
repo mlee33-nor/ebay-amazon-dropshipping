@@ -142,6 +142,12 @@ const CASES = [
   ['what was our best day', 'best_period', 'all time'],
   ['worst month', 'best_period', 'all time'],
   ['best week in september', 'best_period', 'September 2026'],
+  // promotions
+  ['how many items are promoted', 'promotions', null],
+  ['what percent of our listings are not promoted', 'promotions', null],
+  ['which campaigns are running', 'promotions', null],
+  ['are we promoting enough', 'promotions', null],
+  ['whats our average ad rate', 'promotions', null],
   // help
   ['what can you do', 'help', null],
   ['hi', 'help', null],

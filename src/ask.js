@@ -150,7 +150,9 @@ async function load() {
   };
   let listings = null;
   try { const m = await import('./listings.js'); if (m.listingAnalytics) listings = await m.listingAnalytics(); } catch { listings = null; }
-  return { orders, books, s, listings, today: businessDay(new Date()) };
+  let promotions = null;
+  try { const m = await import('./promotions.js'); if (m.promotionAnalytics) promotions = await m.promotionAnalytics(); } catch { promotions = null; }
+  return { orders, books, s, listings, promotions, today: businessDay(new Date()) };
 }
 
 const counted = (ctx) => ctx.orders.filter((o) => o.counted);
@@ -251,6 +253,7 @@ const RULES = [
   ['help', /^(hi|hey|hello|yo|help|thanks|thank you|ok|okay)\b|\bwhat can (you|i) (do|ask)\b|\bhow does this work\b/],
   ['why', /\b(why|how come|what happened|what went wrong|reasons?|explain|what caused|what'?s causing)\b/],
   ['awaiting', /\b(awaiting|waiting (on|for)|not (yet )?(been )?(ordered|bought|purchased)|havent (we |you |i )?(yet )?(ordered|bought|purchased)|(ordered|bought) yet|still need to (order|buy)|needs? to be (ordered|bought)|need to (order|buy)|unmatched|no amazon (order|purchase|match|email)|without an? amazon|missing (amazon|cost)|not matched)\b/],
+  ['promotions', /^(?!.*\bfees?\b).*\b(promot\w*|campaigns?|ad rates?)\b/],
   ['fees', /\b(fees?|advertising|ad spend|promoted)\b/],
   ['listings', /\b(listings?|listed|delist\w*|posted|posting|views?|viewed|watchers?|watching|watch ?count|impressions?|traffic|stale|inventory)\b/],
   ['best_period', /\b(best|worst|biggest|highest|lowest|slowest|busiest|strongest|weakest|top)\s+(day|week|month|weekday)s?\b/],
@@ -793,6 +796,23 @@ function answerExpenses(ctx, it) {
   };
 }
 
+function answerPromotions(ctx) {
+  const P = ctx.promotions;
+  if (!P || !P.available) return { text: 'I can’t see your Promoted Listings yet. Reconnect eBay once in **Settings** (a read-only permission) and they appear on Products → Promotional.', chips: ['How many listings do we have?'] };
+  const pf = P.performance;
+  const running = P.campaigns.filter((c) => c.status === 'RUNNING');
+  const bullets = [
+    P.rate ? `Average ad rate ${fmtN(P.rate.avg, 1)}% (from ${fmtN(P.rate.min, 1)}% to ${fmtN(P.rate.max, 1)}%)` : 'No listings are on a running campaign right now.',
+    running.length ? `${plural(running.length, 'running campaign')}: ${running.slice(0, 4).map((c) => `${c.name || c.id} (${fmtN(c.liveAds)} listings)`).join('; ')}` : null,
+    P.paused ? `${plural(P.paused, 'listing')} ${P.paused === 1 ? 'is' : 'are'} only in paused campaigns, so ${P.paused === 1 ? 'it isn’t' : 'they aren’t'} being promoted` : null,
+    P.newListings.last30 ? `${fmtN(P.newListings.notPromoted)} of the ${fmtN(P.newListings.last30)} listings posted in the last 30 days aren't promoted` : null,
+    `Ad fees in the last 30 days: ${$(Math.round(P.adFees.last30 * 100))}${P.adFees.pctOfSales !== null ? ` (${fmtN(P.adFees.pctOfSales, 1)}% of sales)` : ''}`,
+    pf.trafficAvailable && pf.promoted.listings && pf.notPromoted.listings ? `Last 30 days, per listing: promoted ${fmtN(pf.promoted.viewsPerListing, 2)} views and ${fmtN(pf.promoted.ordersPer1000, 1)} orders per 1,000; not promoted ${fmtN(pf.notPromoted.viewsPerListing, 2)} views and ${fmtN(pf.notPromoted.ordersPer1000, 1)} orders per 1,000` : null,
+    'The full not-promoted list downloads from Products → Promotional.',
+  ].filter(Boolean);
+  return { text: `**${fmtN(P.promoted)} of your ${fmtN(P.activeListings)} active listings are promoted (${fmtN(P.pctPromoted, 1)}%); ${fmtN(P.notPromoted)} (${fmtN(P.pctNotPromoted, 1)}%) are not.**`, bullets, chips: ['Why do we have more listings but fewer sales?', 'How many listings do we have?'] };
+}
+
 function answerListings(ctx, it) {
   const F = listingFacts(ctx);
   if (!F) return { text: 'Listing data isn’t in yet. It fills in on the next eBay sync.', chips: ['Top products this month'] };
@@ -837,14 +857,14 @@ const TOPIC_LABELS = {
   why: 'Why it changed', listings_vs_sales: 'Listings vs sales', listings: 'Listings', compare: 'Comparison', settlement: 'Settlement', top: 'Top products',
   worst: 'Weakest products', recent: 'Sales list', expenses: 'Operating costs', product: 'One product', profit: 'Profit', count: 'Number of sales',
   revenue: 'eBay payouts', cogs: 'Amazon cost', fees: 'Ad fees', margin: 'Margin', aov: 'Average sale', refunds: 'Refunds', awaiting: 'Sales awaiting Amazon',
-  best_period: 'Best / worst period',
+  best_period: 'Best / worst period', promotions: 'Promoted listings',
 };
 
 // Topics the local AI model can route a question to. It's only asked when the built-in reader couldn't read the question.
 export const TOPICS = {
   why_change: 'why', listings_vs_sales: 'listings_vs_sales', listings: 'listings', profit: 'profit', sales_count: 'count', revenue: 'revenue',
   amazon_cost: 'cogs', fees: 'fees', margin: 'margin', average_order: 'aov', refunds: 'refunds', expenses: 'expenses', settlement: 'settlement',
-  top_products: 'top', worst_products: 'worst', product: 'product', compare: 'compare', recent_sales: 'recent', awaiting_amazon: 'awaiting', best_period: 'best_period',
+  top_products: 'top', worst_products: 'worst', product: 'product', compare: 'compare', recent_sales: 'recent', awaiting_amazon: 'awaiting', best_period: 'best_period', promotions: 'promotions',
 };
 function fromRoute(route, ctx, question) {
   const intent = TOPICS[route?.topic];
@@ -860,7 +880,7 @@ function fromRoute(route, ctx, question) {
 // route: optional { topic, period, compare_to, product } from the local AI model. The built-in reader decides whenever it
 // recognises the question; the model's reading is only used for questions the reader couldn't place.
 const DEFAULT_ALL = new Set(['top', 'worst', 'product', 'best_period']);
-const NO_PERIOD = new Set(['settlement', 'listings', 'listings_vs_sales', 'awaiting', 'recent', 'help', 'compare']);
+const NO_PERIOD = new Set(['settlement', 'listings', 'listings_vs_sales', 'awaiting', 'recent', 'help', 'compare', 'promotions']);
 
 export async function ask(question, prev = null, route = null) {
   const ctx = await load();
@@ -887,6 +907,7 @@ export async function ask(question, prev = null, route = null) {
     case 'product': ans = answerProduct(ctx, it); break;
     case 'awaiting': ans = answerAwaiting(ctx, it); break;
     case 'best_period': ans = answerBestPeriod(ctx, it); break;
+    case 'promotions': ans = answerPromotions(ctx); break;
     case 'help': ans = HELP; break;
     default: ans = answerMetric(ctx, it) || HELP;
   }
