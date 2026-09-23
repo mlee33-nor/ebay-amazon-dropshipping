@@ -179,9 +179,10 @@ export async function buildDataset() {
       .some((l) => sheetTitleMatch(l.title, title) >= 0.34 && sheetTitleMatch(l.title, title) * new Set(l.title.toLowerCase().split(/\s+/)).size >= 2);
 
     // No Amazon purchase behind it = not a dropship sale (something else sold on the account). It drops out of the
-    // books once the month's sheet has left it out or the matching window has passed with no Amazon order found.
+    // books only once the matching window has passed with no Amazon order found. Until then it waits for its Amazon
+    // purchase, even in a month that has a sheet (the sheet is a snapshot; sales keep coming after it was made).
     // A linked Amazon order, a sheet row, a typed-in cost, or an unlinked Amazon order that could be its purchase keeps it.
-    const pastMatchWindow = inSheetMonth || Date.now() - new Date(o.created_at).getTime() > NOT_DROPSHIP_AFTER_DAYS * 86400_000;
+    const pastMatchWindow = Date.now() - new Date(o.created_at).getTime() > NOT_DROPSHIP_AFTER_DAYS * 86400_000;
     const notDropship = !hasCost && !cancelled && !amazonOrders.length && !led && num(ov.cost_override) === null &&
       pastMatchWindow && !possibleSheetDup && !couldHavePurchase();
 

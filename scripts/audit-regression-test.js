@@ -83,6 +83,15 @@ await check('a Jul 31 sale recorded on the August sheet pairs with that August r
   assert.equal(s.businessProfit, 129.49);
 });
 
+// A brand-new sale with no Amazon purchase yet waits for its cost, even in a month that has a sheet
+await order('NEW-TODAY', new Date(Date.now() - 3600_000).toISOString(), '8 Packs 16 Grit Blue Zirconia Cloth Flap Discs', 90.24);
+await check('a sale from an hour ago with no Amazon order yet is "awaiting cost", never hidden as not-dropship', async () => {
+  const data = await buildDataset();
+  const o = data.find((x) => x.order_id === 'NEW-TODAY');
+  assert.equal(o.status, 'awaiting_cost');
+  assert.equal(o.counted, false);
+});
+
 // C2: business month is decided in Arizona time on the server
 await order('C2-EDGE', '2026-11-01T05:30:00Z', 'Edge of month widget', 40);
 await check('C2: a sale at 10:30pm Oct 31 Arizona time belongs to October for every viewer', async () => {
