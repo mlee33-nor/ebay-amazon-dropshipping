@@ -107,7 +107,7 @@ export async function syncPromotions({ token, scopes, lines, syncStart = new Dat
       campaigns.map((c) => ({
         campaign_id: c.campaignId, name: c.campaignName || null, status: c.campaignStatus || null,
         funding_model: c.fundingStrategy?.fundingModel || null, bid_percentage: num(c.fundingStrategy?.bidPercentage),
-        rules_based: Boolean(c.campaignCriterion), start_date: c.startDate || null, end_date: c.endDate || null,
+        rules_based: Boolean(c.campaignCriterion) || c.campaignTargetingType === 'SMART', start_date: c.startDate || null, end_date: c.endDate || null,
       })),
       [syncStart]
     );
@@ -123,8 +123,18 @@ export async function syncPromotions({ token, scopes, lines, syncStart = new Dat
     if (readOk.length) await q('delete from listing_ads where campaign_id = any($1) and synced_at < $2', [readOk, syncStart]);
     await q('delete from listing_ads where campaign_id not in (select campaign_id from ebay_campaigns where synced_at >= $1)', [syncStart]);
     await q('delete from ebay_campaigns where synced_at < $1', [syncStart]);
-    const live = new Set(ads.filter((a) => a.ad_status === 'ACTIVE' && campaigns.find((c) => c.campaignId === a.campaign_id)?.campaignStatus === 'RUNNING').map((a) => a.listing_id));
+    const liveAd = (a) => !['PAUSED', 'ARCHIVED'].includes(a.ad_status || '') && campaigns.find((c) => c.campaignId === a.campaign_id)?.campaignStatus === 'RUNNING';
+    const live = new Set(ads.filter(liveAd).map((a) => a.listing_id));
     lines.push(`promotions: ${campaigns.length} campaign${campaigns.length === 1 ? '' : 's'}, ${live.size} promoted listing${live.size === 1 ? '' : 's'}`);
+    for (const c of campaigns) {
+      const mine = ads.filter((a) => a.campaign_id === c.campaignId);
+      const byStatus = {};
+      for (const a of mine) byStatus[a.ad_status || 'no status'] = (byStatus[a.ad_status || 'no status'] || 0) + 1;
+      const shape = [c.campaignStatus, c.fundingStrategy?.fundingModel, c.fundingStrategy?.bidPercentage ? `${c.fundingStrategy.bidPercentage}%` : null,
+        c.campaignTargetingType, c.campaignCriterion ? `rules: ${c.campaignCriterion.criterionType || 'yes'}${c.campaignCriterion.autoSelectFutureInventory ? ', adds new listings automatically' : ''}` : null,
+        c.fundingStrategy?.adRateStrategy || null, c.channels ? `channels ${[].concat(c.channels).join('/')}` : null].filter(Boolean).join(', ');
+      lines.push(`promotions: "${c.campaignName || c.campaignId}": ${shape}; ${mine.length} ads${mine.length ? ` (${Object.entries(byStatus).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}`);
+    }
     if (failures.length) lines.push(`promotions: couldn't read the ads of ${failures.join('; ')}`);
     status = failures.length ? 'partial' : 'ok';
   } catch (e) {
@@ -135,7 +145,7 @@ export async function syncPromotions({ token, scopes, lines, syncStart = new Dat
 }
 
 // A listing counts as promoted when it has an active ad in a running campaign
-const LIVE = "a.ad_status = 'ACTIVE' and c.status = 'RUNNING'";
+const LIVE = "coalesce(a.ad_status, '') not in ('PAUSED', 'ARCHIVED') and c.status = 'RUNNING'";
 
 export async function promotionAnalytics({ now = new Date() } = {}) {
   await ensure();
