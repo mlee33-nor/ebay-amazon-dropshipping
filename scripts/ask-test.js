@@ -66,7 +66,7 @@ await check('why: the two drivers add up to the change exactly', async () => {
   const a = await ask('why was september worse than august', null, { topic: 'why_change', period: 'september', compare_to: '', product: '' });
   const m = all(a).match(/, (?:up|down) \$([\d,.]+)/);
   assert.ok(m, all(a));
-  const drivers = [...all(a).matchAll(/that is \*\*([+−])\$([\d,.]+)\*\*|worth \*\*([+−])\$([\d,.]+)\*\*/g)]
+  const drivers = [...all(a).matchAll(/that's \*\*([+−])\$([\d,.]+)\*\*|worth \*\*([+−])\$([\d,.]+)\*\*/g)]
     .map((x) => (x[1] || x[3]) === '−' ? -Number((x[2] || x[4]).replace(/,/g, '')) : Number((x[2] || x[4]).replace(/,/g, '')));
   const change = Number(m[1].replace(/,/g, ''));
   assert.equal(Math.round(Math.abs(drivers.reduce((t, x) => t + x, 0)) * 100), Math.round(change * 100));

@@ -27,7 +27,7 @@ export const trackTable = (t) => { tables.add(t); return t; };
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit at a glance', group: 'Insights' },
-  { id: 'ask', label: 'Ask AI', icon: 'spark', sub: 'Ask about the business · a private AI model running on this computer, with exact figures', noRange: true, group: 'Insights' },
+  { id: 'ask', label: 'Ask AI', icon: 'spark', sub: 'Ask about the business in your own words · every answer comes straight from your numbers', noRange: true, group: 'Insights' },
   { id: 'trends', label: 'Analytics', icon: 'trends', sub: 'Patterns, timing, pricing and geography', group: 'Insights' },
   { id: 'products', label: 'Products', icon: 'products', sub: 'What sells, what earns, what bleeds', group: 'Insights' },
   { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every eBay sale with its full profit math', group: 'Insights' },
