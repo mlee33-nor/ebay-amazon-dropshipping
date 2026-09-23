@@ -6,6 +6,7 @@ import { buildDataset, buildBooks } from './dataset.js';
 import { getSetting } from './db.js';
 import { businessDay, businessMonth } from './time.js';
 import { settleMonth, allMonths } from '../public/js/settlement.js';
+import { promoMonth } from '../public/js/promo-months.js';
 
 // ---------------------------------------------------------------- money + dates
 const cents = (n) => Math.round((Number(n) || 0) * 100);
@@ -796,7 +797,27 @@ function answerExpenses(ctx, it) {
   };
 }
 
-function answerPromotions(ctx) {
+// "Did promotion pay off in August?": that month's sales that came through promoted ads (eBay charged an ad fee)
+function answerPromotionMonth(ctx, month) {
+  const m = promoMonth(ctx.orders, month);
+  const name = monthName(month);
+  if (!m.sales) return { text: `No costed sales in ${name} yet.` };
+  if (!m.adSales) return { text: `**No sales in ${name} came through promoted ads**, and no ad fees were charged.`, chips: ['What percent of our listings are promoted?'] };
+  const before = Math.round((cents(m.adProfit) + cents(m.adFees)) / m.adSales);
+  return {
+    text: `**${m.adSales} of ${m.sales} sales in ${name} came through promoted ads (${Math.round(m.share * 100)}%), costing ${$(cents(m.adFees))} in ad fees and making ${$(cents(m.adProfit))} profit after the fees.**`,
+    bullets: [
+      m.breakEven === null ? 'Those sales lost money even before the ad fees.' : `It paid off if at least ${plural(m.breakEven, 'buyer')} of the ${m.adSales} came because of the ad (each sale made about ${$(before)} before its fee).`,
+      `Effect of promoting: somewhere between ${$(cents(m.worst))} (nobody needed the ad) and +${$(cents(m.best))} (everyone came through it).`,
+      `Profit per sale: ${$(cents(m.adProfitPerSale))} on promoted sales vs ${m.otherProfitPerSale === null ? '—' : $(cents(m.otherProfitPerSale))} on the rest.`,
+    ],
+    table: { head: ['Item', 'Payout', 'Ad fee', 'Profit'], rows: m.list.slice(0, 8).map((x) => [short(String(x.title), 40), $(cents(x.payout)), $(cents(x.adFee)), $(cents(x.net))]) },
+    chips: ['What percent of our listings are promoted?', `Profit ${name.split(' ')[0]}`],
+  };
+}
+
+function answerPromotions(ctx, it = {}) {
+  if (it.period?.month) return answerPromotionMonth(ctx, it.period.month);
   const P = ctx.promotions;
   if (!P || !P.available) return { text: 'I can’t see your Promoted Listings yet. Reconnect eBay once in **Settings** (a read-only permission) and they appear on Products → Promotional.', chips: ['How many listings do we have?'] };
   const pf = P.performance;
@@ -907,7 +928,7 @@ export async function ask(question, prev = null, route = null) {
     case 'product': ans = answerProduct(ctx, it); break;
     case 'awaiting': ans = answerAwaiting(ctx, it); break;
     case 'best_period': ans = answerBestPeriod(ctx, it); break;
-    case 'promotions': ans = answerPromotions(ctx); break;
+    case 'promotions': ans = answerPromotions(ctx, it); break;
     case 'help': ans = HELP; break;
     default: ans = answerMetric(ctx, it) || HELP;
   }

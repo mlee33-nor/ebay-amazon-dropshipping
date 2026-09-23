@@ -1,6 +1,8 @@
 // Products → Promotional: how much of the store is on eBay Promoted Listings, at what ad rate and cost, and whether
 // promoted listings actually get seen and bought more than the rest.
-import { esc, money, count, ago, api, toast, ICONS } from './util.js';
+import { esc, money, count, ago, api, toast, ICONS, monthLabel, fmtDate } from './util.js';
+import { promoMonths } from './promo-months.js';
+import { state } from './app.js';
 
 const n = (x, d = 0) => (x === null || x === undefined ? '—' : Number(x).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }));
 const pctTxt = (x, d = 1) => (x === null || x === undefined ? '—' : `${n(x, d)}%`);
@@ -16,6 +18,49 @@ function compareRow(label, a, b, fmt, help) {
   return `<tr><td>${esc(label)}${help ? `<div class="muted" style="font-size:11px">${esc(help)}</div>` : ''}</td>
     <td class="r num ${better === 'a' ? 'pos' : ''}">${fmt(a)}</td><td class="r num ${better === 'b' ? 'pos' : ''}">${fmt(b)}</td>
     <td class="r muted" style="font-size:12px">${times && times >= 1.1 ? `${n(times, 1)}× ${better === 'a' ? 'promoted' : 'not promoted'}` : better ? 'about the same' : ''}</td></tr>`;
+}
+
+// Promoted sales by month: a sale counts as promoted when eBay charged an ad fee on it
+function monthsCard() {
+  const months = promoMonths(state.data?.orders || []).reverse();
+  if (!months.length) return '';
+  const cur = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  const verdict = (m) => {
+    if (!m.adSales) return '<span class="muted">No promoted sales</span>';
+    if (m.breakEven === null) return `<span class="pill bad">${ICONS.alert} Lost money</span>`;
+    const txt = `${m.breakEven} of ${m.adSales} ${m.adSales === 1 ? 'buyer' : 'buyers'} came because of the ad`;
+    const cls = m.breakEven <= 1 ? 'good' : m.breakEven <= m.adSales / 2 ? 'info' : 'warn';
+    const lbl = m.breakEven <= 1 ? 'Very likely paid off' : m.breakEven <= m.adSales / 2 ? 'Likely paid off' : 'Uncertain';
+    return `<span class="pill ${cls}" title="Pays off if at least ${txt}">${cls === 'good' ? ICONS.check : ICONS.info} ${lbl}</span><div class="muted" style="font-size:11px;margin-top:3px">pays off if ${txt}</div>`;
+  };
+  const detail = (m) => `<tr class="promo-detail" data-for="${m.month}" hidden><td colspan="7"><div class="promo-detail-in">
+      ${m.adSales ? `<table class="simple"><thead><tr><th>Date</th><th>Item</th><th class="r">Payout</th><th class="r">Amazon</th><th class="r">Ad fee</th><th class="r">Profit</th></tr></thead><tbody>
+        ${m.list.map((x) => `<tr><td style="white-space:nowrap">${x.approxDate ? monthLabel(m.month) : fmtDate(x.date)}</td><td>${esc(String(x.title).slice(0, 70))}</td><td class="r">${money(x.payout, 2)}</td><td class="r">${money(x.cost, 2)}</td><td class="r">${money(x.adFee, 2)}</td><td class="r ${x.net < 0 ? 'neg' : ''}">${money(x.net, 2)}</td></tr>`).join('')}
+      </tbody></table>
+      <div class="muted" style="font-size:12px;margin-top:8px">Other sales that month: ${count(m.otherSales)}, ${money(m.otherProfit, 2)} profit (${m.otherProfitPerSale === null ? '—' : money(m.otherProfitPerSale, 2)} each) vs ${m.adProfitPerSale === null ? '—' : money(m.adProfitPerSale, 2)} each on the promoted ones.</div>` : '<div class="muted">No sale this month came through a promoted ad.</div>'}
+    </div></td></tr>`;
+  return `<div class="card mt"><div class="card-h"><div><h3>Promoted sales by month</h3><div class="sub">A sale counts as promoted when eBay charged an ad fee on it, meaning the buyer clicked a promoted ad. The open question is how many of them would have bought anyway, so the effect is a range. Click a month for its sales.</div></div></div>
+    <div class="card-b table-wrap"><table class="simple promo-months"><thead><tr><th>Month</th><th class="r">Sales</th><th class="r">Via promoted ads</th><th class="r">Ad fees</th><th class="r">Profit on them</th><th>Did it pay off?</th><th class="r">Effect of promoting</th></tr></thead><tbody>
+      ${months.map((m) => `<tr class="promo-row" data-month="${m.month}" tabindex="0" role="button" aria-expanded="false"><td style="white-space:nowrap"><span class="chev">${ICONS.chevronDown}</span><b>${monthLabel(m.month, 'long')}</b>${m.month === cur ? ' <span class="muted">so far</span>' : ''}</td>
+        <td class="r">${count(m.sales)}</td>
+        <td class="r">${count(m.adSales)}${m.share !== null ? ` <span class="muted">(${Math.round(m.share * 100)}%)</span>` : ''}</td>
+        <td class="r">${money(m.adFees, 2)}</td>
+        <td class="r">${m.adSales ? money(m.adProfit, 2) : '—'}</td>
+        <td>${verdict(m)}</td>
+        <td class="r" style="white-space:nowrap">${m.adSales ? `${money(m.worst, 2)} to +${money(m.best, 2)}` : money(0, 2)}</td></tr>${detail(m)}`).join('')}
+    </tbody></table></div></div>`;
+}
+function bindMonths(box) {
+  box.querySelectorAll('.promo-row').forEach((tr) => {
+    const toggle = () => {
+      const d = box.querySelector(`.promo-detail[data-for="${tr.dataset.month}"]`);
+      d.hidden = !d.hidden;
+      tr.setAttribute('aria-expanded', String(!d.hidden));
+      tr.classList.toggle('open', !d.hidden);
+    };
+    tr.addEventListener('click', toggle);
+    tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  });
 }
 
 async function refresh(btn, box) {
@@ -45,8 +90,9 @@ export async function renderPromotionsPanel(box) {
     const why = sync?.log?.at(-1) || '';
     box.innerHTML = `${head}<div class="card"><div class="empty lg"><div class="ic">${ICONS.target}</div><div class="t">Connect Promoted Listings</div>
       <p>To see which of your ${count(P.activeListings)} listings are promoted, eBay needs one more read-only permission. Go to <b>Settings → Reconnect eBay</b> and approve, then press <b>Refresh now</b> here.${why && /skipped/.test(why) ? `<br><span class="muted" style="font-size:12px">${esc(why)}</span>` : ''}</p>
-      <div class="actions"><a class="btn primary" href="#/settings">${ICONS.settings} Open Settings</a></div></div></div>`;
+      <div class="actions"><a class="btn primary" href="#/settings">${ICONS.settings} Open Settings</a></div></div></div>${monthsCard()}`;
     box.querySelector('#pr-refresh').onclick = (e) => refresh(e.currentTarget, box);
+    bindMonths(box);
     return;
   }
 
@@ -86,7 +132,9 @@ export async function renderPromotionsPanel(box) {
         <div class="card-b table-wrap">${P.campaigns.length ? `<table class="simple"><thead><tr><th>Campaign</th><th>Status</th><th class="r">Listings</th><th class="r">Ad rate</th></tr></thead><tbody>
           ${P.campaigns.map((c) => `<tr><td>${esc(c.name || c.id)}<div class="muted" style="font-size:11px">${esc(c.type)}${c.rulesBased ? ' · rule-based' : ''}</div></td><td>${c.status === 'RUNNING' ? `<span class="pill good">${ICONS.check} Running</span>` : c.status === 'PAUSED' ? `<span class="pill warn">${ICONS.clock} Paused</span>` : `<span class="pill">${esc((c.status || '').toLowerCase())}</span>`}</td><td class="r">${count(c.liveAds)}</td><td class="r">${c.rate === null ? '—' : `${n(c.rate, 1)}%`}</td></tr>`).join('')}
         </tbody></table>` : `<div class="empty"><p>No Promoted Listings campaigns on this account yet.</p></div>`}</div></div>
-    </div>`;
+    </div>
+    ${monthsCard()}`;
 
   box.querySelector('#pr-refresh').onclick = (e) => refresh(e.currentTarget, box);
+  bindMonths(box);
 }

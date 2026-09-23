@@ -148,6 +148,8 @@ const CASES = [
   ['which campaigns are running', 'promotions', null],
   ['are we promoting enough', 'promotions', null],
   ['whats our average ad rate', 'promotions', null],
+  ['did promotion pay off in august', 'promotions', 'August 2026'],
+  ['how much did promoted listings help us in july', 'promotions', 'July 2026'],
   // help
   ['what can you do', 'help', null],
   ['hi', 'help', null],
@@ -189,6 +191,8 @@ await must('how many sales did we get today', /^\*\*1 sale today\.\*\* 0 counted
 await must('did drew pay for august', /Paid in full/, 'August shows paid in full');
 await must('how much did ebay pay us in august', /eBay payouts/, 'eBay payouts, not the settlement');
 await must('how much money did we make in august', /\$129\.49/, 'August business profit equals the sheet');
+await must('did promotion pay off in august', /7 of 43 sales in August 2026 came through promoted ads \(16%\), costing \$9\.74 in ad fees/, 'August promotion: 7 of 43 sales, $9.74 fees (from the sheet)');
+await must('did promotion pay off in august', /at least 1 buyer of the 7/, 'August break-even: 1 of 7');
 await must('what did we clear in july', /−\$27\.56/, 'July business profit equals the sheet');
 
 console.log(rows.join('\n'));

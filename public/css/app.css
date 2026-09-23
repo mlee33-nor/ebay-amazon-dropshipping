@@ -1085,3 +1085,11 @@ tr.row-bad td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
 .promo-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .promo-legend .sw.a { background: var(--accent); }
 .promo-legend .sw.b { background: var(--surface-4, var(--line-strong)); }
+.promo-months .promo-row { cursor: pointer; }
+.promo-months .promo-row:hover td { background: var(--surface-2); }
+.promo-months .promo-row .chev { display: inline-flex; margin-right: 6px; transition: transform .15s; color: var(--ink-3); vertical-align: -2px; }
+.promo-months .promo-row .chev svg { width: 14px; height: 14px; }
+.promo-months .promo-row.open .chev { transform: rotate(180deg); }
+.promo-months .promo-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.promo-detail-in { padding: 6px 4px 12px; }
+.promo-detail-in table { font-size: 12.5px; }
