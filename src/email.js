@@ -61,7 +61,9 @@ export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
   subject = unfwd(subject);
   const htmlText = clean(htmlToText(html));
   const plain = clean(text);
-  const body = `${plain}\n${htmlText}`.replace(/\r/g, '');
+  const body = `${plain}\n${htmlText}`.replace(/\r/g, '')
+    .replace(/<https?:\/\/[^>\s]*>/g, ' ')
+    .replace(/[*_]+(?=[\d$A-Za-z])|(?<=[\d.A-Za-z:])[*_]+/g, '');
   const kind = classify(subject, body);
   const orderIds = [...new Set([...(subject.match(ORDER_RE) || []), ...(body.match(ORDER_RE) || [])])];
   const out = { kind, orderIds, date: date ? new Date(date).toISOString() : null };
@@ -119,7 +121,7 @@ export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
   } else if (kind === 'cancel') {
     out.fullOrder = /order[^.\n]{0,60}(has been|was|is) cancel/i.test(`${subject}\n${body.slice(0, 800)}`) && !/\bitem/i.test(subject);
   }
-  out.excerpt = clean(excerptSource).replace(/\n{3,}/g, '\n\n').slice(0, 2500);
+  out.excerpt = clean(excerptSource).replace(/<?https?:\/\/\S+>?/g, '').replace(/[ \t]{2,}/g, ' ').replace(/\n\s*\n+/g, '\n').slice(0, 6000);
   return out;
 }
 
@@ -212,6 +214,9 @@ export async function syncEmail() {
         const wanted = [];
         for await (const msg of client.fetch(uids || [], { envelope: true }, { uid: true })) {
           if (['other', 'shipment'].includes(classify(msg.envelope?.subject || '', ''))) continue;
+          const fromAddr = (msg.envelope?.from || []).map((a) => a.address || '').join(' ');
+          const isForward = /^\s*(fwd?|fw)\s*:/i.test(msg.envelope?.subject || '');
+          if (!/amazon\.com/i.test(fromAddr) && !isForward) continue;
           const id = msg.envelope?.messageId || `${msg.uid}@${mailbox}`;
           if (await one('select 1 from amazon_emails where message_id = $1', [id])) { counts.seen++; continue; }
           wanted.push(msg.uid);

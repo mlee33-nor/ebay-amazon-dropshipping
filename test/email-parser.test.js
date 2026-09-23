@@ -56,3 +56,11 @@ test('a forward that is not from Amazon is ignored', () => {
   const p = parseAmazonEmail({ subject: 'Fwd: Ordered pizza', text: '---------- Forwarded message ---------\nFrom: Pizza Place <hi@pizza.test>\nDate: Tue, Sep 22, 2026 at 12:14 PM\nOrder #\n114-5555555-6666666\nGrand Total:\n$20.00' });
   assert.equal(p.fromAmazon, false);
 });
+
+test('Gmail-forwarded HTML Amazon email with *bold* and inline links still reads the total', () => {
+  const text = '---------- Forwarded message ---------\nFrom: Amazon.com <auto-confirm@amazon.com>\nDate: Tue, Sep 22, 2026 at 3:00 PM\nSubject: Ordered: 1 Camera item\n\n   Your Orders\n<https://www.amazon.com/gp/r.html?C=3E92&U=https%3A%2F%2Fwww.amazon.com>\n\nEzra - ATLANTA, GA\n\nOrder #\n*111-6656473-0336252*\n<https://www.amazon.com/your-orders/order-details?orderID=111-6656473-0336252>\n\nGrand Total:\n*$16.19*\n';
+  const p = parseAmazonEmail({ subject: 'Fwd: Ordered: 1 Camera item', text });
+  assert.equal(p.total, 16.19);
+  assert.deepEqual(p.orderIds, ['111-6656473-0336252']);
+  assert.equal(p.shipCity, 'ATLANTA');
+});
