@@ -40,3 +40,19 @@ test('shipping delay and marketing mail are not orders', () => {
   assert.equal(parseAmazonEmail({ subject: `Delay in shipping your order ${ISO}#114-0935486-5216212${PDI}`, text: 'x' }).kind, 'shipment');
   assert.equal(parseAmazonEmail({ subject: 'Deals picked for you', text: 'x' }).kind, 'other');
 });
+
+test('forwarded Amazon order email uses the original send date', () => {
+  const text = `---------- Forwarded message ---------\nFrom: Amazon.com <auto-confirm@amazon.com>\nDate: Tue, Sep 22, 2026 at 12:14 PM\nSubject: Ordered 1 item: Camera & Photo\nTo: <old@example.com>\n\nThanks for your order!\n\nKeisha - ATLANTA, GA\n\nOrder #\n114-5555555-6666666\n\nGrand Total:\n16.19 USD`;
+  const p = parseAmazonEmail({ subject: 'Fwd: Ordered 1 item: Camera & Photo', text, date: '2026-09-23T03:00:00Z' });
+  assert.equal(p.kind, 'order');
+  assert.equal(p.forwarded, true);
+  assert.equal(p.fromAmazon, true);
+  assert.equal(p.total, 16.19);
+  assert.equal(p.shipCity, 'ATLANTA');
+  assert.ok(p.originalDate && p.originalDate.startsWith('2026-09-22'));
+});
+
+test('a forward that is not from Amazon is ignored', () => {
+  const p = parseAmazonEmail({ subject: 'Fwd: Ordered pizza', text: '---------- Forwarded message ---------\nFrom: Pizza Place <hi@pizza.test>\nDate: Tue, Sep 22, 2026 at 12:14 PM\nOrder #\n114-5555555-6666666\nGrand Total:\n$20.00' });
+  assert.equal(p.fromAmazon, false);
+});

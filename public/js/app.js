@@ -592,10 +592,12 @@ function overview(el) {
 
   // top products
   const tp = [...top].reverse();
+  // Refund note for product tooltips: refunds are part of this product's net, so say so
+  const refundNote = (x) => (x.returnCount ? `<div style="margin-top:5px;color:var(--warn-ink, var(--warn))">↩ ${x.returnCount} refunded${x.refunds ? ` · ${money(x.refunds)} back to buyer` : ''}${x.amazonRefund ? ` · ${money(x.amazonRefund)} recovered from Amazon` : ''}</div>` : '');
   mount($('#ch-top'), {
     grid: { left: 8, right: 70, top: 4, bottom: 4, containLabel: true },
     tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } },
-      formatter: (ps) => { const x = tp[ps[0].dataIndex]; return ttHead(x.title) + ttRow(c.profit, 'Net profit', money(x.net), true) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6;margin-top:4px">${count(x.orders)} orders · ${pct(x.margin)} margin</div>`; } },
+      formatter: (ps) => { const x = tp[ps[0].dataIndex]; return ttHead(x.title) + ttRow(c.profit, 'Net profit', money(x.net), true) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6;margin-top:4px">${count(x.orders)} orders · ${pct(x.margin)} margin</div>` + refundNote(x); } },
     xAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: moneyShort } },
     yAxis: { type: 'category', data: tp.map((x) => x.title), ...axisBase({ splitLine: { show: false } }),
       axisLabel: { color: c.ink2, fontSize: 11.5, width: 190, overflow: 'truncate' } },
@@ -878,7 +880,7 @@ function products(el) {
     const col = lbKey === 'orders' ? c.accent : lbKey === 'revenueAll' ? c.revenue : c.profit;
     lbChart = mount($('#ch-lb'), {
       grid: { left: 8, right: 56, top: 4, bottom: 4, containLabel: true },
-      tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => { const x = list[ps[0].dataIndex]; return ttHead(trunc(x.title, 60)) + ttRow(c.profit, 'Net', money(x.net)) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6">${x.orders} orders · ${pct(x.margin)} margin</div>`; } },
+      tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => { const x = list[ps[0].dataIndex]; return ttHead(trunc(x.title, 60)) + ttRow(c.profit, 'Net', money(x.net)) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6">${x.orders} orders · ${pct(x.margin)} margin</div>` + (x.returnCount ? `<div style="margin-top:5px;color:var(--warn-ink, var(--warn))">↩ ${x.returnCount} refunded${x.refunds ? ` · ${money(x.refunds)} back to buyer` : ''}</div>` : ''); } },
       xAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: fmt } },
       yAxis: { type: 'category', data: list.map((x) => x.title), ...axisBase({ splitLine: { show: false } }), axisLabel: { color: c.ink2, fontSize: 11, width: 150, overflow: 'truncate' } },
       series: [{ type: 'bar', data: list.map((x) => ({ value: x[lbKey], itemStyle: { color: x[lbKey] < 0 ? c.bad : col } })), barWidth: 12, itemStyle: { borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: c.ink2, fontSize: 11, formatter: (p) => fmt(p.value) } }],

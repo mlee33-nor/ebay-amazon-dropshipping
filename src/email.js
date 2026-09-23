@@ -30,9 +30,11 @@ function htmlToText(html) {
 // Invisible characters Amazon sprinkles into subjects/bodies (bidi isolates, CGJ, ZWNJ, figure spaces, soft hyphens)
 const INVISIBLE = /[͏­​-‏‪-‮⁠-⁩  ﻿]/g;
 const clean = (s) => String(s || '').replace(INVISIBLE, '').replace(/&#847;|&zwnj;|&#8199;|&shy;|&#8202;/g, '');
+// Forwarded Amazon emails ("Fwd: Ordered 1 item: ...") are read like the original
+const unfwd = (s) => clean(s).replace(/^\s*((fwd?|fw)\s*:\s*)+/i, '');
 
 export function classify(subject, body) {
-  const s = clean(subject);
+  const s = unfwd(subject);
   if (/refund/i.test(s)) return 'refund';
   if (/cancel/i.test(s)) return 'cancel';
   if (/^\s*(ordered\b|your amazon(\.com)? order|order confirmation|thanks for your order)/i.test(s)) return 'order';
@@ -52,13 +54,24 @@ function moneyNear(text, labels) {
 }
 
 export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
-  subject = clean(subject);
+  const forwarded = /^\s*(fwd?|fw)\s*:/i.test(clean(subject));
+  subject = unfwd(subject);
   const htmlText = clean(htmlToText(html));
   const plain = clean(text);
   const body = `${plain}\n${htmlText}`.replace(/\r/g, '');
   const kind = classify(subject, body);
   const orderIds = [...new Set([...(subject.match(ORDER_RE) || []), ...(body.match(ORDER_RE) || [])])];
   const out = { kind, orderIds, date: date ? new Date(date).toISOString() : null };
+  if (forwarded) {
+    // Use the original Amazon send date from the forwarded header, not the forwarding date
+    out.forwarded = true;
+    out.fromAmazon = /amazon\.com/i.test(body.slice(0, 3000));
+    const fd = body.match(/Forwarded message[\s\S]{0,600}?Date:\s*([^\n]+)/i);
+    if (fd) {
+      const t = Date.parse(fd[1].replace(/\s+at\s+/i, ' ').replace(/[\u202F\u00A0]/g, ' ').trim());
+      if (!Number.isNaN(t)) out.originalDate = new Date(t).toISOString();
+    }
+  }
 
   if (kind === 'order') {
     out.total = moneyNear(body, ['Grand Total', 'Order Total', 'Total for this order', 'Order total']);
@@ -157,6 +170,8 @@ async function ingest(messageId, receivedAt, subject, p) {
 export async function ingestMessage({ messageId, subject = '', text = '', html = '', date }) {
   const parsed = parseAmazonEmail({ subject, text, html, date });
   if (parsed.kind === 'other' || parsed.kind === 'shipment') return 'seen';
+  if (parsed.forwarded && !parsed.fromAmazon) return 'seen'; // a forward that isn't an Amazon email
+  if (parsed.originalDate) date = parsed.originalDate;
   const id = messageId || `${parsed.orderIds[0] || 'unknown'}|${parsed.kind}|${date}`;
   return ingest(id, date ? new Date(date) : null, clean(subject), parsed);
 }
@@ -187,7 +202,8 @@ export async function syncEmail() {
       await client.connect();
       const lock = await client.getMailboxLock(mailbox);
       try {
-        const uids = await client.search({ since, from: 'amazon.com' }, { uid: true });
+        // Amazon's own emails, plus Amazon emails forwarded into this inbox (e.g. from the old address)
+        const uids = await client.search({ since, or: [{ from: 'amazon.com' }, { subject: 'Ordered' }, { subject: 'Refund' }, { subject: 'cancel' }] }, { uid: true });
         // Headers first (cheap), then download only order / refund / cancellation emails not seen before
         const wanted = [];
         for await (const msg of client.fetch(uids || [], { envelope: true }, { uid: true })) {
