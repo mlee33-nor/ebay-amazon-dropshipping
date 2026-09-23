@@ -83,7 +83,7 @@ function recompute(d) {
   d.net = hasCost ? +(rev - (d.cancelled ? 0 : fees) - (d.cancelled ? 0 : d.ad_fees) - cost - (d.cancelled ? 0 : refunds) + Number(d.amazon_refund || 0) - Number(d.extra_cost || 0)).toFixed(2) : null;
   // Same rule as the server's `counted`: sheet-covered and pre-partnership sales never count, nor do exclusions
   const notCounted = d.status === 'in_sheet' || d.status === 'before_start';
-  const keep = notCounted || d.status === 'check_sheet' || d.status === 'cancelled' || d.status === 'cancelled_after_purchase';
+  const keep = notCounted || (d.status === 'not_dropship' && !hasCost) || d.status === 'check_sheet' || d.status === 'cancelled' || d.status === 'cancelled_after_purchase';
   d.live_counted = !notCounted && !d.excluded && hasCost && !(d.cancelled && !cost);
   d.view_status = keep && !(d.status === 'check_sheet' && hasCost) ? d.status
     : d.excluded ? 'excluded' : !hasCost ? 'awaiting_cost' : refunds > 0 || d.has_returns ? 'returned' : d.net < 0 ? 'loss' : 'profitable';

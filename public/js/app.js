@@ -341,10 +341,11 @@ const NO_NET = {
   cancelled: ['cancelled', 'Cancelled order; not counted'],
   check_sheet: ['check sheet', 'Looks like a reworded sheet row; link it or confirm it is separate'],
   returned: ['returned', 'Returned; no Amazon cost on record yet'],
+  not_dropship: ['not dropship', 'No Amazon purchase found for this sale, so it is treated as something else and left out'],
   awaiting_cost: ['needs cost', 'No Amazon cost yet; enter it in the Editor or wait for the Amazon email'],
 };
 const noNetLabel = (o) => {
-  const [label, tip] = o.excluded ? ['excluded', 'Excluded from the numbers'] : NO_NET[o.status] || ['pending', 'Waiting for the Amazon cost'];
+  const [label, tip] = NO_NET[o.status] || (o.excluded ? ['excluded', 'Excluded from the numbers'] : ['pending', 'Waiting for the Amazon cost']);
   return `<span class="muted" title="${tip}">${label}</span>`;
 };
 const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded to buyer');
@@ -352,7 +353,7 @@ const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded
 // Every status pill carries an icon as well as a colour, so state never relies on colour alone
 const STATUS_ICON = {
   profitable: 'trendUp', loss: 'trendDown', returned: 'return', awaiting_cost: 'clock', cancelled: 'x',
-  cancelled_after_purchase: 'circleX', excluded: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert',
+  cancelled_after_purchase: 'circleX', excluded: 'eyeOff', not_dropship: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert',
 };
 export function statusPill(s) {
   const m = STATUS_META[s] || { label: s, cls: '' };
@@ -1097,7 +1098,7 @@ function orders(el) {
   const filters = [
     ['all', 'All'], ['profitable', 'Profitable'], ['loss', 'Loss'], ['returned', 'Returned'], ['awaiting_cost', 'Awaiting cost'], ['cancelled', 'Cancelled'], ['excluded', 'Excluded'],
   ];
-  const counts = Object.fromEntries(filters.map(([k]) => [k, k === 'all' ? all.length : all.filter((o) => matchFilter(o, k)).length]));
+  const counts = Object.fromEntries(filters.map(([k]) => [k, all.filter((o) => matchFilter(o, k)).length]));
   el.innerHTML = `<div class="card"><div class="sheet-bar">
       <div class="seg" id="of-seg">${filters.map(([k, l]) => `<button data-f="${k}" class="${state.ordersFilter === k ? 'on' : ''}">${l} <span class="muted" style="font-weight:500">${counts[k]}</span></button>`).join('')}</div>
       <div class="search" style="margin-left:auto">${ICONS.search}<input class="input" id="ord-q" placeholder="Order #, item, buyer, Amazon #" /></div>
@@ -1143,7 +1144,8 @@ function orders(el) {
 
 // "Loss" means what the Overview counts as loss-making: any counted order with a negative net (a returned or
 // cancelled-after-purchase order can be a loss too). Other filters follow the order's status.
-const matchFilter = (o, f) => (f === 'loss' ? Boolean(o.counted) && o.net < 0 : f === 'all' || o.status === f || (f === 'cancelled' && o.status === 'cancelled_after_purchase'));
+// Not-dropship sales are hidden everywhere except the Excluded filter
+const matchFilter = (o, f) => (f === 'loss' ? Boolean(o.counted) && o.net < 0 : f === 'all' ? o.status !== 'not_dropship' : o.status === f || (f === 'cancelled' && o.status === 'cancelled_after_purchase') || (f === 'excluded' && o.status === 'not_dropship'));
 
 export const ORDER_EXPORT = [
   { title: 'Date', get: (o) => o.created_at }, { title: 'eBay order', get: (o) => (o.source === 'ledger' ? orderLabel(o) : o.order_id) }, { title: 'Item', get: (o) => o.title },

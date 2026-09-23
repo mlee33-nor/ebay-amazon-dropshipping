@@ -75,8 +75,8 @@ check('eBay orders matched to a sheet row are shown but not counted again', () =
 });
 check('short sheet title "Replacement for Kubota" matches the long eBay title', () => assert.equal(byId('11-00001-00008').status, 'in_sheet'));
 check('refund sheet row links to the refunded eBay sale', () => assert.equal(byId('11-00001-00004').status, 'in_sheet'));
-check('a sale missing from the sheet stays visible as needing a cost (not hidden, not counted)', () => {
-  assert.equal(byId('11-00001-00005').status, 'awaiting_cost');
+check('a sale missing from the sheet with no Amazon order is not a dropship sale (hidden, not counted)', () => {
+  assert.equal(byId('11-00001-00005').status, 'not_dropship');
   assert.equal(byId('11-00001-00005').counted, false);
 });
 check('same-item sales: refunded one goes to the refund row, the normal row gets the un-refunded sale', () => {
@@ -91,13 +91,12 @@ check('refunded on eBay with no Amazon purchase: cost $0, only the $0.40 fee los
   assert.equal(o.cost_source, 'refunded');
   assert.equal(o.net, -0.4);
 });
-check('refunded sale missing from a sheet month is not counted (sheet total unchanged)', () => {
+check('refunded sale missing from a sheet month, with no Amazon order, is not a dropship sale (not counted)', () => {
   assert.equal(byId('11-00001-00013').counted, false);
-  assert.equal(byId('11-00001-00013').status, 'returned');
+  assert.equal(byId('11-00001-00013').status, 'not_dropship');
 });
-check('sales before the partnership are set aside', () => {
-  assert.equal(byId('11-00001-00007').status, 'before_start');
-  assert.equal(byId('11-00001-00007').counted, false);
+check('sales before the business started are left out of the data entirely', () => {
+  assert.equal(byId('11-00001-00007'), undefined);
 });
 check('matched sheet rows take the real eBay sale date', () => {
   const uke = data.find((o) => o.source === 'ledger' && /Kala Bamboo/.test(o.title));

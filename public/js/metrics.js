@@ -188,6 +188,7 @@ export const STATUS_META = {
   cancelled: { label: 'Cancelled', cls: '' },
   cancelled_after_purchase: { label: 'Cancelled (bought)', cls: 'bad' },
   excluded: { label: 'Excluded', cls: '' },
+  not_dropship: { label: 'Not dropship', cls: '' },
   in_sheet: { label: 'In monthly sheet', cls: '' },
   before_start: { label: 'Before partnership', cls: '' },
   check_sheet: { label: 'Check: maybe in sheet', cls: 'warn' },

@@ -10,6 +10,9 @@ const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
 const isoDate = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : d);
 
+// Days after a sale with no Amazon order found before it counts as not a dropship sale
+const NOT_DROPSHIP_AFTER_DAYS = 10;
+
 export async function buildDataset() {
   const [orders, lines, returns, links, overrides, amazonLines, azRefunds, ledger, refundTx] = await Promise.all([
     q(`select order_id, created_at, buyer_username, ship_name, ship_city, ship_state, ship_zip, ship_country,
@@ -102,6 +105,7 @@ export async function buildDataset() {
     const led = ledgerByEbay.get(o.order_id);
     const inSheetMonth = sheetMonths.has(saleMonth);
     const beforeStart = Boolean(startMonth) && saleMonth < startMonth;
+    if (beforeStart) continue; // sold before the business started: not part of these books at all
     const inSheet = Boolean(led) || refundRowByEbay.has(o.order_id);
     const rawRevenue = num(o.revenue) || 0;
     const rawFees = num(o.ebay_fees) || 0;
@@ -173,6 +177,13 @@ export async function buildDataset() {
     const possibleSheetDup = !inSheet && inSheetMonth && (unpairedSheetRows.get(saleMonth) || [])
       .some((l) => sheetTitleMatch(l.title, title) >= 0.34 && sheetTitleMatch(l.title, title) * new Set(l.title.toLowerCase().split(/\s+/)).size >= 2);
 
+    // No Amazon purchase behind it = not a dropship sale (something else sold on the account). It drops out of the
+    // books once the month's sheet has left it out or the matching window has passed with no Amazon order found.
+    // A linked Amazon order, a sheet row, a typed-in cost, or an unlinked Amazon order that could be its purchase keeps it.
+    const pastMatchWindow = inSheetMonth || Date.now() - new Date(o.created_at).getTime() > NOT_DROPSHIP_AFTER_DAYS * 86400_000;
+    const notDropship = !hasCost && !cancelled && !amazonOrders.length && !led && num(ov.cost_override) === null &&
+      pastMatchWindow && !possibleSheetDup && !couldHavePurchase();
+
     const firstAz = amazonOrders.map((a) => a.order_date).filter(Boolean).sort()[0];
     const lagDays = firstAz
       ? Math.round((new Date(`${firstAz}T12:00:00Z`) - new Date(`${businessDay(o.created_at)}T12:00:00Z`)) / 86400_000)
@@ -186,6 +197,7 @@ export async function buildDataset() {
     // Stays flagged until someone links it to its sheet row or confirms it is a separate sale
     else if (possibleSheetDup && !ov.confirmed_separate) status = 'check_sheet';
     else if (cancelled) status = hasCost && cost > 0 ? 'cancelled_after_purchase' : 'cancelled';
+    else if (notDropship) status = 'not_dropship';
     else if (!hasCost && mostlyRefunded && inSheetMonth) status = 'returned'; // refunded, and the sheet left it out
     else if (!hasCost) status = 'awaiting_cost';
     else if (totalRefund > 0 || rets.length) status = 'returned';
@@ -235,7 +247,7 @@ export async function buildDataset() {
       in_sheet: inSheet,
       before_start: beforeStart,
       possible_sheet_duplicate: possibleSheetDup,
-      excluded: inSheet || beforeStart || Boolean(ov.excluded),
+      excluded: inSheet || notDropship || Boolean(ov.excluded),
       status,
       lag_days: lagDays,
       amazon_orders: amazonOrders,
