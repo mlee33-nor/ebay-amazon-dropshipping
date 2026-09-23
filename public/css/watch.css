@@ -1,0 +1,193 @@
+/* =====================================================================
+   Watchlist page
+   ---------------------------------------------------------------------
+   One header card (the verdict + three tiles that jump to their section),
+   then one card per list. Empty lists collapse to a single "all clear" row;
+   populated ones carry a table. Every colour is an app.css token, so dark and
+   light both work without anything extra here.
+   ===================================================================== */
+.watch { display: flex; flex-direction: column; gap: 12px; }
+.content.page-in .watch > * { animation: pageIn 0.42s var(--ease-out) both; }
+.content.page-in .watch > *:nth-child(2) { animation-delay: 40ms; }
+.content.page-in .watch > *:nth-child(3) { animation-delay: 80ms; }
+.content.page-in .watch > *:nth-child(4) { animation-delay: 120ms; }
+
+/* ---------- header: verdict ---------- */
+.watch-hero { overflow: hidden; isolation: isolate; scroll-margin-top: 76px; }
+.watch-hero::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none; border-radius: inherit;
+  background: radial-gradient(640px 220px at 0% 0%, color-mix(in srgb, var(--good) 13%, transparent), transparent 70%);
+}
+.watch-hero.warn::before { background: radial-gradient(640px 220px at 0% 0%, color-mix(in srgb, var(--warn) 12%, transparent), transparent 70%); }
+.watch-hero.bad::before { background: radial-gradient(640px 220px at 0% 0%, color-mix(in srgb, var(--bad) 12%, transparent), transparent 70%); }
+.watch-hero.pending::before { background: radial-gradient(640px 220px at 0% 0%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%); }
+
+.wv { display: flex; align-items: center; gap: 16px; padding: 20px 24px 18px; }
+.wv-ic {
+  width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; flex: none;
+  background: var(--good-soft); color: var(--good-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 28%, transparent);
+}
+.wv-ic svg { width: 22px; height: 22px; }
+.wv.warn .wv-ic { background: var(--warn-soft); color: var(--warn-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 30%, transparent); }
+.wv.bad .wv-ic { background: var(--bad-soft); color: var(--bad-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 30%, transparent); }
+.wv.pending .wv-ic { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent); }
+.wv-tt { flex: 1; min-width: 0; }
+.wv-lbl { font-size: var(--t-2xs); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 700; color: var(--good-ink); display: flex; align-items: center; gap: 7px; }
+.wv-lbl .live { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 25%, transparent); }
+.wv.warn .wv-lbl { color: var(--warn-ink); }
+.wv.bad .wv-lbl { color: var(--bad-ink); }
+.wv.bad .wv-lbl .live { animation: pulse 1.4s ease-in-out infinite; }
+.wv.pending .wv-lbl { color: var(--accent); }
+.wv.pending .wv-lbl .live { animation: pulse 1.1s ease-in-out infinite; }
+.wv-t { margin: 3px 0 0; font-size: var(--t-xl); font-weight: 600; letter-spacing: -0.025em; line-height: 1.2; }
+.wv-s { font-size: var(--t-sm); color: var(--ink-3); margin-top: 4px; line-height: 1.45; }
+.wv-s b { color: var(--ink-2); font-weight: 600; }
+
+/* ---------- header: tiles ---------- */
+.wtiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+.wtile {
+  appearance: none; border: 0; border-right: 1px solid var(--line); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: 4px; padding: 14px 20px 13px; min-width: 0; position: relative;
+  transition: background 0.15s var(--ease);
+}
+.wtile:last-child { border-right: 0; }
+.wtile:hover { background: var(--hover); }
+.wtile:active { background: var(--press); }
+.wtile:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); border-radius: 0; }
+.wtile-top { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--ink-3); font-weight: 500; min-width: 0; width: 100%; }
+.wtile-l { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wtile-top > svg { width: 14px; height: 14px; flex: none; color: var(--ink-4); opacity: 0; transform: translateX(-3px); transition: opacity 0.15s, transform 0.18s var(--ease); }
+.wtile:hover .wtile-top > svg, .wtile:focus-visible .wtile-top > svg { opacity: 1; transform: none; }
+.wtile-ic { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; flex: none; background: var(--surface-3); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-hi); }
+.wtile-ic svg { width: 14px; height: 14px; }
+.wtile.good .wtile-ic { background: var(--good-soft); color: var(--good-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 22%, transparent); }
+.wtile.warn .wtile-ic { background: var(--warn-soft); color: var(--warn-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 24%, transparent); }
+.wtile.bad .wtile-ic { background: var(--bad-soft); color: var(--bad-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 24%, transparent); }
+.wtile.info .wtile-ic { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent); }
+.wtile-v { font-size: 23px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.15; margin-top: 2px; }
+.wtile-f { font-size: var(--t-xs); color: var(--ink-3); display: flex; align-items: center; gap: 5px; min-height: 18px; line-height: 1.3; flex-wrap: wrap; }
+.wtile-f svg { width: 12px; height: 12px; flex: none; }
+.wtile-f b { font-weight: 600; }
+.wtile-f.ok { color: var(--good-ink); }
+.wtile-sk { display: inline-block; width: 64px; height: 22px; vertical-align: middle; }
+
+/* ---------- sections ---------- */
+.wsec { scroll-margin-top: 76px; }
+.wsec-h { display: flex; align-items: center; gap: 12px; padding: 13px 18px; }
+.wsec.has .wsec-h { align-items: flex-start; padding: 15px 18px 12px; }
+.wsec-ic { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--surface-3); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-hi); }
+.wsec-ic svg { width: 16px; height: 16px; }
+.wsec-ic.good { background: var(--good-soft); color: var(--good-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 22%, transparent); }
+.wsec-ic.warn { background: var(--warn-soft); color: var(--warn-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 24%, transparent); }
+.wsec-ic.bad { background: var(--bad-soft); color: var(--bad-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 24%, transparent); }
+.wsec-ic.info, .wsec-ic.pending { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent); }
+.wsec-tt { flex: 1; min-width: 0; }
+.wsec-tt h3 { margin: 0; font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wsec-n { font-size: 11px; font-weight: 600; padding: 0 7px; min-width: 20px; height: 20px; border-radius: 999px; display: inline-grid; place-items: center; background: var(--surface-3); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-hi); font-variant-numeric: tabular-nums; }
+.wsec.bad .wsec-n { background: var(--bad-soft); color: var(--bad-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 30%, transparent); }
+.wsec.warn .wsec-n { background: var(--warn-soft); color: var(--warn-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 30%, transparent); }
+.wsec.info .wsec-n { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent); }
+.wsec-s { font-size: 12px; color: var(--ink-3); margin-top: 2px; line-height: 1.4; }
+.wsec.clear .wsec-s { margin-top: 1px; }
+.wsec-r { margin-left: auto; flex: none; display: flex; align-items: center; gap: 8px; }
+.wsec.clear .wsec-r .pill.good, .wsec.pending .wsec-r .pill { height: 24px; padding: 0 9px 0 8px; }
+.w-i { appearance: none; border: 0; background: transparent; color: var(--ink-4); width: 18px; height: 18px; padding: 0; margin-left: 2px; border-radius: 50%; display: inline-grid; place-items: center; vertical-align: -5px; cursor: help; transition: color 0.15s, background 0.15s; }
+.w-i svg { width: 14px; height: 14px; }
+.w-i:hover, .w-i:focus-visible { color: var(--ink-2); background: var(--hover); }
+
+/* ---------- tables ---------- */
+.wsec-b { padding: 0 18px 4px; }
+.wsec.pending .wsec-b { padding-bottom: 4px; }
+.wsec.pending .wsec-b .sk-rows { padding: 6px 0 12px; }
+.wtable-wrap { overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; margin: 0 -18px; padding: 0 18px; }
+table.wtable { min-width: 100%; }
+table.wtable td { padding-top: 10px; padding-bottom: 10px; }
+table.wtable .nowrap { white-space: nowrap; }
+/* The item column soaks up whatever width the numeric columns leave, and truncates instead of stretching the table */
+table.wtable .wt-item { width: 100%; max-width: 0; min-width: 200px; }
+table.wtable .wt-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; line-height: 1.35; }
+table.wtable .wt-sub { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
+table.wtable .wt-sub .mono { font-size: 11px; }
+table.wtable .only-m { display: none; }
+table.wtable td.dim { color: var(--ink-3); }
+table.wtable .r .pill { justify-content: flex-end; }
+table.wtable .r .btn { vertical-align: middle; }
+table.wtable tr.late td { background: color-mix(in srgb, var(--bad) 6%, transparent); }
+table.wtable tbody tr.late:hover td { background: color-mix(in srgb, var(--bad) 10%, transparent); }
+table.wtable .wt-verdict { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+table.wtable .wt-why { font-size: 12px; color: var(--ink-3); }
+table.wtable .wt-lbl { font-size: 11px; color: var(--ink-3); font-weight: 500; margin-top: 1px; }
+.wsec:not(.expanded) tr.w-extra { display: none; }
+.wsec-f { display: flex; align-items: center; gap: 12px; padding: 8px 0 8px; border-top: 1px solid var(--line); }
+.wsec-f .muted { font-size: 12px; }
+.w-more svg { transition: transform 0.2s var(--ease); }
+.wsec.expanded .w-more svg { transform: rotate(180deg); }
+.watch .l-short { display: none; }
+
+/* Wide screens: the table fits, so the wrapper stops being a scroll container (clip, not auto) and the column
+   headers can pin under the top bar while the page scrolls */
+@media (min-width: 1280px) {
+  .wtable-wrap { overflow-x: clip; overflow-y: visible; }
+  table.wtable th { top: 60px; }
+}
+@media (max-width: 1279px) {
+  table.wtable th { position: static; }
+}
+
+/* Brief ring on the section a tile jumped to */
+@keyframes watchFlash {
+  0% { box-shadow: 0 0 0 3px var(--accent-ring); border-color: var(--accent); }
+  100% { box-shadow: var(--el-1); }
+}
+.wsec.flash { animation: watchFlash 1.5s var(--ease) both; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 700px) {
+  .watch { gap: 10px; }
+  .watch-hero, .wsec { scroll-margin-top: 72px; }
+  .wv { padding: 16px 16px 14px; gap: 12px; align-items: flex-start; }
+  .wv-ic { width: 38px; height: 38px; border-radius: 11px; }
+  .wv-ic svg { width: 19px; height: 19px; }
+  .wv-t { font-size: 19px; }
+  .wtiles { grid-template-columns: 1fr; }
+  .wtile {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'top v' 'f v';
+    align-items: center; column-gap: 12px; row-gap: 1px; padding: 11px 16px; border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  .wtile:last-child { border-bottom: 0; }
+  .wtile-top { grid-area: top; }
+  .wtile-top > svg { display: none; }
+  .wtile-v { grid-area: v; font-size: 19px; margin: 0; text-align: right; }
+  .wtile-f { grid-area: f; padding-left: 35px; min-height: 0; }
+  .wsec-h { padding: 12px 14px; gap: 10px; }
+  .wsec.has .wsec-h { padding: 14px 14px 10px; flex-wrap: wrap; }
+  .wsec.has .wsec-r { flex-basis: 100%; margin-left: 0; justify-content: flex-start; padding-left: 42px; }
+  .wsec.has .wsec-r:empty { display: none; }
+  .wsec-b { padding: 0 14px 4px; }
+  .wtable-wrap { margin: 0 -14px; padding: 0 14px; }
+  /* Phones: each row becomes a small card (title + meta on the left, amount top-right, status + action underneath) */
+  table.wtable, table.wtable tbody, table.wtable td { display: block; }
+  table.wtable thead { display: none; }
+  table.wtable { min-width: 0; }
+  table.wtable tbody tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'item amt' 'pill act';
+    column-gap: 12px; row-gap: 8px; align-items: start; padding: 11px 14px; margin: 0 -14px; border-bottom: 1px solid var(--line);
+  }
+  table.wtable tbody tr:last-child { border-bottom: 0; }
+  table.wtable tbody tr:hover, table.wtable tbody tr.late:hover { background: var(--hover); }
+  table.wtable tr.late { background: color-mix(in srgb, var(--bad) 6%, transparent); }
+  table.wtable td, table.wtable tbody tr:hover td, table.wtable tr.late td { padding: 0; border: 0; background: transparent; }
+  table.wtable .hide-m { display: none; }
+  table.wtable .only-m { display: inline; }
+  table.wtable .wt-lbl.only-m { display: block; }
+  table.wtable .c-item { grid-area: item; width: auto; min-width: 0; max-width: none; }
+  table.wtable .c-amt { grid-area: amt; text-align: right; }
+  table.wtable .c-pill { grid-area: pill; align-self: end; white-space: normal; text-align: left; }
+  table.wtable .c-act { grid-area: act; text-align: right; align-self: end; }
+  table.wtable tbody tr:not(:has(.c-pill)) { grid-template-areas: 'item amt' 'item act'; }
+  table.wtable .wt-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  table.wtable .wt-sub { white-space: normal; }
+  table.wtable .wt-verdict { flex-wrap: wrap; white-space: normal; gap: 4px 8px; }
+  .watch .l-long { display: none; }
+  .watch .l-short { display: inline; }
+}
