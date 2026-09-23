@@ -80,6 +80,53 @@ export function downloadCsv(filename, rows, columns) {
 
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
+// Partner settlement for calendar month `month` (YYYY-MM) is due on `day` of the FOLLOWING month.
+export const settlementDueDate = (month, day = 26) => {
+  const [y, m] = month.split('-').map(Number);
+  const d = Math.min(Math.max(1, Number(day) || 26), 28);
+  return new Date(y, m, d); // m is 1-based, so index m is the next month
+};
+export function dueStatus(due, { paid = false } = {}) {
+  const days = Math.round((startOfDay(due) - startOfDay(new Date())) / DAY);
+  const label = fmtDate(due, { month: 'short', day: 'numeric', year: 'numeric' });
+  const plural = (n) => `${n} day${n === 1 ? '' : 's'}`;
+  if (paid) return { kind: 'paid', days, label, text: `Due ${label}` };
+  if (days < 0) return { kind: 'overdue', days, label, text: `Overdue by ${plural(-days)}` };
+  if (days === 0) return { kind: 'soon', days, label, text: 'Due today' };
+  if (days <= 7) return { kind: 'soon', days, label, text: `Due in ${plural(days)}` };
+  return { kind: 'later', days, label, text: `Due ${label}` };
+}
+
+// A sync is "in progress" while its log row has no finished_at; only a finished row can be a failure.
+export const syncInProgress = (s) => Boolean(s?.running || (s?.last && s.last.finished_at === null));
+export const syncFailed = (s) => Boolean(s?.last && s.last.finished_at && !s.last.ok);
+
+export const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+// Animate a number into an element (hero KPIs). Ends on the exact formatted target so totals always read true.
+export function countUp(el, to, format, ms = 900) {
+  if (!el) return;
+  const target = Number(to) || 0;
+  const done = () => { el.textContent = format(target); };
+  if (reducedMotion() || !Number.isFinite(target)) return done();
+  const from = Number(el.dataset.from) || 0;
+  el.dataset.from = String(target);
+  const t0 = performance.now();
+  const ease = (x) => 1 - Math.pow(1 - x, 3);
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / ms);
+    el.textContent = format(from + (target - from) * ease(k));
+    if (k < 1) requestAnimationFrame(step); else done();
+  };
+  requestAnimationFrame(step);
+}
+
+// Session-scoped dismissals for soft notices (setup hints). Hard failures are never dismissible.
+export const dismissed = {
+  has: (k) => { try { return sessionStorage.getItem(`dd_dismiss_${k}`) === '1'; } catch { return false; } },
+  add: (k) => { try { sessionStorage.setItem(`dd_dismiss_${k}`, '1'); } catch {} },
+};
+
 export const ICONS = {
   overview: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
   trends: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>',
@@ -103,4 +150,13 @@ export const ICONS = {
   return: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>',
   save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>',
   undo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>',
+  mail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>',
+  sheet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h8"/></svg>',
+  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+  arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+  wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2H3z"/><path d="M3 9h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M16 14h2"/></svg>',
+  target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg>',
+  db: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
+  ebay: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16v10H4z"/><path d="M4 11h16"/></svg>',
 };

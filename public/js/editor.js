@@ -19,11 +19,11 @@ export function renderEditor(el) {
         <button data-t="expenses" class="${tab === 'expenses' ? 'on' : ''}">Operating expenses</button>
         <button data-t="matches" class="${tab === 'matches' ? 'on' : ''}">Match review ${state.data.amazon.suggestions ? `<span class="badge" style="margin-left:4px">${state.data.amazon.suggestions}</span>` : ''}</button>
       </div>
-      <div id="ed-tools" class="row" style="margin-left:auto"></div>
+      <div id="ed-tools" class="sheet-tools"></div>
     </div>
     <div id="ed-body"></div>
   </div>
-  <div class="muted" style="font-size:12px;margin-top:10px" id="ed-help"></div>`;
+  <div class="sheet-help" id="ed-help"></div>`;
   $('#ed-tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
@@ -42,17 +42,20 @@ function toolbar(extra = '') {
   $('#ed-tools').innerHTML = `
     ${extra}
     <div class="search">${ICONS.search}<input class="input" id="ed-q" placeholder="Search" /></div>
-    <button class="btn sm" id="ed-undo" title="Undo (Ctrl+Z)">${ICONS.undo} Undo</button>
-    <button class="btn sm" id="ed-export">Export CSV</button>
-    <button class="btn sm" id="ed-discard" disabled>Discard</button>
-    <button class="btn sm primary" id="ed-save" disabled>${ICONS.save} Save <span id="ed-n"></span></button>`;
-  $('#ed-help').innerHTML = `Spreadsheet controls: click and drag to select a range · <span class="kbd">Ctrl</span>+<span class="kbd">C</span> / <span class="kbd">Ctrl</span>+<span class="kbd">V</span> copy and paste ranges (works with Excel and Google Sheets) · double-click or type to edit · <span class="kbd">Enter</span> / <span class="kbd">Tab</span> to move · <span class="kbd">Ctrl</span>+<span class="kbd">Z</span> undo · editable columns are tinted, unsaved edits are yellow.`;
+    <span class="divider-v"></span>
+    <button class="btn sm ghost" id="ed-undo" title="Undo (Ctrl+Z)">${ICONS.undo} Undo</button>
+    <button class="btn sm ghost" id="ed-export" title="Download what's currently shown">${ICONS.down} Export</button>
+    <span class="divider-v"></span>
+    <button class="btn sm" id="ed-discard" disabled title="Throw away unsaved edits">Discard</button>
+    <button class="btn sm primary" id="ed-save" disabled title="Write staged edits to the database">${ICONS.save} Save <span id="ed-n" class="cnt"></span></button>`;
+  $('#ed-help').innerHTML = `<b style="color:var(--ink-2)">Spreadsheet mode.</b> Click and drag to select a range · <span class="kbd">Ctrl</span>+<span class="kbd">C</span> / <span class="kbd">Ctrl</span>+<span class="kbd">V</span> copy and paste ranges (works with Excel and Google Sheets) · double-click or type to edit · <span class="kbd">Enter</span> / <span class="kbd">Tab</span> to move · <span class="kbd">Ctrl</span>+<span class="kbd">Z</span> undo · editable columns are tinted blue, unsaved edits are yellow until you press <b style="color:var(--ink-2)">Save</b>.`;
 }
 
 function markDirty(n) {
-  $('#ed-n').textContent = n ? `(${n})` : '';
+  $('#ed-n').textContent = n ? String(n) : '';
   $('#ed-save').disabled = !n;
   $('#ed-discard').disabled = !n;
+  $('#ed-save').title = n ? `Write ${n} staged edit${n > 1 ? 's' : ''} to the database` : 'Nothing to save yet';
 }
 
 const numEditor = { editor: 'number', editorParams: { step: 0.01, selectContents: true } };
@@ -101,6 +104,7 @@ function ebaySheet(focusOrder) {
     clipboardPasteAction: 'range',
     rowHeader: { resizable: false, frozen: true, width: 44, hozAlign: 'center', formatter: 'rownum', cssClass: 'cell-ro', headerSort: false },
     initialSort: [{ column: 'created_at', dir: 'desc' }],
+    placeholder: 'No eBay orders yet. Connect eBay in Settings or upload a monthly sheet.',
     columnDefaults: { headerSort: true, resizable: true },
     columns: [
       { title: 'Date', field: 'created_at', width: 100, formatter: (c) => fmtDate(c.getValue(), { month: 'short', day: 'numeric', year: '2-digit' }), cssClass: 'cell-ro' },
@@ -195,6 +199,7 @@ async function amazonSheet() {
     clipboardPasteAction: 'range',
     rowHeader: { resizable: false, frozen: true, width: 44, hozAlign: 'center', formatter: 'rownum', cssClass: 'cell-ro', headerSort: false },
     initialSort: [{ column: 'order_date', dir: 'desc' }],
+    placeholder: 'No Amazon purchases yet. They arrive automatically from the email import (Settings).',
     columns: [
       { title: 'Date', field: 'order_date', width: 100, cssClass: 'cell-ro', formatter: (c) => (c.getValue() ? fmtDate(`${c.getValue()}T12:00`, { month: 'short', day: 'numeric', year: '2-digit' }) : '') },
       { title: 'Amazon order', field: 'amazon_order_id', width: 180, cssClass: 'cell-ro', formatter: (c) => `<span class="mono">${esc(c.getValue())}</span>` },
@@ -294,7 +299,7 @@ async function matchReview() {
 function expensesSheet() {
   const A = state.data.settings.partner_amazon;
   const B = state.data.settings.partner_ebay;
-  toolbar('<button class="btn sm" id="ex-add">+ Add expense</button>');
+  toolbar('<button class="btn sm" id="ex-add" title="Add a row for this month">+ Add expense</button>');
   const now = new Date();
   const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const rows = state.data.books.expenses.map((x) => ({ ...x }));

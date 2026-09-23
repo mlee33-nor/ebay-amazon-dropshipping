@@ -1,15 +1,16 @@
-import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, ago, api, toast, downloadCsv, ICONS, DAY, ymd } from './util.js';
+import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, ago, api, toast, downloadCsv, ICONS, DAY, ymd, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed } from './util.js';
 import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor } from './metrics.js';
-import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, sparkline } from './charts.js';
+import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer } from './charts.js';
 import { renderEditor } from './editor.js';
 import { renderSettlement } from './settle-page.js';
-import { settleMonth, monthKey } from './settlement.js';
+import { settleMonth, monthKey, allMonths } from './settlement.js';
 
 // ---------------------------------------------------------------- state
 const store = (k, v) => { try { if (v === undefined) return JSON.parse(localStorage.getItem(k)); localStorage.setItem(k, JSON.stringify(v)); } catch { return null; } };
 export const state = {
   data: null,
   range: store('dd_range') || '30d',
+  month: store('dd_month') || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`,
   custom: store('dd_custom') || { from: ymd(Date.now() - 29 * DAY), to: ymd(Date.now()) },
   gran: null,
   page: 'overview',
@@ -19,26 +20,27 @@ const tables = new Set();
 export const trackTable = (t) => { tables.add(t); return t; };
 
 const PAGES = [
-  { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit at a glance' },
-  { id: 'trends', label: 'Analytics', icon: 'trends', sub: 'Patterns, timing, pricing and geography' },
-  { id: 'products', label: 'Products', icon: 'products', sub: 'What sells, what earns, what bleeds' },
-  { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every eBay sale with its full profit math' },
-  { id: 'returns', label: 'Returns', icon: 'returns', sub: 'Refunds, reasons and recovery' },
-  { id: 'settlement', label: 'Settlement', icon: 'settle', sub: 'Monthly partner settlement', noRange: true },
-  { id: 'editor', label: 'Editor', icon: 'editor', sub: 'Spreadsheet mode: manual adjustments and matching', noRange: true },
-  { id: 'import', label: 'Amazon import', icon: 'import', sub: 'Weekly CSV upload', noRange: true },
-  { id: 'settings', label: 'Settings', icon: 'settings', sub: 'eBay connection, matching rules, goals', noRange: true },
+  { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit at a glance', group: 'Insights' },
+  { id: 'trends', label: 'Analytics', icon: 'trends', sub: 'Patterns, timing, pricing and geography', group: 'Insights' },
+  { id: 'products', label: 'Products', icon: 'products', sub: 'What sells, what earns, what bleeds', group: 'Insights' },
+  { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every eBay sale with its full profit math', group: 'Insights' },
+  { id: 'returns', label: 'Returns', icon: 'returns', sub: 'Refunds, reasons and recovery', group: 'Insights' },
+  { id: 'settlement', label: 'Settlement', icon: 'settle', sub: 'Monthly partner settlement', noRange: true, group: 'Partners' },
+  { id: 'editor', label: 'Editor', icon: 'editor', sub: 'Spreadsheet mode: manual adjustments and matching', noRange: true, group: 'Data' },
+  { id: 'import', label: 'Monthly sheets', icon: 'sheet', sub: 'Upload the partner settlement sheets', noRange: true, group: 'Data' },
+  { id: 'settings', label: 'Settings', icon: 'settings', sub: 'eBay connection, Amazon email import, partners, goals', noRange: true, group: 'Data' },
 ];
 
 // ---------------------------------------------------------------- data
 export async function loadData() {
   state.data = await api('/api/data');
+  renderRangeSeg();
   renderSidebarFoot();
   renderNav();
   return state.data;
 }
 
-const range = () => rangeFor(state.range, state.custom);
+const range = () => rangeFor(state.range, state.custom, state.month);
 const scoped = () => inRange(state.data.orders, range());
 const prevScoped = () => inRange(state.data.orders, previousRange(range()));
 
@@ -49,14 +51,18 @@ function renderNav() {
     editor: d?.amazon?.suggestions || 0,
     orders: d ? d.orders.filter((o) => o.status === 'awaiting_cost').length : 0,
   };
-  $('#nav').innerHTML =
-    `<div class="nav-label">Dashboard</div>` +
-    PAGES.slice(0, 6).map(navLink).join('') +
-    `<div class="nav-label">Data</div>` +
-    PAGES.slice(6).map(navLink).join('');
+  const groups = [];
+  for (const p of PAGES) {
+    let g = groups.find((x) => x.name === p.group);
+    if (!g) { g = { name: p.group, pages: [] }; groups.push(g); }
+    g.pages.push(p);
+  }
+  $('#nav').innerHTML = groups.map((g) => `<div class="nav-label">${g.name}</div>${g.pages.map(navLink).join('')}`).join('');
   function navLink(p) {
-    const b = p.id === 'editor' && badges.editor ? `<span class="badge" title="Suggested matches to review">${badges.editor}</span>` : '';
-    return `<a href="#/${p.id}" class="${state.page === p.id ? 'active' : ''}">${ICONS[p.icon]}<span>${p.label}</span>${b}</a>`;
+    let b = '';
+    if (p.id === 'editor' && badges.editor) b = `<span class="badge" title="Suggested matches to review">${badges.editor}</span>`;
+    else if (p.id === 'orders' && badges.orders) b = `<span class="nav-count" title="Sales waiting on an Amazon cost">${badges.orders}</span>`;
+    return `<a href="#/${p.id}" class="${state.page === p.id ? 'active' : ''}" ${state.page === p.id ? 'aria-current="page"' : ''}>${ICONS[p.icon]}<span>${p.label}</span>${b}</a>`;
   }
 }
 
@@ -64,36 +70,42 @@ function renderSidebarFoot() {
   const e = state.data?.ebay;
   if (!e) return;
   let dot = 'warn';
-  let line = 'eBay not connected';
-  if (e.running) { dot = 'spin'; line = 'Syncing eBay…'; }
-  else if (e.configured && e.last?.ok) { dot = 'ok'; line = `eBay synced ${ago(e.lastSuccess)}`; }
-  else if (e.configured && e.last && !e.last.ok) { dot = 'bad'; line = 'eBay sync failed'; }
-  else if (e.configured) { dot = 'warn'; line = 'eBay: waiting for first sync'; }
+  let line = 'Not connected';
+  let action = 'Set up';
+  if (syncInProgress(e)) { dot = 'spin'; line = 'Syncing now…'; action = ''; }
+  else if (e.needsReconnect) { dot = 'bad'; line = 'Needs reconnect'; action = 'Fix'; }
+  else if (e.configured && e.last?.ok) { dot = 'ok'; line = `Synced ${ago(e.lastSuccess)}`; action = ''; }
+  else if (e.configured && syncFailed(e)) { dot = 'bad'; line = 'Last sync failed'; action = 'Details'; }
+  else if (e.configured) { dot = 'warn'; line = 'Waiting for first sync'; action = ''; }
   const az = state.data.amazon;
+  const em = emailState();
   $('#sidebar-foot').innerHTML = `
-    <div class="sync-row"><span class="dot ${dot}"></span><b style="font-weight:600">${line}</b></div>
-    <div class="sync-row" style="margin-top:6px"><span class="dot ${emailDot()}"></span><span>${emailLine()}</span></div>
-    <div class="muted" style="margin-top:6px">Amazon: ${count(az.linked)} of ${count(az.orders)} orders linked${az.latest ? ` · latest ${fmtDate(az.latest)}` : ''}</div>
-    <div class="muted" style="margin-top:2px">${state.data.db === 'local-postgres' ? 'Local database' : 'Supabase Postgres'}</div>`;
+    <div class="status-row"><span class="dot ${dot}"></span><div><div class="st-t">eBay sales</div><div class="st-s">${line}</div></div>${action ? `<a class="st-a" href="#/settings">${action}</a>` : ''}</div>
+    <div class="status-row"><span class="dot ${em.dot}"></span><div><div class="st-t">Amazon email</div><div class="st-s">${em.line}</div></div>${em.action ? `<a class="st-a" href="#/settings?focus=email">${em.action}</a>` : ''}</div>
+    <div class="status-row"><span class="dot ${az.orders ? 'ok' : ''}"></span><div><div class="st-t">Amazon purchases</div><div class="st-s">${az.orders ? `${count(az.linked)} of ${count(az.orders)} linked${az.latest ? ` · latest ${fmtDate(az.latest)}` : ''}` : 'None yet'}</div></div></div>
+    <div class="status-foot"><span>${ICONS.db.replace('<svg', '<svg style="width:12px;height:12px;margin-right:5px;opacity:.7"')}${state.data.db === 'local-postgres' ? 'Local database' : 'Supabase Postgres'}</span><span class="mono" style="font-size:10.5px">${count(state.data.orders.length)} sales</span></div>`;
 }
 
-function emailDot() {
+function emailState() {
   const m = state.data.email;
-  if (!m.configured) return 'warn';
-  if (m.running) return 'spin';
-  return m.last?.ok ? 'ok' : m.last ? 'bad' : 'warn';
-}
-function emailLine() {
-  const m = state.data.email;
-  if (!m.configured) return 'Email not connected';
-  if (m.running) return 'Checking email…';
-  return m.last?.ok ? `Email checked ${ago(m.last.at)}` : m.last ? 'Email check failed' : 'Email: not checked yet';
+  if (!m.configured) return { dot: 'warn', line: 'Not connected', action: 'Set up' };
+  if (m.running) return { dot: 'spin', line: 'Checking mail…', action: '' };
+  if (m.last?.ok) return { dot: 'ok', line: `Checked ${ago(m.last.at)}`, action: '' };
+  if (m.last) return { dot: 'bad', line: 'Last check failed', action: 'Details' };
+  return { dot: 'warn', line: 'Not checked yet', action: '' };
 }
 
-const RANGES = [['7d', '7D'], ['30d', '30D'], ['90d', '90D'], ['mtd', 'MTD'], ['ytd', 'YTD'], ['12m', '12M'], ['all', 'All'], ['custom', 'Custom']];
+const RANGES = [['1d', '1D'], ['7d', '7D'], ['30d', '30D'], ['90d', '90D'], ['mtd', 'MTD'], ['ytd', 'YTD'], ['12m', '12M'], ['all', 'All'], ['month', 'Month'], ['custom', 'Custom']];
 function renderRangeSeg() {
   $('#range-seg').innerHTML = RANGES.map(([k, l]) => `<button data-r="${k}" class="${state.range === k ? 'on' : ''}">${l}</button>`).join('');
   $('#custom-range').classList.toggle('hidden', state.range !== 'custom');
+  // Month picker: every month that has sales, plus the last 12 calendar months
+  const months = new Set();
+  const now = new Date();
+  for (let i = 0; i < 12; i++) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); months.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+  for (const o of state.data?.orders || []) { const d = new Date(o.created_at); months.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+  $('#month-pick').innerHTML = [...months].sort().reverse().map((k) => { const [y, mo] = k.split('-').map(Number); return `<option value="${k}" ${k === state.month ? 'selected' : ''}>${new Date(y, mo - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</option>`; }).join('');
+  $('#month-pick').classList.toggle('hidden', state.range !== 'month');
   $('#from-date').value = state.custom.from;
   $('#to-date').value = state.custom.to;
 }
@@ -105,6 +117,7 @@ $('#range-seg').addEventListener('click', (e) => {
   renderRangeSeg();
   renderPage();
 });
+$('#month-pick').addEventListener('change', (e) => { state.month = e.target.value; store('dd_month', state.month); renderPage(); });
 for (const id of ['#from-date', '#to-date'])
   $(id).addEventListener('change', () => {
     state.custom = { from: $('#from-date').value, to: $('#to-date').value };
@@ -152,8 +165,26 @@ $('#sync-btn').addEventListener('click', async () => {
   btn.querySelector('span').textContent = 'Sync';
 });
 
-$('#menu-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
-$('#nav').addEventListener('click', () => $('#sidebar').classList.remove('open'));
+function setSidebar(open) {
+  $('#sidebar').classList.toggle('open', open);
+  $('#nav-scrim').classList.toggle('open', open);
+  $('#menu-btn').setAttribute('aria-expanded', String(open));
+}
+$('#menu-btn').addEventListener('click', () => setSidebar(!$('#sidebar').classList.contains('open')));
+$('#nav-scrim').addEventListener('click', () => setSidebar(false));
+$('#sidebar').addEventListener('click', (e) => { if (e.target.closest('a')) setSidebar(false); });
+
+// Soft notices can be dismissed for the session; the × lives inside the rendered banner markup.
+$('#content').addEventListener('click', (e) => {
+  const x = e.target.closest('.banner-x');
+  if (!x) return;
+  const b = x.closest('.banner');
+  dismissed.add(x.dataset.k);
+  b.style.transition = 'opacity .2s, transform .2s';
+  b.style.opacity = '0';
+  b.style.transform = 'translateY(-4px)';
+  setTimeout(() => { const wrap = b.parentElement; b.remove(); if (wrap?.classList.contains('banners') && !wrap.children.length) wrap.remove(); }, 200);
+});
 
 window.addEventListener('hashchange', route);
 function route() {
@@ -173,14 +204,25 @@ export function renderPage() {
   $('#page-sub').textContent = p.noRange ? p.sub : `${p.sub} · ${r.start ? `${fmtDate(r.start)} – ${fmtDate(r.end)}` : 'All time'}`;
   $('#range-seg').parentElement.querySelector('.seg').classList.toggle('hidden', Boolean(p.noRange));
   $('#custom-range').classList.toggle('hidden', Boolean(p.noRange) || state.range !== 'custom');
+  $('#month-pick').classList.toggle('hidden', Boolean(p.noRange) || state.range !== 'month');
+  $('.topbar').classList.toggle('no-range', Boolean(p.noRange));
   const el = $('#content');
   el.scrollTop = 0;
+  setSidebar(false);
+  el.classList.remove('page-in');
+  void el.offsetWidth; // restart the enter animation
+  el.classList.add('page-in');
   if (!state.data) { el.innerHTML = skeleton(); return; }
   const fn = { overview, trends, products, orders, returns, settlement: renderSettlement, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
 }
 
-const skeleton = () => `<div class="grid g-12">${'<div class="c-3 skeleton" style="height:120px"></div>'.repeat(4)}<div class="c-12 skeleton" style="height:360px"></div></div>`;
+const skeleton = () => `<div class="sk-grid" aria-busy="true" aria-label="Loading">
+  <div class="skeleton sk-hero"></div>
+  <div class="sk-side">${'<div class="skeleton"></div>'.repeat(4)}</div>
+  ${'<div class="skeleton sk-kpi"></div>'.repeat(4)}
+  <div class="skeleton sk-chart"></div><div class="skeleton sk-chart2"></div>
+</div>`;
 
 // ---------------------------------------------------------------- shared bits
 function delta(cur, prev, { invert = false, isPct = false } = {}) {
@@ -217,10 +259,10 @@ function statusPill(s) {
   return `<span class="pill ${m.cls}">${m.label}</span>`;
 }
 
-const granLabel = { day: 'Daily', week: 'Weekly', month: 'Monthly' };
+const granLabel = { hour: 'Hourly', day: 'Daily', week: 'Weekly', month: 'Monthly' };
 function granSeg() {
   const g = state.gran || 'auto';
-  return `<div class="seg" id="gran-seg">${['auto', 'day', 'week', 'month'].map((k) => `<button data-g="${k}" class="${g === k ? 'on' : ''}">${k === 'auto' ? 'Auto' : granLabel[k]}</button>`).join('')}</div>`;
+  return `<div class="seg" id="gran-seg">${['auto', 'hour', 'day', 'week', 'month'].map((k) => `<button data-g="${k}" class="${g === k ? 'on' : ''}">${k === 'auto' ? 'Auto' : granLabel[k]}</button>`).join('')}</div>`;
 }
 function bindGran(el) {
   el.querySelector('#gran-seg')?.addEventListener('click', (e) => {
@@ -231,6 +273,7 @@ function bindGran(el) {
   });
 }
 const bucketLabel = (k, gran) => {
+  if (k.includes('T')) { const h = Number(k.slice(11, 13)); return h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`; }
   if (gran === 'month') { const [y, m] = k.split('-'); return new Date(+y, +m - 1, 1).toLocaleDateString('en-US', { month: 'short', year: '2-digit' }); }
   const [y, m, d] = k.split('-').map(Number);
   const s = new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -239,35 +282,43 @@ const bucketLabel = (k, gran) => {
 
 function emptyState(el) {
   el.innerHTML = `<div class="card"><div class="empty">
+    <div class="ic">${ICONS.orders}</div>
     <div class="t">No eBay sales in this date range</div>
-    <div>${state.data.orders.length ? 'Try a wider range, like <b>All</b>.' : 'Connect eBay in <a href="#/settings">Settings</a> and upload an Amazon CSV in <a href="#/import">Amazon import</a>.'}</div>
+    <div>${state.data.orders.length ? 'Try a wider range, like <b>All</b>.' : 'Connect eBay and the Amazon email import in <a href="#/settings">Settings</a>, or upload a <a href="#/import">monthly sheet</a>.'}</div>
   </div></div>`;
+}
+
+// One compact notice per issue. Soft setup hints get an × (remembered for the session); failures never do.
+function notice({ key, kind = '', icon = ICONS.alert, text, action, href, soft = false }) {
+  if (soft && dismissed.has(key)) return '';
+  return `<div class="banner ${kind}" data-k="${key}">${icon}<div>${text}</div>${action ? `<a class="btn sm" href="${href}">${action}</a>` : ''}${soft ? `<button class="banner-x" data-k="${key}" aria-label="Dismiss">${ICONS.x}</button>` : ''}</div>`;
 }
 
 function setupBanner() {
   const d = state.data;
   const out = [];
   if (!d.ebay.configured)
-    out.push(`<div class="banner">${ICONS.alert}<div><b>eBay isn't connected.</b> Finish setup in Settings, then click <b>Connect eBay account</b>. <span class="muted">Missing: ${d.ebay.missing.join(', ')}</span></div><a class="btn sm" href="#/settings">Set up</a></div>`);
+    out.push(notice({ key: 'ebay-setup', soft: true, text: `<b>eBay isn't connected.</b> Finish setup in Settings, then click <b>Connect eBay account</b>. <span class="muted">Missing: ${d.ebay.missing.join(', ')}</span>`, action: 'Set up', href: '#/settings' }));
   // Loud warnings when an automatic pull stops working, so a silent failure can't hide missing sales or costs
   const stale = (iso, hours) => !iso || Date.now() - new Date(iso).getTime() > hours * 3600_000;
   if (d.ebay.needsReconnect)
-    out.push(`<div class="banner" style="background:var(--bad-soft);border-color:var(--bad)">${ICONS.alert}<div><b>eBay needs to be reconnected.</b> eBay stopped accepting the saved connection, so no new sales are coming in.</div><a class="btn sm" href="/api/ebay/connect">Reconnect eBay</a></div>`);
+    out.push(notice({ key: 'ebay-reconnect', kind: 'bad', text: '<b>eBay needs to be reconnected.</b> eBay stopped accepting the saved connection, so no new sales are coming in.', action: 'Reconnect eBay', href: '/api/ebay/connect' }));
   else if (d.ebay.refreshExpiresAt && new Date(d.ebay.refreshExpiresAt) - Date.now() < 30 * 86400_000)
-    out.push(`<div class="banner">${ICONS.alert}<div><b>eBay connection expires ${fmtDate(d.ebay.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}.</b> Reconnect now so syncing never stops.</div><a class="btn sm" href="/api/ebay/connect">Reconnect eBay</a></div>`);
-  else if (d.ebay.configured && d.ebay.last && !d.ebay.last.ok)
-    out.push(`<div class="banner" style="background:var(--bad-soft);border-color:var(--bad)">${ICONS.alert}<div><b>eBay sync is failing.</b> New sales are not coming in. <span class="muted">${esc((d.ebay.last.message || '').slice(0, 180))}</span></div><a class="btn sm" href="#/settings">Details</a></div>`);
-  else if (d.ebay.configured && d.ebay.lastSuccess && stale(d.ebay.lastSuccess, 3))
-    out.push(`<div class="banner">${ICONS.alert}<div><b>eBay hasn't synced since ${fmtDateTime(d.ebay.lastSuccess)}.</b> It normally runs every 30 minutes. Check that the server is running.</div><a class="btn sm" href="#/settings">Details</a></div>`);
-  if (d.email.configured && d.email.last && !d.email.last.ok)
-    out.push(`<div class="banner" style="background:var(--bad-soft);border-color:var(--bad)">${ICONS.alert}<div><b>Amazon email check is failing.</b> New Amazon costs are not coming in. <span class="muted">${esc((d.email.last.log || []).join(' ').slice(0, 180))}</span></div><a class="btn sm" href="#/settings">Details</a></div>`);
-  else if (d.email.configured && d.email.last && stale(d.email.last.at, 3))
-    out.push(`<div class="banner">${ICONS.alert}<div><b>Amazon email hasn't been checked since ${fmtDateTime(d.email.last.at)}.</b> It normally runs every 30 minutes.</div><a class="btn sm" href="#/settings">Details</a></div>`);
+    out.push(notice({ key: 'ebay-expiring', text: `<b>eBay connection expires ${fmtDate(d.ebay.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}.</b> Reconnect now so syncing never stops.`, action: 'Reconnect eBay', href: '/api/ebay/connect' }));
+  else if (d.ebay.configured && syncFailed(d.ebay))
+    out.push(notice({ key: 'ebay-failing', kind: 'bad', text: `<b>eBay sync is failing.</b> New sales are not coming in. <span class="muted">${esc((d.ebay.last.message || '').slice(0, 180))}</span>`, action: 'Details', href: '#/settings' }));
+  else if (d.ebay.configured && !syncInProgress(d.ebay) && d.ebay.lastSuccess && stale(d.ebay.lastSuccess, 3))
+    out.push(notice({ key: 'ebay-stale', text: `<b>eBay hasn't synced since ${fmtDateTime(d.ebay.lastSuccess)}.</b> It normally runs every 30 minutes. Check that the server is running.`, action: 'Details', href: '#/settings' }));
+  if (d.email.configured && !d.email.running && d.email.last && !d.email.last.ok)
+    out.push(notice({ key: 'email-failing', kind: 'bad', text: `<b>Amazon email check is failing.</b> New Amazon costs are not coming in. <span class="muted">${esc((d.email.last.log || []).join(' ').slice(0, 180))}</span>`, action: 'Details', href: '#/settings?focus=email' }));
+  else if (d.email.configured && !d.email.running && d.email.last && stale(d.email.last.at, 3))
+    out.push(notice({ key: 'email-stale', text: `<b>Amazon email hasn't been checked since ${fmtDateTime(d.email.last.at)}.</b> It normally runs every 30 minutes.`, action: 'Details', href: '#/settings?focus=email' }));
   if (!d.email.configured)
-    out.push(`<div class="banner info">${ICONS.info}<div><b>Amazon email import is off.</b> Add a Gmail App Password so Amazon purchases come in automatically, with no weekly CSV.</div><a class="btn sm" href="#/settings">Set up</a></div>`);
+    out.push(notice({ key: 'email-setup', kind: 'info', icon: ICONS.mail, soft: true, text: '<b>Amazon email import is off.</b> Add a Gmail App Password so every Amazon purchase and its cost arrives automatically.', action: 'Set up', href: '#/settings?focus=email' }));
   if (d.orders.some((o) => o.order_id.startsWith('DEMO-')))
-    out.push(`<div class="banner info">${ICONS.info}<div><b>You're looking at demo data.</b> It shows how the dashboard works before your real eBay and Amazon data arrives. Remove it any time.</div><a class="btn sm" href="#/settings">Remove demo data</a></div>`);
-  return out.join('');
+    out.push(notice({ key: 'demo', kind: 'info', icon: ICONS.info, soft: true, text: "<b>You're looking at demo data.</b> It shows how the dashboard works before your real eBay and Amazon data arrives. Remove it any time.", action: 'Remove demo data', href: '#/settings' }));
+  const html = out.filter(Boolean).join('');
+  return html ? `<div class="banners">${html}</div>` : '';
 }
 
 // ---------------------------------------------------------------- OVERVIEW
@@ -304,24 +355,89 @@ function overview(el) {
   const oldAwaiting = state.data.orders.filter((o) => o.status === 'awaiting_cost' && Date.now() - new Date(o.created_at) > 3 * DAY);
   const openReturns = state.data.orders.filter((o) => o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
 
-  el.innerHTML = `${setupBanner()}
+  // what we owe each other: this month's settlement + the running balance across every month
+  const A = state.data.settings.partner_amazon;
+  const B = state.data.settings.partner_ebay;
+  const settleArgs = { orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) };
+  const dueDay = state.data.settings.settlement_day ?? 26;
+  const allSettled = allMonths(state.data.orders, state.data.books.expenses).map((m) => settleMonth({ month: m, ...settleArgs }));
+  const owedAll = allSettled.reduce((t, x) => t + x.balance, 0);
+  const thisDue = dueStatus(settlementDueDate(monthKey(now), dueDay), { paid: thisSettle.paid !== null && Math.abs(thisSettle.balance) < 0.01 });
+  const settleStatus = (() => {
+    if (thisSettle.paid === null) {
+      if (thisSettle.sellerSends <= 0.009) return { cls: '', icon: ICONS.info, t: 'Nothing due yet', s: 'No settled sales this month so far' };
+      if (thisDue.kind === 'overdue') return { cls: 'bad', icon: ICONS.alert, t: thisDue.text, s: `Was due ${thisDue.label}` };
+      return { cls: 'warn', icon: ICONS.clock, t: thisDue.kind === 'soon' ? thisDue.text : 'Not paid yet', s: `${esc(B)} sends by ${thisDue.label}` };
+    }
+    if (Math.abs(thisSettle.balance) < 0.01) return { cls: 'good', icon: ICONS.check, t: 'Paid in full', s: thisSettle.paidAt ? `on ${fmtDate(`${thisSettle.paidAt}T12:00`)}` : 'Recorded on the monthly sheet' };
+    if (thisSettle.balance > 0) return { cls: thisDue.kind === 'overdue' ? 'bad' : 'warn', icon: ICONS.clock, t: `${money(thisSettle.balance, 2)} still owed`, s: `${money(thisSettle.paid, 2)} paid so far · ${thisDue.text.toLowerCase()}` };
+    return { cls: 'info', icon: ICONS.info, t: `Overpaid by ${money(-thisSettle.balance, 2)}`, s: `${money(thisSettle.paid, 2)} paid` };
+  })();
+
+  // "What we owe each other": the most recent month still owed, plus anything older that is also outstanding
+  const unpaid = allSettled.filter((x) => x.balance > 0.009);
+  const latestUnpaid = unpaid[unpaid.length - 1];
+  const olderUnpaid = unpaid.slice(0, -1);
+  const settleCallout = (() => {
+    if (!latestUnpaid) return '';
+    const due = dueStatus(settlementDueDate(latestUnpaid.month, dueDay));
+    const [uy, um] = latestUnpaid.month.split('-').map(Number);
+    const mLabel = new Date(uy, um - 1, 1).toLocaleDateString('en-US', { month: 'long' });
+    const older = olderUnpaid.length ? ` <span class="muted">· plus ${money(olderUnpaid.reduce((t, x) => t + x.balance, 0), 2)} from ${olderUnpaid.length} earlier month${olderUnpaid.length > 1 ? 's' : ''}${olderUnpaid.some((x) => dueStatus(settlementDueDate(x.month, dueDay)).kind === 'overdue') ? ', overdue' : ''}</span>` : '';
+    return `<a class="callout ${due.kind}" href="#/settlement">
+      <span class="callout-ic">${ICONS.wallet}</span>
+      <span class="callout-body"><b>${esc(B)} ${ICONS.arrow.replace('<svg', '<svg class="arr"')} ${esc(A)}</b> <span class="callout-amt num">${money(latestUnpaid.balance, 2)}</span> <span class="muted">for ${mLabel}</span>${older}</span>
+      <span class="pill ${due.kind === 'overdue' ? 'bad' : due.kind === 'soon' ? 'warn' : 'info'}">${due.kind === 'later' ? `Due ${fmtDate(settlementDueDate(latestUnpaid.month, dueDay))}` : due.text}</span>
+      <span class="callout-go">Open settlement ${ICONS.chevron}</span>
+    </a>`;
+  })();
+
+  el.innerHTML = `${setupBanner()}${settleCallout}
   <div class="grid g-12">
-    <div class="card hero c-6">
-      <div class="hero-label"><span class="kpi-top" style="gap:7px"><span class="sw" style="background:var(--s-profit);width:8px;height:8px;border-radius:2px"></span>Net business profit</span>${hasPrev ? delta(biz, bizPrev) : ''}</div>
-      <div class="hero-value num ${biz < 0 ? 'neg' : ''}">${money(biz, 2)}</div>
+    <div class="card hero c-7">
+      <div class="hero-label"><span class="hero-eyebrow"><span class="sw" style="background:var(--s-profit)"></span>Net business profit</span>${hasPrev ? delta(biz, bizPrev) : ''}</div>
+      <div class="hero-value num ${biz < 0 ? 'neg' : ''}" id="hero-value">${money(biz, 2)}</div>
       <div class="hero-meta">
-        <span>Item profit <b class="ink2">${money(s.net, 2)}</b></span>
-        <span>− operating costs <b class="ink2">${money(ox.total, 2)}</b></span>
-        <span><b class="ink2">${count(s.countedOrders)}</b> costed orders</span>
+        <span>Item profit <b>${money(s.net, 2)}</b></span>
+        <span>− operating costs <b>${money(ox.total, 2)}</b></span>
+        <span><b>${count(s.countedOrders)}</b> costed of <b>${count(s.orders)}</b> sales</span>
       </div>
       <div class="spark" id="hero-spark"></div>
     </div>
-    <div class="c-6 side-kpis">
+    <div class="c-5 side-kpis">
       ${kpi({ label: 'Revenue', sw: '--s-revenue', value: moneyShort(s.revenueAll), deltaHtml: hasPrev ? delta(s.revenueAll, p.revenueAll) : '', foot: 'buyer paid, excl. tax', id: 'k-rev' })}
       ${kpi({ label: 'Orders', value: count(s.orders), deltaHtml: hasPrev ? delta(s.orders, p.orders) : '', foot: `${count(s.units)} units`, id: 'k-ord' })}
       ${kpi({ label: 'Profit margin', value: pct(s.revenue ? biz / s.revenue : null), deltaHtml: hasPrev && p.revenue ? delta(biz / s.revenue, bizPrev / p.revenue, { isPct: true }) : '', foot: `business profit ÷ revenue · item ${pct(s.margin)}`, tip: 'After operating costs. Item margin (before operating costs) shown underneath.' })}
       ${kpi({ label: 'ROI', value: pct(s.cost ? biz / s.cost : null), deltaHtml: hasPrev && p.cost ? delta(biz / s.cost, bizPrev / p.cost, { isPct: true }) : '', foot: `business profit ÷ Amazon cost · item ${pct(s.roi)}` })}
     </div>
+  </div>
+
+  <div class="grid g-12 mt">
+    <div class="card hero owe c-4" style="padding-bottom:20px">
+      <div class="hero-eyebrow">${ICONS.wallet.replace('<svg', '<svg style="width:13px;height:13px"')} Partner settlement · ${now.toLocaleDateString('en-US', { month: 'long' })}</div>
+      <div class="muted" style="font-size:12.5px;margin-top:10px">${esc(B)} sends ${esc(A)}</div>
+      <div class="hero-value num" id="settle-value" style="font-size:36px;margin-top:2px">${money(thisSettle.sellerSends, 2)}</div>
+      <div class="hero-meta" style="margin-top:8px"><span>Reimbursement <b>${money(thisSettle.cogs + thisSettle.opexAmazon, 2)}</b></span><span>${thisSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(thisSettle.shareAmazon), 2)}</b></span></div>
+      <div class="status-card ${settleStatus.cls}" style="margin-top:14px"><div class="ic">${settleStatus.icon}</div><div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>${thisSettle.sellerSends > 0.009 ? `<span class="pill" title="Settlements are due on the ${dueDay}th of the following month">Due ${fmtDate(settlementDueDate(monthKey(now), dueDay))}</span>` : ''}</div>
+      <div class="stat-row" style="margin-top:8px"><span class="k">Owed across all months</span><span class="v ${owedAll > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? money(owedAll, 2) : 'All settled'}</span></div>
+      <div style="margin-top:12px"><a class="btn sm" href="#/settlement">Open settlement ${ICONS.arrow}</a></div>
+    </div>
+    ${card('This month', now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), `
+      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0">${money(ms.net, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
+      <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, ms.net / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
+      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (ms.net / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
+      <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${thisSettle.businessProfit < 0 ? 'neg' : ''}">${money(thisSettle.businessProfit, 2)}</span></div>
+      <div class="stat-row"><span class="k">Projected month-end</span><span class="v">${projected !== null ? money(projected, 0) : '—'}</span></div>
+      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfMonth > 0.5 ? money(ms.net / dayOfMonth) : '—'}</span></div>
+      <div class="stat-row"><span class="k">Orders this month</span><span class="v">${count(ms.orders)}</span></div>
+      <div class="stat-row"><span class="k">All-time item profit</span><span class="v">${money(allTime.net, 0)}</span></div>`, { cls: 'c-4' })}
+    ${card('Needs attention', 'Click an item to jump there', `<div class="alert-list">
+      ${alertItem('bad', ICONS.alert, 'Loss-making orders', `${money(s.lossTotal)} lost in this range`, s.lossCount, '#/orders?f=loss')}
+      ${alertItem('info', ICONS.clock, 'Sales waiting on Amazon cost', `${oldAwaiting.length} older than 3 days · check the email import or enter a cost in the Editor`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/settings?focus=email')}
+      ${alertItem('warn', ICONS.link, 'Suggested matches to review', 'Title-only matches need a human yes/no', state.data.amazon.suggestions || 0, '#/editor?tab=matches')}
+      ${alertItem('warn', ICONS.return, 'Open returns', 'Returns not closed yet', openReturns.length, '#/returns')}
+      ${alertItem('good', ICONS.check, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
+    </div>`, { cls: 'c-4' })}
   </div>
 
   <div class="kpis mt">
@@ -343,32 +459,16 @@ function overview(el) {
   <div class="grid g-12 mt">
     ${card('Cumulative profit', 'Running total: item profit, minus each month’s operating costs', '<div class="chart" id="ch-cum"></div>', { cls: 'c-5' })}
     ${card('Order outcomes', 'Share of eBay orders in the range', '<div class="chart" id="ch-outcomes"></div>', { cls: 'c-3' })}
-    ${card('This month', now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), `
-      <div class="hero-value num" style="font-size:32px;margin-top:0">${money(ms.net, 0)}</div>
-      <div class="muted" style="font-size:12.5px">${goal ? `of ${money(goal, 0)} goal` : 'Set a monthly goal in Settings'}</div>
-      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (ms.net / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:12px"></div>'}
-      <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${thisSettle.businessProfit < 0 ? 'neg' : ''}">${money(thisSettle.businessProfit, 0)}</span></div>
-      <div class="stat-row"><span class="k">${esc(state.data.settings.partner_ebay)} owes ${esc(state.data.settings.partner_amazon)}</span><span class="v">${money(thisSettle.balance, 2)}</span></div>
-      <div class="stat-row"><span class="k">Projected month-end</span><span class="v">${projected !== null ? money(projected, 0) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfMonth > 0.5 ? money(ms.net / dayOfMonth) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Orders this month</span><span class="v">${count(ms.orders)}</span></div>
-      <div class="stat-row"><span class="k">All-time profit</span><span class="v">${money(allTime.net, 0)}</span></div>`, { cls: 'c-4' })}
+    ${card('Operating costs', `${money(ox.total, 2)} in this range · the sheets' section 2`, `<div class="chart" id="ch-opex"></div>`, { cls: 'c-4', right: '<a class="btn sm" href="#/editor?tab=expenses">Edit</a>' })}
   </div>
 
   <div class="grid g-12 mt">
-    ${card('Operating costs', `${money(ox.total, 2)} in this range · the sheets' section 2`, `<div class="chart" id="ch-opex" style="height:260px"></div>`, { cls: 'c-6', right: '<a class="btn sm" href="#/editor?tab=expenses">Edit</a>' })}
-    ${card('Operating costs by month', 'Full month totals', `<div class="table-wrap" id="opex-months"></div>`, { cls: 'c-6' })}
-  </div>
-  <div class="grid g-12 mt">
-    ${card('Top products by profit', 'Net profit in range', '<div class="chart" id="ch-top" style="height:320px"></div>', { cls: 'c-7' })}
-    ${card('Needs attention', 'Click an item to jump there', `<div class="alert-list">
-      ${alertItem('bad', ICONS.alert, 'Loss-making orders', `${money(s.lossTotal)} lost in this range`, s.lossCount, '#/orders?f=loss')}
-      ${alertItem('info', ICONS.clock, 'Sales waiting on Amazon cost', `${oldAwaiting.length} are older than 3 days. Upload a fresh CSV`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/import')}
-      ${alertItem('warn', ICONS.link, 'Suggested matches to review', 'Title-only matches need a human yes/no', state.data.amazon.suggestions || 0, '#/editor?tab=matches')}
-      ${alertItem('warn', ICONS.return, 'Open returns', 'Returns not closed yet', openReturns.length, '#/returns')}
-      ${alertItem('good', ICONS.check, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
-    </div>`, { cls: 'c-5' })}
+    ${card('Top products by profit', 'Net item profit in range', '<div class="chart" id="ch-top" style="height:320px"></div>', { cls: 'c-7' })}
+    ${card('Operating costs by month', 'Full month totals from the sheets and the Editor', `<div class="table-wrap" id="opex-months"></div>`, { cls: 'c-5' })}
   </div>`;
+
+  countUp($('#hero-value'), biz, (v) => money(v, 2));
+  countUp($('#settle-value'), thisSettle.sellerSends, (v) => money(v, 2), 700);
 
   // hero spark
   sparkline($('#hero-spark'), dailyForSpark.map((b) => b.net), c.profit);
@@ -504,11 +604,14 @@ function overview(el) {
     return `<tr><td>${new Date(yy, mm - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td><td class="muted" style="font-size:12px">${list.map((e) => esc(e.category)).join(', ')}</td><td class="r"><b>${money(list.reduce((t, e) => t + e.amount, 0), 2)}</b></td></tr>`;
   }).join('')}</tbody></table>` : '<div class="empty">None yet</div>';
 
-  $$('.alert', el).forEach((a) => a.addEventListener('click', () => { location.hash = a.dataset.href; }));
+  $$('.alert', el).forEach((a) => {
+    a.addEventListener('click', () => { location.hash = a.dataset.href; });
+    a.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); location.hash = a.dataset.href; } });
+  });
 }
 
 function alertItem(kind, icon, title, sub, n, href) {
-  return `<div class="alert" data-href="${href}"><div class="alert-ic ${kind}">${icon}</div><div><div class="alert-t">${title}</div><div class="alert-s">${sub}</div></div><div class="n">${count(n)}</div></div>`;
+  return `<div class="alert" data-href="${href}" role="link" tabindex="0"><div class="alert-ic ${n ? kind : ''}" ${n ? '' : 'style="background:var(--surface-3);color:var(--ink-4)"'}>${icon}</div><div><div class="alert-t">${title}</div><div class="alert-s">${sub}</div></div><div class="n ${n ? '' : 'zero'}">${count(n)}</div>${ICONS.chevron.replace('<svg', '<svg class="chev"')}</div>`;
 }
 
 // ---------------------------------------------------------------- ANALYTICS
@@ -873,11 +976,20 @@ export function openOrder(id) {
       <div style="min-width:0">
         <div class="row" style="gap:8px">${statusPill(o.status)}<span class="mono muted">${esc(o.order_id)}</span></div>
         <div style="font-weight:650;font-size:15px;margin-top:8px;line-height:1.35">${esc(o.title)}</div>
-        <div class="muted" style="font-size:12.5px;margin-top:4px">${o.approx_date ? `${new Date(o.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (from monthly sheet, exact date unknown)` : fmtDateTime(o.created_at)} · ${esc(o.buyer || '')} · ${esc([o.ship_name, o.ship_city, o.ship_state, o.ship_zip].filter(Boolean).join(', '))}</div>
+        <div class="muted" style="font-size:12.5px;margin-top:4px">${[
+          o.approx_date ? `${new Date(o.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (from monthly sheet, exact date unknown)` : fmtDateTime(o.created_at),
+          esc(o.buyer || ''),
+          esc([o.ship_name, o.ship_city, o.ship_state, o.ship_zip].filter(Boolean).join(', ')),
+        ].filter(Boolean).join(' · ')}</div>
       </div>
       <button class="btn icon-btn ghost" id="drawer-x" style="margin-left:auto" aria-label="Close">${ICONS.x}</button>
     </div>
     <div class="drawer-b">
+      <div class="drawer-summary">
+        <div><div class="k"><i class="sw" style="background:${c.revenue}"></i>Revenue</div><div class="v">${money(o.revenue)}</div></div>
+        <div><div class="k"><i class="sw" style="background:${c.cost}"></i>Amazon cost</div><div class="v">${o.has_cost ? money(o.cost) : '<span class="muted">—</span>'}</div></div>
+        <div><div class="k"><i class="sw" style="background:${o.net < 0 ? c.bad : c.profit}"></i>Net profit</div><div class="v ${o.has_cost && !o.excluded ? (o.net < 0 ? 'neg' : 'pos') : 'muted'}">${o.has_cost && !o.excluded ? money(o.net) : 'pending'}</div></div>
+      </div>
       <h4>Profit math</h4>
       ${row('Revenue (buyer paid, excl. tax)', money(o.revenue), c.revenue)}
       ${row('Amazon cost', o.has_cost ? `−${money(o.cost)}` : '<span class="muted">not linked yet</span>', c.cost)}
@@ -899,7 +1011,7 @@ export function openOrder(id) {
           <div class="m">${a.order_date ? `<span>Ordered ${fmtDate(a.order_date + 'T12:00')}</span>` : ''}${a.reasons ? `<span>${esc(a.reasons)}</span>` : ''}</div>
           ${a.lines.map((l) => `<div class="m" style="margin-top:6px"><span>${esc(trunc(l.title, 70))}</span><span>×${l.quantity}</span><span>${money(l.cost)}${l.ignored ? ' (ignored)' : ''}</span></div>`).join('')}
           <div style="margin-top:8px"><button class="btn sm danger" data-unlink="${esc(a.amazon_order_id)}">Unlink</button></div>
-        </div>`).join('') : '<div class="muted" style="font-size:13px">None yet. Upload the Amazon CSV that has this purchase, or link it by hand in Editor → Amazon purchases.</div>'}
+        </div>`).join('') : '<div class="muted" style="font-size:13px">None yet. Purchases arrive from the <a href="#/settings?focus=email">Amazon email import</a>; you can also link one by hand in Editor → Amazon purchases, or type a cost override in the spreadsheet.</div>'}
 
       ${o.returns.length ? `<h4>Returns</h4>${o.returns.map((r) => `<div class="sub-card"><div class="row"><b>${esc((r.reason || 'Return').replace(/_/g, ' ').toLowerCase())}</b><span class="pill warn" style="margin-left:auto">${esc((r.status || r.state || '').replace(/_/g, ' ').toLowerCase())}</span></div><div class="m"><span>Opened ${r.created_at ? fmtDate(r.created_at) : '—'}</span><span>Refund ${money(r.refund_amount)}</span></div></div>`).join('')}` : ''}
 
@@ -992,32 +1104,73 @@ function returns(el) {
 }
 
 // ---------------------------------------------------------------- IMPORT
+// Monthly partner sheets: the only upload in the app. Amazon costs otherwise arrive from the email import.
+const monthName = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }); };
+
+// Derived from the dataset (ledger rows carry their source file), so it never drifts from what is actually loaded
+function sheetsOnFile() {
+  const d = state.data;
+  const byMonth = new Map();
+  for (const o of d.orders) {
+    if (!o.ledger) continue;
+    const m = o.ledger.month;
+    if (!byMonth.has(m)) byMonth.set(m, { month: m, file: o.ledger.source_file, rows: 0, matched: 0, cost: 0, payout: 0 });
+    const x = byMonth.get(m);
+    x.rows++;
+    if (o.source !== 'ledger') x.matched++;
+    x.cost += Number(o.ledger.amazon_cost) || 0;
+    x.payout += Number(o.ledger.sale_price) || 0;
+    if (o.ledger.source_file) x.file = o.ledger.source_file;
+  }
+  for (const e of d.books.expenses) {
+    if (e.source !== 'sheet') continue;
+    if (!byMonth.has(e.month)) byMonth.set(e.month, { month: e.month, file: null, rows: 0, matched: 0, cost: 0, payout: 0 });
+    const x = byMonth.get(e.month);
+    x.expenses = (x.expenses || 0) + 1;
+    x.expenseTotal = (x.expenseTotal || 0) + (Number(e.amount) || 0);
+  }
+  for (const s of d.books.settlements) {
+    const x = byMonth.get(s.month);
+    if (x && /sheet/i.test(s.note || '')) x.paid = s.paid;
+  }
+  return [...byMonth.values()].sort((a, b) => (a.month < b.month ? 1 : -1));
+}
+
+function sheetsTable(rows) {
+  if (!rows.length) return `<div class="empty"><div class="ic">${ICONS.sheet}</div><div class="t">No monthly sheets yet</div>Drop the first settlement sheet above and its sales, expenses and payment will appear here.</div>`;
+  return `<table class="simple"><thead><tr><th>Month</th><th>File</th><th class="r">Sales rows</th><th class="r">Matched to eBay</th><th class="r">Expenses</th><th class="r">Paid on sheet</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td style="white-space:nowrap"><b>${monthName(r.month)}</b></td><td class="muted" style="font-size:12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.file || '')}">${esc(r.file || '—')}</td><td class="r">${count(r.rows)}</td><td class="r">${r.rows ? `${count(r.matched)} <span class="muted">/ ${count(r.rows)}</span>` : '—'}</td><td class="r" style="white-space:nowrap">${r.expenses ? `${money(r.expenseTotal, 2)} <span class="muted">· ${count(r.expenses)}</span>` : '<span class="muted">—</span>'}</td><td class="r" style="white-space:nowrap">${r.paid !== undefined ? `<span class="pill good">${money(r.paid, 2)}</span>` : '<span class="muted">—</span>'}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
 async function importPage(el) {
+  const d = state.data;
+  const em = emailState();
   el.innerHTML = `
   <div class="grid g-12">
     <div class="c-7 stack">
       <label class="dropzone" id="dz">
         <input type="file" id="file" accept=".csv,text/csv" multiple hidden />
-        ${ICONS.import}
-        <div class="t">Drop your Amazon order CSV here</div>
-        <div class="s">or click to choose files · overlapping weeks are fine, nothing gets double-counted</div>
+        <div class="dz-ic">${ICONS.sheet}</div>
+        <div class="t">Drop a monthly settlement sheet here</div>
+        <div class="s">The partner CSV with <b>Item Name · Amazon Cost · eBay Sale Price</b>. Re-uploading a month updates it; nothing is ever double-counted.</div>
+        <span class="btn sm">${ICONS.import} Choose files</span>
       </label>
-      <div id="import-result"></div>
-      ${card('Upload history', 'Every CSV you have imported', '<div class="table-wrap" id="imports"></div>')}
+      <div id="import-result" class="stack"></div>
+      ${card('Sheets on file', 'One row per month loaded from a settlement sheet', '<div class="table-wrap" id="imports"></div>')}
     </div>
     <div class="c-5 stack">
-      ${card('How the import works', '', `<ol class="rules">
-        <li><b>No duplicates.</b> Rows are keyed by Amazon <b>order number</b> + item. Re-uploading last week's rows updates them and never adds a copy.</li>
-        <li><b>Only eBay sales count.</b> An Amazon order only affects profit once it's linked to an eBay sale. Everything else you buy is stored but <b>ignored</b>.</li>
-        <li><b>Auto-linking needs proof.</b> It links only when the Amazon ship-to matches the eBay buyer's <b>zip</b> or <b>name</b>, or the <b>tracking number</b> matches, within a week after the sale.</li>
-        <li><b>Title-only look-alikes never auto-link.</b> They show up in Editor → Match review for you to approve or reject.</li>
-        <li><b>Your home address is always personal.</b> Anything shipped to a home zip in Settings is never matched.</li>
+      ${card('Where Amazon costs come from', 'Sheets are the monthly record; day-to-day costs arrive by email', `
+        <div class="status-card ${em.dot === 'ok' ? 'good' : em.dot === 'bad' ? 'bad' : 'warn'}"><div class="ic">${ICONS.mail}</div><div><div class="t">Amazon email import</div><div class="s">${em.line}${d.email.configured ? ` · reading ${esc(d.email.user)}` : ' · costs arrive automatically once connected'}</div></div><a class="btn sm" href="#/settings?focus=email">${d.email.configured ? 'Status' : 'Set up'}</a></div>
+        <div class="stat-row" style="margin-top:10px"><span class="k">Amazon purchases on record</span><span class="v">${count(d.amazon.orders)} <span class="muted">· ${count(d.amazon.linked)} linked</span></span></div>
+        <div class="stat-row"><span class="k">Cost overrides and manual links</span><span class="v"><a href="#/editor">Editor ${ICONS.arrow.replace('<svg', '<svg style="width:12px;height:12px"')}</a></span></div>`)}
+      ${card('How a sheet is read', 'Same rules every month', `<ol class="rules">
+        <li><b>The month comes from the file name</b>, e.g. <span class="mono">SEP 26</span>, or from the sheet's title row.</li>
+        <li><b>Section 1 becomes sales.</b> Each row is keyed by month + item name, so an edited sheet updates in place and rows you deleted disappear too.</li>
+        <li><b>Section 2 becomes operating expenses</b>, one per category, and a <b>Paid</b> line is recorded as that month's settlement payment.</li>
+        <li><b>Rows match real eBay orders</b> once eBay syncs: same month, similar title and a payout that fits the order's price after fees. The sheet then supplies that order's Amazon cost.</li>
+        <li><b>Totals are checked</b> against the sheet's <i>Total Transactions</i> row and any difference is shown right after upload.</li>
       </ol>`)}
-      ${card('Which CSV to export', 'Email import (Settings) handles this automatically. CSVs are a backup or backfill.', `<div style="font-size:13px" class="ink2">
-        <p style="margin-top:0"><b>Fastest</b>: the free Chrome extension <i>Amazon Order History Reporter</i> exports your orders as a CSV right away.</p>
-        <p><b>Amazon Business</b>: Business Analytics → Reports → <i>Orders and shipments</i> → download CSV.</p>
-        <p><b>Regular Amazon account</b>: Account → <i>Request your data</i> → "Your Orders" (can take days). Upload <span class="mono">Retail.OrderHistory.1.csv</span> from the zip.</p>
-        <p style="margin-bottom:0"><b>Order history extensions</b> (e.g. Amazon Order History Reporter) also work. Any CSV with an order-number column, a date, a total and the ship-to address works.</p></div>`)}
     </div>
   </div>`;
   const dz = $('#dz');
@@ -1026,43 +1179,34 @@ async function importPage(el) {
   dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('over'); });
   dz.addEventListener('dragleave', () => dz.classList.remove('over'));
   dz.addEventListener('drop', (e) => { e.preventDefault(); dz.classList.remove('over'); upload([...e.dataTransfer.files].filter((f) => /\.csv$/i.test(f.name) || f.type.includes('csv'))); });
-  loadImports();
+  $('#imports').innerHTML = sheetsTable(sheetsOnFile());
 
+  const okIcon = ICONS.check.replace('<svg', '<svg style="width:15px;height:15px;color:var(--good-ink);vertical-align:-2px"');
+  const warnIcon = ICONS.alert.replace('<svg', '<svg style="width:15px;height:15px;color:var(--warn-ink);vertical-align:-2px"');
   async function upload(files) {
     if (!files.length) return;
     const fd = new FormData();
     files.forEach((f) => fd.append('files', f));
-    $('#import-result').innerHTML = `<div class="card"><div class="card-b row"><span class="dot spin"></span>Importing ${files.length} file${files.length > 1 ? 's' : ''} and matching to eBay sales…</div></div>`;
+    $('#import-result').innerHTML = `<div class="card"><div class="card-b row"><span class="dot spin"></span>Reading ${files.length} sheet${files.length > 1 ? 's' : ''} and matching rows to eBay sales…</div></div>`;
     try {
       const results = await api('/api/amazon/import', { method: 'POST', body: fd });
-      $('#import-result').innerHTML = results.map((r) => r.kind === 'ledger' ? card(`${ICONS.check.replace('<svg', '<svg style="width:15px;height:15px;color:var(--good-ink);vertical-align:-2px"')} ${esc(r.filename)}`, `Monthly settlement sheet · ${esc(r.month)}`, `
+      $('#import-result').innerHTML = results.map((r) => r.kind === 'ledger' ? card(`${okIcon} ${esc(r.filename)}`, `Monthly settlement sheet · ${monthName(r.month)}`, `
         <div class="result-grid">
           <div class="result-cell"><div class="v">${count(r.linesNew)}</div><div class="k">new sales rows</div></div>
-          <div class="result-cell"><div class="v">${count(r.linesUnchanged + r.linesUpdated)}</div><div class="k">already imported (${count(r.linesUpdated)} updated), not duplicated</div></div>
+          <div class="result-cell"><div class="v">${count(r.linesUnchanged + r.linesUpdated)}</div><div class="k">already on file (${count(r.linesUpdated)} updated), not duplicated</div></div>
           <div class="result-cell"><div class="v">${money(r.expenseTotal, 2)}</div><div class="k">${count(r.expenses)} operating expenses</div></div>
           <div class="result-cell"><div class="v">${count(r.matchedToEbay)}</div><div class="k">rows matched to synced eBay orders</div></div>
+          ${r.settlementPaid !== null && r.settlementPaid !== undefined ? `<div class="result-cell"><div class="v pos">${money(r.settlementPaid, 2)}</div><div class="k">recorded as paid for this month</div></div>` : ''}
         </div>
-        <div style="margin-top:10px;font-size:12.5px" class="${r.checks.every((c) => c.ok) ? 'pos' : 'neg'}">${r.checks.length ? (r.checks.every((c) => c.ok) ? '✓ Totals match the sheet’s Total Transactions row' : `Totals differ from the sheet: ${r.checks.filter((c) => !c.ok).map((c) => `${c.field} sheet ${c.sheet} vs ${c.computed}`).join(', ')}`) : ''}</div>`) : card(`${ICONS.check.replace('<svg', '<svg style="width:15px;height:15px;color:var(--good-ink);vertical-align:-2px"')} ${esc(r.filename)}`, `${esc(r.format)} · ${count(r.rowsInFile)} rows`, `
-        <div class="result-grid">
-          <div class="result-cell"><div class="v">${count(r.linesNew)}</div><div class="k">new purchase lines</div></div>
-          <div class="result-cell"><div class="v">${count(r.linesUnchanged + r.linesUpdated)}</div><div class="k">already imported (${count(r.linesUpdated)} updated), not duplicated</div></div>
-          <div class="result-cell"><div class="v pos">${count(r.ordersLinked)}</div><div class="k">orders linked to eBay sales</div></div>
-          <div class="result-cell"><div class="v">${count(r.ordersIgnored)}</div><div class="k">orders ignored (not eBay sales)</div></div>
-          ${r.suggestions ? `<div class="result-cell"><div class="v" style="color:var(--warn)">${count(r.suggestions)}</div><div class="k"><a href="#/editor?tab=matches">possible matches to review →</a></div></div>` : ''}
-        </div>`)).join('');
-      toast('Import complete', 'good');
+        <div style="margin-top:10px;font-size:12.5px" class="${r.checks.every((c) => c.ok) ? 'pos' : 'neg'}">${r.checks.length ? (r.checks.every((c) => c.ok) ? '✓ Totals match the sheet’s Total Transactions row' : `Totals differ from the sheet: ${r.checks.filter((c) => !c.ok).map((c) => `${c.field} sheet ${c.sheet} vs ${c.computed}`).join(', ')}`) : ''}</div>`)
+        : card(`${warnIcon} ${esc(r.filename)}`, 'Not a monthly settlement sheet', `<div class="ink2" style="font-size:13px">This file has no <b>Item Name / Amazon Cost / eBay Sale Price</b> columns, so it was not treated as a sheet. Amazon purchases come in through the <a href="#/settings?focus=email">email import</a>; upload only the partner settlement sheets here.</div>`)).join('');
+      toast('Sheet import complete', 'good');
       await loadData();
-      loadImports();
+      $('#imports').innerHTML = sheetsTable(sheetsOnFile());
     } catch (e) {
-      $('#import-result').innerHTML = `<div class="banner">${ICONS.alert}<div><b>Import failed.</b> ${esc(e.message)}</div></div>`;
+      $('#import-result').innerHTML = `<div class="banner bad">${ICONS.alert}<div><b>Import failed.</b> ${esc(e.message)}</div></div>`;
     }
     input.value = '';
-  }
-  async function loadImports() {
-    const rows = await api('/api/imports');
-    $('#imports').innerHTML = rows.length ? `<table class="simple"><thead><tr><th>Uploaded</th><th>File</th><th class="r">Rows</th><th class="r">New</th><th class="r">Already had</th><th class="r">Linked</th></tr></thead><tbody>
-      ${rows.map((r) => `<tr><td>${fmtDateTime(r.uploaded_at)}</td><td title="${esc(r.format)}">${esc(r.filename)}</td><td class="r">${count(r.rows_in_file)}</td><td class="r">${count(r.lines_new)}</td><td class="r">${count(r.lines_unchanged + r.lines_updated)}</td><td class="r">${count(r.orders_linked)} / ${count(r.orders_in_file)}</td></tr>`).join('')}
-    </tbody></table>` : '<div class="empty">No uploads yet</div>';
   }
 }
 
@@ -1079,31 +1223,44 @@ async function settings(el) {
   const log = await api('/api/sync-log').catch(() => []);
   const em = d.email;
   const mails = em.configured ? await api('/api/email/log').catch(() => []) : [];
+  const focus = new URLSearchParams(location.hash.split('?')[1] || '').get('focus');
   el.innerHTML = `<div class="grid g-12">
     <div class="c-7 stack">
-      ${ebayCard(e, log)}
+      <div class="section-h" style="margin-top:0"><h2>Data sources</h2><span class="sub">where sales and costs come from</span></div>
       ${emailCard(em, mails)}
+      ${ebayCard(e, log)}
       ${card('Matching rules', 'Controls how Amazon purchases link to eBay sales', `
-        <label style="font-weight:600;font-size:13px">Home / personal zip codes</label>
-        <div class="muted" style="font-size:12.5px;margin:2px 0 8px">Amazon orders shipped to these zips are always treated as personal and never counted.</div>
+        <div class="field-h">Home / personal zip codes</div>
+        <div class="field-s">Amazon orders shipped to these zips are always treated as personal and never counted.</div>
         <div class="row"><input class="input" id="home-zips" style="flex:1" placeholder="e.g. 62701, 62702" value="${esc((d.settings.home_zips || []).join(', '))}" /></div>
-        <div class="row mt"><button class="btn" id="rematch">Re-run matcher</button><span class="muted" style="font-size:12px">Looks for new links among unlinked Amazon orders. Existing links are kept.</span></div>`)}
+        <div class="row mt"><button class="btn" id="rematch">Re-run matcher</button><span class="muted" style="font-size:12px">Looks for new links among unlinked Amazon orders. Existing links are kept.</span></div>`, { cls: 'set-card' })}
     </div>
     <div class="c-5 stack">
-      ${card('Partners', 'Used by the Settlement page', `<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
-        <label style="font-size:12.5px" class="ink2">Pays Amazon (COGS)<input class="input" id="p-amazon" style="width:100%;margin-top:4px" value="${esc(d.settings.partner_amazon)}" /></label>
-        <label style="font-size:12.5px" class="ink2">Collects eBay, pays expenses<input class="input" id="p-ebay" style="width:100%;margin-top:4px" value="${esc(d.settings.partner_ebay)}" /></label>
-        <label style="font-size:12.5px" class="ink2">Profit share to the Amazon partner (%)<input class="input" id="p-split" type="number" min="0" max="100" style="width:100%;margin-top:4px" value="${Number(d.settings.split_amazon)}" /></label></div>`)}
-      ${card('Goals', '', `<label style="font-weight:600;font-size:13px">Monthly net profit goal</label>
-        <div class="row" style="margin-top:8px"><input class="input" id="goal" type="number" min="0" step="50" style="flex:1" value="${Number(d.settings.monthly_goal) || ''}" placeholder="2500" /></div>`)}
-      <div class="row"><button class="btn primary" id="save-settings">${ICONS.save} Save settings</button></div>
-      ${card('Data', '', `
+      <div class="section-h" style="margin-top:0"><h2>Partnership</h2><span class="sub">drives the Settlement page</span></div>
+      ${card('Partners', 'Who pays what, and how profit is split', `<div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+        <label class="field">Pays Amazon (COGS)<input class="input" id="p-amazon" value="${esc(d.settings.partner_amazon)}" /></label>
+        <label class="field">Collects eBay, pays expenses<input class="input" id="p-ebay" value="${esc(d.settings.partner_ebay)}" /></label>
+        <label class="field">Profit share to the Amazon partner (%)<input class="input" id="p-split" type="number" min="0" max="100" value="${Number(d.settings.split_amazon)}" /></label>
+        <label class="field">Settlement due day of month<input class="input" id="p-due" type="number" min="1" max="28" step="1" value="${Number(d.settings.settlement_day) || 26}" /></label></div>
+        <div class="muted" style="font-size:12px;margin-top:10px">${esc(d.settings.partner_amazon)} ${Number(d.settings.split_amazon)}% · ${esc(d.settings.partner_ebay)} ${100 - Number(d.settings.split_amazon)}% · each month is due on the ${Number(d.settings.settlement_day) || 26}th of the following month</div>`, { cls: 'set-card' })}
+      ${card('Goal', 'Shown on the Overview as a progress bar', `<label class="field">Monthly item-profit goal<input class="input" id="goal" type="number" min="0" step="50" value="${Number(d.settings.monthly_goal) || ''}" placeholder="2500" /></label>`, { cls: 'set-card' })}
+      <div class="row"><button class="btn primary" id="save-settings">${ICONS.save} Save settings</button><span class="muted" style="font-size:12px">Saves partners, split, goal and zip codes</span></div>
+      <div class="section-h"><h2>Data</h2></div>
+      ${card('Storage', '', `
         <div class="stat-row"><span class="k">Database</span><span class="v">${d.db === 'local-postgres' ? 'Local embedded Postgres' : 'Supabase Postgres'}</span></div>
         <div class="stat-row"><span class="k">eBay orders stored</span><span class="v">${count(d.orders.length)}</span></div>
         <div class="stat-row"><span class="k">Amazon orders stored</span><span class="v">${count(d.amazon.orders)} (${count(d.amazon.linked)} linked)</span></div>
-        <div class="row mt"><button class="btn" id="export-all">Export all orders (CSV)</button>
-        ${demo ? `<button class="btn danger" id="clear-demo">Remove ${count(demo)} demo orders</button>` : ''}</div>`)}
+        <div class="row mt"><button class="btn" id="export-all">${ICONS.down} Export all orders (CSV)</button>
+        ${demo ? `<button class="btn danger" id="clear-demo">Remove ${count(demo)} demo orders</button>` : ''}</div>`, { cls: 'set-card' })}
     </div></div>`;
+  if (focus === 'email') {
+    const target = $('#email-card');
+    if (target) {
+      target.classList.add('focus');
+      requestAnimationFrame(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      setTimeout(() => target.classList.remove('focus'), 2600);
+    }
+  }
   $('#sync-now')?.addEventListener('click', () => $('#sync-btn').click());
   $('#mail-now')?.addEventListener('click', async (ev) => {
     ev.target.disabled = true;
@@ -1114,7 +1271,8 @@ async function settings(el) {
     renderPage();
   });
   $('#save-settings').onclick = async () => {
-    await api('/api/settings', { method: 'POST', body: { home_zips: $('#home-zips').value.split(/[,\s]+/).filter(Boolean), monthly_goal: $('#goal').value, partner_amazon: $('#p-amazon').value, partner_ebay: $('#p-ebay').value, split_amazon: $('#p-split').value } });
+    const dueDayVal = Math.min(28, Math.max(1, Number($('#p-due').value) || 26));
+    await api('/api/settings', { method: 'POST', body: { home_zips: $('#home-zips').value.split(/[,\s]+/).filter(Boolean), monthly_goal: $('#goal').value, partner_amazon: $('#p-amazon').value, partner_ebay: $('#p-ebay').value, split_amazon: $('#p-split').value, settlement_day: dueDayVal } });
     toast('Settings saved', 'good');
     await loadData();
   };
@@ -1143,39 +1301,46 @@ function ebayCard(e, log) {
       <tr><td class="mono">EBAY_RUNAME</td><td>RuName from eBay → User Tokens → Your eBay Sign-in Settings</td><td>${pill(e.runameSet)}</td></tr>
       <tr><td>eBay account</td><td>Click Connect and approve on eBay</td><td>${pill(e.configured, 'connected', 'not connected')}</td></tr>
     </tbody></table>`;
+  const busy = syncInProgress(e);
+  const statusPillHtml = busy ? '<span class="pill info"><span class="dot spin" style="width:6px;height:6px"></span>Syncing…</span>'
+    : e.needsReconnect ? '<span class="pill bad">Reconnect needed</span>'
+    : e.last?.ok ? '<span class="pill good">Connected</span>'
+    : syncFailed(e) ? '<span class="pill bad">Last sync failed</span>'
+    : '<span class="pill warn">Not synced yet</span>';
   const status = e.configured ? `
-      <div class="stat-row"><span class="k">Status</span><span class="v">${e.needsReconnect ? '<span class="pill bad">Reconnect needed</span>' : e.last?.ok ? '<span class="pill good">Syncing</span>' : e.last ? '<span class="pill bad">Last sync failed</span>' : '<span class="pill warn">Not synced yet</span>'}</span></div>
+      <div class="stat-row"><span class="k">Status</span><span class="v">${statusPillHtml}${busy && e.last?.started_at ? ` <span class="muted" style="font-size:12px">started ${ago(e.last.started_at)}</span>` : ''}</span></div>
       <div class="stat-row"><span class="k">Last successful sync</span><span class="v">${e.lastSuccess ? fmtDateTime(e.lastSuccess) : '—'}</span></div>
       ${e.connectedAt ? `<div class="stat-row"><span class="k">Connected</span><span class="v">${fmtDateTime(e.connectedAt)}</span></div>` : ''}
       ${e.refreshExpiresAt ? `<div class="stat-row"><span class="k">Connection valid until</span><span class="v ${expSoon ? 'neg' : ''}">${fmtDate(e.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}${expSoon ? ', reconnect soon' : ''}</span></div>` : ''}` : '';
   const logHtml = log.length ? `${h4('Recent syncs')}<table class="simple"><tbody>${log.slice(0, 6).map((l) => `<tr><td style="white-space:nowrap">${fmtDateTime(l.started_at)}</td><td>${l.ok ? '<span class="pill good">ok</span>' : l.finished_at ? '<span class="pill bad">failed</span>' : '<span class="pill">running</span>'}</td><td class="muted" style="font-size:12px">${esc(l.message || '')}</td></tr>`).join('')}</tbody></table>` : '';
-  return card('eBay connection', e.configured ? 'Connected' : 'Not connected yet', `
+  return card('eBay sales', e.configured ? 'Connected · the source of every sale, fee and refund' : 'Not connected yet · sales come in automatically once connected', `
     ${status}
     ${e.configured ? '' : rows}
     <div class="row mt">${connectBtn}${e.configured ? '<button class="btn" id="sync-now">Sync now</button>' : ''}<span class="muted" style="font-size:12px">Syncs automatically every 30 minutes once connected</span></div>
-    ${logHtml}`);
+    ${logHtml}`, { cls: 'set-card', right: !e.configured ? '<span class="pill warn">Not connected</span>' : busy ? '<span class="pill info">Syncing…</span>' : e.needsReconnect ? '<span class="pill bad">Reconnect</span>' : syncFailed(e) ? '<span class="pill bad">Failing</span>' : '<span class="pill good">Connected</span>' });
 }
 
 function emailCard(em, mails) {
   const h4 = (t) => `<h4 style="margin:18px 0 6px;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)">${t}</h4>`;
-  const intro = '<p class="ink2" style="margin-top:0;font-size:13px">Reads only mail <b>from amazon.com</b>: order confirmations (cost, ship-to, items), cancellations (cost drops to $0) and refunds (logged as money recovered from Amazon). Uses the same order-number dedupe as the CSV. If a CSV later includes the order, the CSV row replaces the email row.</p>';
+  const intro = '<p class="ink2" style="margin-top:0;font-size:13px">This is where Amazon costs come from. It reads only mail <b>from amazon.com</b>: order confirmations (cost, ship-to, items), cancellations (cost drops to $0) and refunds (logged as money recovered from Amazon). Purchases are keyed by Amazon order number, so nothing is ever double-counted, and each one links to its eBay sale by zip, name or tracking number.</p>';
+  const opts = { id: 'email-card', cls: 'set-card' };
   if (!em.configured) {
-    return card('Amazon purchases from email', 'Not connected yet', `${intro}
-      <table class="simple"><tbody>
+    return card('Amazon purchases from email', 'Primary source of Amazon costs · not connected yet', `${intro}
+      <table class="simple env-table"><tbody>
         <tr><td class="mono">EMAIL_USER</td><td>${em.user ? esc(em.user) : 'your Gmail address'}</td><td>${em.user ? '<span class="pill good">set</span>' : '<span class="pill bad">missing</span>'}</td></tr>
         <tr><td class="mono">EMAIL_PASSWORD</td><td>Gmail <b>App Password</b> (16 letters), not your normal password</td><td><span class="pill bad">missing</span></td></tr>
       </tbody></table>
-      <p class="muted" style="font-size:12.5px;margin-bottom:0">Create one at <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a> (2-Step Verification must be on). Put it in <span class="mono">.env</span> or Railway Variables, then restart.</p>`);
+      <p class="muted" style="font-size:12.5px;margin-bottom:0">Create one at <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a> (2-Step Verification must be on). Put it in <span class="mono">.env</span> or Railway Variables, then restart. Until then, enter costs by hand in the <a href="#/editor">Editor</a>.</p>`, { ...opts, right: '<span class="pill warn">Not connected</span>' });
   }
   const rows = mails.map((m) => `<tr><td style="white-space:nowrap">${m.received_at ? fmtDate(m.received_at) : ''}</td>
     <td><span class="pill ${m.kind === 'order' ? 'info' : m.kind === 'refund' ? 'good' : 'warn'}">${m.kind}</span></td>
     <td style="font-size:12.5px">${esc(m.subject)}<div class="muted mono" style="font-size:11px">${esc((m.order_ids || []).join(' '))}${m.note ? ` · ${esc(m.note)}` : ''}</div></td>
     <td>${m.ok ? '' : '<span class="pill bad">review</span>'}</td></tr>`).join('');
-  return card('Amazon purchases from email', `Reading ${esc(em.user)}`, `${intro}
-    <div class="stat-row"><span class="k">Last check</span><span class="v">${em.last ? `${em.last.ok ? '<span class="pill good">ok</span>' : '<span class="pill bad">failed</span>'} ${fmtDateTime(em.last.at)}` : '—'}</span></div>
+  return card('Amazon purchases from email', `Primary source of Amazon costs · reading ${esc(em.user)}`, `${intro}
+    <div class="stat-row"><span class="k">${em.running ? 'Status' : 'Last check'}</span><span class="v">${em.running ? '<span class="pill info"><span class="dot spin" style="width:6px;height:6px"></span>Checking mail…</span>' : em.last ? `${em.last.ok ? '<span class="pill good">ok</span>' : '<span class="pill bad">failed</span>'} ${fmtDateTime(em.last.at)}` : '—'}</span></div>
     ${em.last ? `<div class="muted" style="font-size:12.5px;padding:6px 0">${esc(em.last.log.join(' · '))}</div>` : ''}
-    <div class="row mt"><button class="btn primary" id="mail-now">Check email now</button><span class="muted" style="font-size:12px">Also runs every 30 minutes</span></div>
-    ${mails.length ? `${h4('Recent Amazon emails')}<div class="table-wrap" style="max-height:320px;overflow:auto"><table class="simple"><tbody>${rows}</tbody></table></div>` : ''}`);
+    <div class="row mt"><button class="btn primary" id="mail-now">${ICONS.mail} Check email now</button><span class="muted" style="font-size:12px">Also runs every 30 minutes</span></div>
+    ${mails.length ? `${h4('Recent Amazon emails')}<div class="table-wrap" style="max-height:320px;overflow:auto"><table class="simple"><tbody>${rows}</tbody></table></div>` : ''}`, { ...opts, right: em.running ? '<span class="pill info">Checking…</span>' : `<span class="pill ${em.last && !em.last.ok ? 'bad' : 'good'}">${em.last && !em.last.ok ? 'Failing' : 'Connected'}</span>` });
 }
 
 // ---------------------------------------------------------------- boot

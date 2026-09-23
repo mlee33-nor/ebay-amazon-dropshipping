@@ -2,6 +2,11 @@
 // dashboard, the editor and CSV exports always agree.
 import { q, num } from './db.js';
 
+// Business calendar month (sheets are calendar months in the partners' timezone)
+const TZ = process.env.BUSINESS_TZ || 'America/Phoenix';
+const monthFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit' });
+const businessMonth = (d) => { const p = monthFmt.formatToParts(new Date(d)); return `${p.find((x) => x.type === 'year').value}-${p.find((x) => x.type === 'month').value}`; };
+
 const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
 const isoDate = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : d);
@@ -24,6 +29,11 @@ export async function buildDataset() {
   ]);
   const refundBy = new Map(azRefunds.map((r) => [r.amazon_order_id, num(r.amount)]));
   const ledgerByEbay = new Map(ledger.filter((l) => l.ebay_order_id).map((l) => [l.ebay_order_id, l]));
+  // A month with an uploaded settlement sheet is settled by the sheet: its rows are the source of truth for
+  // profit and settlement (so the dashboard equals the sheet to the cent). Real eBay orders in those months
+  // stay visible but aren't counted again; when matched to a sheet row they give that row its real date.
+  const sheetMonths = new Set(ledger.map((l) => l.month));
+  const ebayById = new Map(orders.map((o) => [o.order_id, o]));
 
   const group = (rows, key) => {
     const m = new Map();
@@ -99,8 +109,10 @@ export async function buildDataset() {
       : null;
     const units = items.reduce((s, i) => s + (i.quantity || 0), 0) || 1;
 
+    const inSheet = Boolean(led) || sheetMonths.has(businessMonth(o.created_at));
     let status = 'profitable';
-    if (ov.excluded) status = 'excluded';
+    if (inSheet) status = 'in_sheet';
+    else if (ov.excluded) status = 'excluded';
     else if (cancelled) status = hasCost && cost > 0 ? 'cancelled_after_purchase' : 'cancelled';
     else if (!hasCost) status = 'awaiting_cost';
     else if (refunds > 0 || rets.length) status = 'returned';
@@ -142,9 +154,10 @@ export async function buildDataset() {
       cost_source: costSource,
       source: 'ebay',
       ledger: led ? { entry_key: led.entry_key, month: led.month, title: led.title, sale_price: num(led.sale_price), amazon_cost: num(led.amazon_cost) } : null,
-      counted: !ov.excluded && hasCost && !(cancelled && cost === 0),
+      counted: !inSheet && !ov.excluded && hasCost && !(cancelled && cost === 0),
       cancelled,
-      excluded: Boolean(ov.excluded),
+      in_sheet: inSheet,
+      excluded: inSheet || Boolean(ov.excluded),
       status,
       lag_days: lagDays,
       amazon_orders: amazonOrders,
@@ -165,7 +178,8 @@ export async function buildDataset() {
   // Dates are approximate: the sheet only gives the month, so rows are spread across it in sheet order.
   const now = new Date();
   for (const l of ledger) {
-    if (l.ebay_order_id) continue;
+    const eb = l.ebay_order_id ? ebayById.get(l.ebay_order_id) : null;
+    const ebInMonth = eb && businessMonth(eb.created_at) === l.month;
     const ov = ovBy.get(`LEDGER:${l.entry_key}`) || {};
     const [y, m] = l.month.split('-').map(Number);
     const start = Date.UTC(y, m - 1, 1, 12);
@@ -186,9 +200,10 @@ export async function buildDataset() {
     const net = r2(revenue - fees - adFees - cost - refunds + amazonRefund - extra);
     out.push({
       order_id: `LEDGER:${l.entry_key}`,
-      created_at: new Date(created).toISOString(),
-      approx_date: true,
-      buyer: null, ship_name: null, ship_city: null, ship_state: null, ship_zip: null,
+      created_at: ebInMonth ? iso(eb.created_at) : new Date(created).toISOString(),
+      approx_date: !ebInMonth,
+      ebay_order_id: eb ? eb.order_id : null,
+      buyer: eb?.buyer_username || null, ship_name: eb?.ship_name || null, ship_city: eb?.ship_city || null, ship_state: eb?.ship_state || null, ship_zip: eb?.ship_zip || null,
       fulfillment_status: null, cancel_state: null,
       title: l.title,
       item_id: null,

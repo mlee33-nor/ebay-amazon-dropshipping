@@ -1,17 +1,24 @@
 // Pure aggregation over the per-order dataset served by /api/data.
 import { DAY, startOfDay, ymd } from './util.js';
 
-export function rangeFor(key, custom) {
+export function rangeFor(key, custom, month) {
   const now = new Date();
   const end = new Date(startOfDay(now).getTime() + DAY - 1);
   const back = (days) => ({ start: startOfDay(new Date(now.getTime() - (days - 1) * DAY)), end });
   switch (key) {
+    case '1d': return back(1);
     case '7d': return back(7);
     case '30d': return back(30);
     case '90d': return back(90);
     case 'mtd': return { start: new Date(now.getFullYear(), now.getMonth(), 1), end };
     case 'ytd': return { start: new Date(now.getFullYear(), 0, 1), end };
     case '12m': return back(365);
+    case 'month': {
+      const [y, mo] = String(month || '').split('-').map(Number);
+      if (!y || !mo) return { start: new Date(now.getFullYear(), now.getMonth(), 1), end };
+      const mEnd = new Date(y, mo, 0, 23, 59, 59, 999);
+      return { start: new Date(y, mo - 1, 1), end: mEnd < end ? mEnd : end };
+    }
     case 'custom':
       if (custom?.from && custom?.to) {
         const [fy, fm, fd] = custom.from.split('-').map(Number);
@@ -91,6 +98,7 @@ export function summarize(orders) {
 export function bucketKey(date, gran) {
   const d = new Date(date);
   if (gran === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  if (gran === 'hour') return `${ymd(d)}T${String(d.getHours()).padStart(2, '0')}`;
   if (gran === 'week') {
     const s = startOfDay(d);
     s.setDate(s.getDate() - ((s.getDay() + 6) % 7)); // Monday
@@ -108,7 +116,9 @@ export function buckets(r, orders, gran) {
   }
   const keys = [];
   const seen = new Set();
-  for (let t = start.getTime(); t <= r.end.getTime(); t += DAY) {
+  if (gran === 'hour' && r.end.getTime() - start.getTime() > 8 * DAY) gran = 'day'; // hourly only makes sense for short ranges
+  const step = gran === 'hour' ? 3600_000 : DAY;
+  for (let t = start.getTime(); t <= r.end.getTime(); t += step) {
     const k = bucketKey(t, gran);
     if (!seen.has(k)) { seen.add(k); keys.push(k); }
   }
@@ -127,6 +137,7 @@ export function autoGran(r, orders) {
     const first = orders.reduce((m, o) => Math.min(m, new Date(o.created_at).getTime()), Date.now());
     days = (Date.now() - first) / DAY;
   }
+  if (days <= 1.5) return 'hour';
   if (days <= 45) return 'day';
   if (days <= 240) return 'week';
   return 'month';
@@ -177,6 +188,7 @@ export const STATUS_META = {
   cancelled: { label: 'Cancelled', cls: '' },
   cancelled_after_purchase: { label: 'Cancelled (bought)', cls: 'bad' },
   excluded: { label: 'Excluded', cls: '' },
+  in_sheet: { label: 'In monthly sheet', cls: '' },
 };
 
 // Monthly operating costs that fall in a date range. A month fully inside the range counts in full;

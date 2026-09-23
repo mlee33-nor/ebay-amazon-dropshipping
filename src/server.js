@@ -94,6 +94,7 @@ async function getAllSettings() {
     partner_amazon: (await getSetting('partner_amazon')) || 'Myles',
     partner_ebay: (await getSetting('partner_ebay')) || 'Drew',
     split_amazon: (await getSetting('split_amazon')) ?? 50,
+    settlement_day: (await getSetting('settlement_day')) ?? 26,
   };
 }
 
@@ -191,6 +192,7 @@ app.post('/api/settings', wrap(async (req, res) => {
   if ('partner_amazon' in b) await setSetting('partner_amazon', String(b.partner_amazon || 'Partner A').slice(0, 40));
   if ('partner_ebay' in b) await setSetting('partner_ebay', String(b.partner_ebay || 'Partner B').slice(0, 40));
   if ('split_amazon' in b) await setSetting('split_amazon', Math.min(100, Math.max(0, Number(b.split_amazon) || 0)));
+  if ('settlement_day' in b) await setSetting('settlement_day', Math.min(28, Math.max(1, Math.round(Number(b.settlement_day) || 26))));
   await runMatcher();
   res.json({ ok: true, settings: await getAllSettings() });
 }));

@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Dropship Ledger</title>
+  <meta name="theme-color" content="#0a0b0d" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,9 +17,9 @@
 </head>
 <body>
   <div class="app">
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" aria-label="Navigation">
       <div class="brand">
-        <div class="brand-mark">DL</div>
+        <div class="brand-mark" aria-hidden="true">DL</div>
         <div>
           <div class="brand-name">Dropship Ledger</div>
           <div class="brand-sub">eBay × Amazon profit</div>
@@ -30,33 +31,37 @@
 
     <div class="main">
       <header class="topbar">
-        <button class="btn icon-btn menu-btn" id="menu-btn" aria-label="Menu">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        <button class="btn icon-btn menu-btn" id="menu-btn" aria-label="Menu" aria-controls="sidebar" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
         </button>
-        <div>
+        <div class="topbar-title">
           <h1 class="page-title" id="page-title">Overview</h1>
           <div class="page-sub" id="page-sub"></div>
         </div>
         <div class="spacer"></div>
-        <div class="seg" id="range-seg"></div>
-        <div class="date-inputs hidden" id="custom-range">
-          <input type="date" class="input" id="from-date" />
-          <span class="muted">→</span>
-          <input type="date" class="input" id="to-date" />
+        <div class="topbar-actions">
+          <div class="seg" id="range-seg" role="tablist" aria-label="Date range"></div>
+          <div class="date-inputs hidden" id="custom-range">
+            <input type="date" class="input" id="from-date" aria-label="From" />
+            <span class="muted">→</span>
+            <input type="date" class="input" id="to-date" aria-label="To" />
+          </div>
+          <select class="select hidden" id="month-pick" aria-label="Month"></select>
+          <button class="btn icon-btn" id="theme-btn" title="Toggle theme" aria-label="Toggle theme"></button>
+          <button class="btn" id="sync-btn" title="Pull latest from eBay and email">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M18 2v4h-4M6 22v-4h4"/></svg>
+            <span>Sync</span>
+          </button>
         </div>
-        <button class="btn icon-btn" id="theme-btn" title="Toggle theme" aria-label="Toggle theme"></button>
-        <button class="btn" id="sync-btn" title="Pull latest from eBay">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M18 2v4h-4M6 22v-4h4"/></svg>
-          <span>Sync</span>
-        </button>
       </header>
       <main class="content" id="content"></main>
     </div>
   </div>
 
+  <div class="nav-scrim" id="nav-scrim"></div>
   <div class="scrim" id="scrim"></div>
-  <aside class="drawer" id="drawer" aria-hidden="true"></aside>
-  <div class="toasts" id="toasts"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Order details"></aside>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tabulator-tables@6.3.1/dist/js/tabulator.min.js"></script>
