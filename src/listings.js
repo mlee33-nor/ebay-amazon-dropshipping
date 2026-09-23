@@ -486,7 +486,8 @@ export async function listingAnalytics({ now = new Date() } = {}) {
     .slice(0, 10).map(card);
   const medianViews = viewsSource ? median(active.map((l) => l.views)) : null;
   const staleAll = active
-    .filter((l) => daysLive(l) >= 30 && l.quantitySold === 0 && (medianViews === null || l.views < medianViews))
+    // Fewer views than the typical listing; when the typical listing has none at all, the ones with zero views
+    .filter((l) => daysLive(l) >= 30 && l.quantitySold === 0 && (medianViews === null || (medianViews > 0 ? l.views < medianViews : l.views === 0)))
     .sort((a, b) => daysLive(b) - daysLive(a) || (a.views || 0) - (b.views || 0) || a.itemId.localeCompare(b.itemId));
 
   // ---- sell-through
@@ -575,7 +576,7 @@ export async function listingAnalytics({ now = new Date() } = {}) {
     },
     top: { byViews, byWatchers },
     stale: {
-      criteria: { minDaysLive: 30, maxSold: 0, viewsBelowMedian: medianViews, viewsSource },
+      criteria: { minDaysLive: 30, maxSold: 0, viewsBelowMedian: medianViews, viewsSource, viewsRule: medianViews === null ? null : medianViews > 0 ? `fewer than ${medianViews} views (the typical listing)` : 'no views at all' },
       count: staleAll.length,
       listings: staleAll.slice(0, 200).map(card),
     },

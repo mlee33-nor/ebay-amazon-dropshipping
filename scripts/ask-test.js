@@ -82,10 +82,23 @@ await check('listings vs sales without eBay views: listings grew faster than ord
     drivers: { listings: { current: 5474.97, previous: 2033.87 }, newListings: { current: 3062, previous: 3630 }, orders: { current: 49, previous: 28 },
       impressions: { current: null, previous: null }, views: { current: null, previous: null }, viewsPerListing: { current: null, previous: null } },
   });
-  assert.match(a.text, /listings grew faster than sales/);
+  assert.match(a.text, /listings grew faster than sales/i);
   assert.match(a.text, /13.8 → 9.0 orders per 1,000 listings|13.8 → 8.9 orders per 1,000 listings/);
   assert.ok(!/steady/.test(a.text), 'never claims traffic is steady without traffic data');
   assert.ok(a.bullets.some((b) => /4,?246 listings/.test(b)));
+});
+await check('listings vs sales with eBay views: the funnel names visibility as the problem (live numbers from Sep 23)', async () => {
+  const a = _test.listingsVsSales({
+    totals: { activeListings: 7376 }, stale: { count: 3900, criteria: { viewsRule: 'no views at all' } },
+    drivers: { listings: { current: 5577.73, previous: 2154.77 }, newListings: { current: 3106, previous: 3627 }, impressions: { current: 421990, previous: 383425 },
+      views: { current: 3639, previous: 2251 }, viewsPerListing: { current: 0.65, previous: 1.04 }, orders: { current: 48, previous: 30 } },
+  });
+  assert.match(a.text, /eBay is barely showing the new listings/);
+  assert.match(a.text, /159% more listings on average, but they were shown in search only 10% more/);
+  assert.match(a.text, /178 → 76 times shown per listing/);
+  assert.match(a.text, /buy at the same rate/);
+  assert.ok(!/same views/.test(a.text), 'never claims views stayed the same when they rose');
+  assert.ok(a.bullets.some((b) => /3,900 listings have been live 30\+ days with no sales and no views at all/.test(b)));
 });
 await check('top products all time: a table with profit per product', async () => {
   const a = await ask('what are our best products');

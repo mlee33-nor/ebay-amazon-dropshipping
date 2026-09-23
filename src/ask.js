@@ -455,41 +455,75 @@ function listingDrivers(ctx) {
   return bits.length ? { summary: `**Listings (last 30 days vs the 30 before):** ${bits.join(', ')}.` } : null;
 }
 
+// Listings vs sales as a funnel: orders per listing = (times shown per listing) × (clicks per time shown) ×
+// (orders per click), exactly. Comparing each step with the 30 days before shows which one moved.
 function answerListingsVsSales(ctx) {
   const F = listingFacts(ctx);
   if (!F) {
-    return { text: 'I can’t see your eBay listings yet, so I can’t compare listings with sales. Connect eBay in **Settings** (reconnect once to allow listing data) and it fills in on the next sync.', chips: ['Why are we down this month?', 'How many sales this month?'] };
+    return { text: 'I can’t see your eBay listings yet, so I can’t compare listings with sales. It fills in on the next eBay sync.', chips: ['Why are we down this month?', 'How many sales this month?'] };
   }
   const { m, ch } = F;
+  const stale = F.L.stale;
+  const staleLine = stale?.count ? `**${plural(stale.count, 'listing')} ${stale.count === 1 ? 'has' : 'have'} been live 30+ days with no sales${stale.criteria?.viewsRule ? ` and ${stale.criteria.viewsRule} in the last 30 days` : ''}.** They're listed on Products → Listings.` : null;
+  const pctText = (x) => `${x >= 0 ? '+' : '−'}${Math.abs(Math.round(x * 100))}%`;
+  const pctAbs = (x) => `${Math.abs(Math.round(x * 100))}%`;
+
+  if (!F.traffic) {
+    const drop = ch('ordersPerK');
+    return {
+      text: drop !== null && drop < -0.1
+        ? `**Listings grew faster than sales.** Active listings are ${pctText(ch('listings'))} but orders only ${pctText(ch('orders'))}, so each listing sells less: ${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings.`
+        : `**Sales are keeping pace with listings** (${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings).`,
+      bullets: [trend(F, 'listings', '**Active listings (daily average)**'), trend(F, 'orders', '**Orders**'), 'Listing views need the eBay analytics permission (Settings → Reconnect eBay) to say whether new listings aren’t seen or aren’t bought.', staleLine].filter(Boolean),
+      chips: ['How many listings do we have?', 'Why are we down this month?'],
+    };
+  }
+
+  // The funnel, per 30 days
+  const shownPer = [m.impressions[0] / m.listings[0], m.impressions[1] / m.listings[1]];
+  const clickPer100 = m.viewRate;   // views per 100 times shown
+  const buyPer100 = m.salesRate;    // orders per 100 views
+  const ratio = (pair) => (pair[0] > 0 && pair[1] > 0 ? pair[1] / pair[0] : null);
+  const steps = [
+    { key: 'shown', r: ratio(shownPer), bad: 'eBay is showing each listing far less', good: 'eBay is showing each listing more' },
+    { key: 'click', r: ratio(clickPer100), bad: 'fewer people click when a listing is shown', good: 'more people click when a listing is shown' },
+    { key: 'buy', r: ratio(buyPer100), bad: 'fewer people buy after clicking', good: 'more people buy after clicking' },
+  ].filter((x) => x.r !== null);
+  const worst = [...steps].sort((a, b) => a.r - b.r)[0];
+  const perListing = ch('ordersPerK');
+  const lines = [];
+  if (perListing !== null && perListing < -0.1 && worst && worst.key === 'shown') {
+    lines.push(`**Short answer: eBay is barely showing the new listings.** You have ${pctAbs(ch('listings'))} more listings on average, but they were shown in search only ${pctAbs(ch('impressions'))} more, so each listing gets much less exposure: ${fmtN(shownPer[0])} → ${fmtN(shownPer[1])} times shown per listing.`);
+  } else if (perListing !== null && perListing < -0.1 && worst && worst.key === 'click') {
+    lines.push(`**Short answer: buyers see the listings but click them less.** Clicks per 100 times shown went ${fmtN(clickPer100[0], 2)} → ${fmtN(clickPer100[1], 2)}. That's usually price, the main photo or the title.`);
+  } else if (perListing !== null && perListing < -0.1 && worst && worst.key === 'buy') {
+    lines.push(`**Short answer: people click but buy less.** Orders per 100 views went ${fmtN(buyPer100[0], 2)} → ${fmtN(buyPer100[1], 2)}. Check prices against competitors and the delivery time.`);
+  } else if (perListing !== null && perListing > 0.1) {
+    lines.push(`**Sales per listing are up**: ${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings. The new listings are working.`);
+  } else {
+    lines.push(`**Sales are keeping pace with listings** (${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings).`);
+  }
+  // What the other steps did, in plain words
+  const others = steps.filter((x) => x !== worst || !(perListing < -0.1)).map((x) => {
+    if (x.r > 1.1) return x.key === 'shown' ? `eBay is showing each listing more` : x.key === 'click' ? `when shown, people click more than before (${fmtN(clickPer100[0], 2)} → ${fmtN(clickPer100[1], 2)} per 100)` : `after clicking, people buy more (${fmtN(buyPer100[0], 2)} → ${fmtN(buyPer100[1], 2)} orders per 100 views)`;
+    if (x.r < 0.9) return x.bad;
+    return x.key === 'buy' ? `people buy at the same rate after clicking (${fmtN(buyPer100[0], 2)} → ${fmtN(buyPer100[1], 2)} orders per 100 views)` : x.key === 'click' ? `the click rate is about the same` : `exposure per listing is about the same`;
+  });
+  if (others.length) lines.push(`${others[0][0].toUpperCase()}${others[0].slice(1)}${others.length > 1 ? `, and ${others.slice(1).join(', and ')}` : ''}.${worst?.key === 'shown' && ratio(buyPer100) !== null && ratio(buyPer100) > 0.9 ? ' So price and presentation aren’t the problem; visibility is.' : ''}`);
+
   const bullets = [
     trend(F, 'listings', '**Active listings (daily average)**'),
-    trend(F, 'newListings', '**New listings posted**'),
-    F.traffic ? trend(F, 'impressions', '**Times shown in search**') : null,
-    F.traffic ? trend(F, 'views', '**Listing views**') : null,
-    F.traffic ? trend(F, 'viewsPerListing', '**Views per listing**', 1) : null,
-    F.traffic ? trend(F, 'viewRate', '**Views per 100 times shown**', 2) : null,
+    trend(F, 'impressions', '**Times shown in search**'),
+    `**Times shown per listing** ${fmtN(shownPer[0])} → ${fmtN(shownPer[1])}${fmtCh(ratio(shownPer) - 1)}`,
+    trend(F, 'views', '**Views (clicks)**'),
+    trend(F, 'viewRate', '**Views per 100 times shown**', 2),
     trend(F, 'orders', '**Orders**'),
-    trend(F, 'ordersPerK', '**Orders per 1,000 active listings**', 1),
-    F.traffic ? trend(F, 'salesRate', '**Orders per 100 views**', 2) : null,
+    trend(F, 'salesRate', '**Orders per 100 views**', 2),
+    trend(F, 'ordersPerK', '**Orders per 1,000 listings**', 1),
+    staleLine,
   ].filter(Boolean);
-  const reasons = [];
-  // Listings growing faster than orders: each listing sells less (works with or without eBay's traffic data)
-  if (ch('ordersPerK') !== null && ch('ordersPerK') < -0.1) reasons.push(`listings grew faster than sales. Active listings are ${fmtCh(ch('listings')).trim().replace(/[()]/g, '')} but orders only ${fmtCh(ch('orders')).trim().replace(/[()]/g, '')}, so each listing sells less: ${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings. Most new listings aren't selling yet`);
-  if (F.traffic) {
-    if (ch('listings') > 0.05 && ch('viewsPerListing') < -0.05) reasons.push('you have more listings, but each one gets fewer views. The new listings aren’t pulling in much traffic, so the same views are spread across more items');
-    if (ch('impressions') > 0.05 && ch('viewRate') < -0.05) reasons.push('eBay shows your listings more often, but fewer people click them. Price, main photo and title decide that click');
-    if (ch('views') >= -0.05 && ch('salesRate') < -0.05) reasons.push('people still look at the listings, but fewer of them buy. Compare prices with competitors and check the handling time');
-    if (ch('impressions') < -0.05) reasons.push('eBay is showing your listings less often in search. Listings lose visibility as they age, and promoted-listing changes matter too');
-  }
-  if (!F.traffic) reasons.push('I can’t see listing views yet, so I can’t tell whether the new listings aren’t being seen or are seen but not bought. Reconnect eBay once in Settings to allow listing traffic');
-  const real = F.traffic ? reasons : reasons.slice(0, -1); // the last one is only the note about missing views
-  const text = real.length
-    ? `**Short answer: ${real[0]}.**${reasons.length > 1 ? ` Also, ${reasons.slice(1).join('; also, ')}.` : ''}`
-    : F.traffic
-      ? '**Listing traffic and conversion are roughly steady**, so the change in sales looks like normal variation rather than a listings problem.'
-      : `**Sales are keeping pace with listings** (${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings). ${reasons[0]}.`;
-  if (F.L.stale?.count) bullets.push(`**${plural(F.L.stale.count, 'listing')} ${F.L.stale.count === 1 ? 'has' : 'have'} been live 30+ days with no sales${F.L.stale.criteria?.viewsBelowMedian !== null && F.L.stale.criteria?.viewsBelowMedian !== undefined ? ' and below-median views' : ''}.** Refreshing or ending them keeps the store focused (Products → Listings).`);
-  return { text, bullets, chips: ['Which listings get the most views?', 'Why are we down this month?'] };
+  if (worst?.key === 'shown' && perListing < -0.1) bullets.push('**What usually helps visibility:** put new listings on Promoted Listings (general, a low ad rate), write titles and item specifics with the words buyers search for, and refresh or end listings that get no views after 30 days.');
+  return { text: lines.join(' '), bullets, chips: ['Which listings get the most views?', 'How many listings do we have?'] };
 }
 
 // Sales still waiting for their Amazon purchase (never in any totals until matched)
@@ -773,7 +807,7 @@ function answerListings(ctx, it) {
     L.top?.byViews?.length ? `Most viewed: ${L.top.byViews.slice(0, 3).map((x) => `${short(x.title, 30)} (${fmtN(x.views)} views, ${fmtN(x.quantitySold)} sold)`).join('; ')}` : null,
     L.top?.byWatchers?.length ? `Most watched: ${L.top.byWatchers.slice(0, 3).map((x) => `${short(x.title, 30)} (${fmtN(x.watchers)})`).join('; ')}` : null,
     L.sellThrough?.pctListingsWithSale !== null && L.sellThrough?.pctListingsWithSale !== undefined ? `${fmtN(L.sellThrough.pctListingsWithSale, 1)}% of active listings have sold at least once` : null,
-    L.stale?.count ? `**${plural(L.stale.count, 'listing')} to refresh or remove**: live 30+ days with no sales${L.stale.criteria?.viewsBelowMedian !== null ? ' and below-median views' : ''} (Products → Listings)` : null,
+    L.stale?.count ? `**${plural(L.stale.count, 'listing')} to refresh or remove**: live 30+ days with no sales${L.stale.criteria?.viewsRule ? ` and ${L.stale.criteria.viewsRule} in the last 30 days` : ''} (Products → Listings)` : null,
     listingDrivers(ctx)?.summary || null,
   ].filter(Boolean);
   return { text: `**You have ${fmtN(T.activeListings)} active eBay listings.**`, bullets, chips: ['Why do we have more listings but fewer sales?', 'Top products this month'] };
