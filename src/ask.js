@@ -525,7 +525,7 @@ function answerRecent(ctx, it) {
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, Math.min(20, n));
   return {
     text: `**Latest ${plural(rows.length, 'sale')}:**`,
-    table: { head: ['Date', 'Item', 'Profit'], rows: rows.map((o) => [dayLabel(businessDay(o.created_at)), short(o.title, 44), o.counted ? $(rowMoney(o).net) : o.status === 'awaiting_cost' ? 'waiting on cost' : o.status.replace('_', ' ')]) },
+    table: { head: ['Date', 'Item', 'Profit'], rows: rows.map((o) => [dayLabel(businessDay(o.created_at)), short(o.title, 44), o.counted ? $(rowMoney(o).net) : o.status === 'awaiting_cost' ? (o.amazon_orders.length ? 'needs cost' : 'awaiting email') : o.status.replace('_', ' ')]) },
     chips: ['Profit this month', 'Top products this month'],
   };
 }

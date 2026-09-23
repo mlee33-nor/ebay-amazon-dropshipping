@@ -71,7 +71,7 @@ function renderNav() {
   function navLink(p) {
     let b = '';
     if (p.id === 'editor' && badges.editor) b = `<span class="badge" title="Suggested matches to review">${badges.editor}</span>`;
-    else if (p.id === 'orders' && badges.orders) b = `<span class="nav-count" title="Sales waiting on an Amazon cost">${badges.orders}</span>`;
+    else if (p.id === 'orders' && badges.orders) b = `<span class="nav-count" title="Sales awaiting their Amazon order email">${badges.orders}</span>`;
     return `<a href="#/${p.id}" class="${state.page === p.id ? 'active' : ''}" ${state.page === p.id ? 'aria-current="page"' : ''}>${ICONS[p.icon]}<span>${p.label}</span>${b}</a>`;
   }
 }
@@ -378,17 +378,20 @@ const NO_NET = {
   check_sheet: ['check sheet', 'Looks like a reworded sheet row; link it or confirm it is separate'],
   returned: ['returned', 'Returned; no Amazon cost on record yet'],
   not_dropship: ['not dropship', 'No Amazon purchase found for this sale, so it is treated as something else and left out'],
-  awaiting_cost: ['needs cost', 'No Amazon cost yet; enter it in the Editor or wait for the Amazon email'],
+  awaiting_email: ['awaiting email', 'No Amazon order email has matched this sale yet. It is not counted until one does.'],
+  awaiting_cost: ['needs cost', 'The Amazon order was found but its total is unknown (e.g. paid by gift card). Type the cost in the Editor.'],
 };
+// Display status: an uncosted sale is either still waiting for its Amazon email, or has one with no usable total
+export const viewStatus = (o) => (o.status === 'awaiting_cost' && !(o.amazon_orders || []).length ? 'awaiting_email' : o.status);
 const noNetLabel = (o) => {
-  const [label, tip] = NO_NET[o.status] || (o.excluded ? ['excluded', 'Excluded from the numbers'] : ['pending', 'Waiting for the Amazon cost']);
+  const [label, tip] = NO_NET[viewStatus(o)] || (o.excluded ? ['excluded', 'Excluded from the numbers'] : ['pending', 'Waiting for the Amazon cost']);
   return `<span class="muted" title="${tip}">${label}</span>`;
 };
 const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded to buyer');
 
 // Every status pill carries an icon as well as a colour, so state never relies on colour alone
 const STATUS_ICON = {
-  profitable: 'trendUp', loss: 'trendDown', returned: 'return', awaiting_cost: 'clock', cancelled: 'x',
+  profitable: 'trendUp', loss: 'trendDown', returned: 'return', awaiting_cost: 'clock', awaiting_email: 'mail', cancelled: 'x',
   cancelled_after_purchase: 'circleX', excluded: 'eyeOff', not_dropship: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert',
 };
 export function statusPill(s) {
@@ -707,7 +710,7 @@ function overview(el) {
       <div class="stat-row"><span class="k">All-time item profit</span><span class="v">${money(allTime.net, 0)}</span></div>`, { cls: 'c-4' })}
     ${card('Needs attention', 'Click an item to jump there', `<div class="alert-list">
       ${alertItem('bad', ICONS.alert, 'Loss-making orders', `${money(s.lossTotal)} lost in this range`, s.lossCount, '#/orders?f=loss')}
-      ${alertItem('info', ICONS.clock, 'Sales waiting on Amazon cost', `${oldAwaiting.length} older than 3 days · check the email import or enter a cost in the Editor`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/settings?focus=email')}
+      ${alertItem('info', ICONS.mail, 'Sales awaiting the Amazon email', `${oldAwaiting.length} older than 3 days · open one and press Check email now`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/orders?f=awaiting_cost')}
       ${alertItem('warn', ICONS.link, 'Suggested matches to review', 'Title-only matches need a human yes/no', state.data.amazon.suggestions || 0, '#/editor?tab=matches')}
       ${alertItem('warn', ICONS.return, 'Open returns', 'Returns not closed yet', openReturns.length, '#/returns')}
       ${alertItem('good', ICONS.users, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
@@ -726,7 +729,7 @@ function overview(el) {
       ${kpi({ label: 'Avg order value', value: money(s.aov), raw: s.aov, fmt: money, deltaHtml: hasPrev ? delta(s.aov, p.aov) : '' })}
       ${kpi({ label: 'Item profit / order', value: money(s.profitPerOrder), raw: s.profitPerOrder, fmt: money, deltaHtml: hasPrev ? delta(s.profitPerOrder, p.profitPerOrder) : '', foot: 'before operating costs' })}
       ${kpi({ label: 'Return rate', value: pct(s.returnRate), raw: s.returnRate, fmt: pct, deltaHtml: hasPrev ? delta(s.returnRate, p.returnRate, { invert: true, isPct: true }) : '', foot: `${count(s.returnCount)} orders` })}
-      ${kpi({ label: 'Awaiting cost', value: count(s.awaitingCount), raw: s.awaitingCount, fmt: count, foot: `${moneyShort(s.awaitingRevenue)} in sales not in profit yet`, tip: 'eBay sales with no linked Amazon purchase yet. Excluded from profit until linked.' })}
+      ${kpi({ label: 'Awaiting email', value: count(s.awaitingCount), raw: s.awaitingCount, fmt: count, foot: `${moneyShort(s.awaitingRevenue)} in sales not in profit yet`, tip: 'eBay sales with no linked Amazon purchase yet. Excluded from profit until linked.' })}
     </div>
   </div>
 
@@ -836,7 +839,7 @@ function overview(el) {
     ['Profitable', all.filter((o) => o.status === 'profitable').length, c.good],
     ['Loss', all.filter((o) => o.status === 'loss' || o.status === 'cancelled_after_purchase').length, c.bad],
     ['Returned', all.filter((o) => o.status === 'returned').length, c.warn],
-    ['Awaiting cost', all.filter((o) => o.status === 'awaiting_cost').length, c.accent],
+    ['Awaiting email', all.filter((o) => o.status === 'awaiting_cost').length, c.accent],
     ['Cancelled', all.filter((o) => o.status === 'cancelled').length, c.ink3],
   ].filter((x) => x[1] > 0);
   if (!outcome.length) $('#ch-outcomes').outerHTML = `<div class="empty"><div class="ic">${ICONS.orders}</div><div class="t">No orders to chart</div>Order outcomes appear once sales land in this range.</div>`;
@@ -1204,7 +1207,7 @@ function orders(el) {
   const q = new URLSearchParams(location.hash.split('?')[1] || '');
   if (q.get('f')) state.ordersFilter = q.get('f');
   const filters = [
-    ['all', 'All'], ['profitable', 'Profitable'], ['loss', 'Loss'], ['returned', 'Returned'], ['awaiting_cost', 'Awaiting cost'], ['cancelled', 'Cancelled'], ['excluded', 'Excluded'],
+    ['all', 'All'], ['profitable', 'Profitable'], ['loss', 'Loss'], ['returned', 'Returned'], ['awaiting_cost', 'Awaiting email'], ['cancelled', 'Cancelled'], ['excluded', 'Excluded'],
   ];
   const counts = Object.fromEntries(filters.map(([k]) => [k, all.filter((o) => matchFilter(o, k)).length]));
   el.innerHTML = `<div class="card"><div class="sheet-bar">
@@ -1230,7 +1233,7 @@ function orders(el) {
       { title: 'Refund', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 90, minWidth: 86, formatter: (c) => (c.getValue() ? `<span title="${refundWord(c.getRow().getData())}">${money(c.getValue(), 2)}</span>` : '<span class="muted">—</span>') },
       { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 90, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : noNetLabel(d); } },
       { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 86, minWidth: 82, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
-      { title: 'Status', field: 'status', width: 160, minWidth: 156, formatter: (c) => statusPill(c.getValue()) },
+      { title: 'Status', field: 'status', width: 160, minWidth: 156, formatter: (c) => statusPill(viewStatus(c.getRow().getData())) },
     ],
   }));
   const apply = () => {
@@ -1274,7 +1277,7 @@ export function openOrder(id) {
   $('#drawer').innerHTML = `
     <div class="drawer-h">
       <div style="min-width:0">
-        <div class="row" style="gap:8px">${statusPill(o.status)}<span class="${o.source === 'ledger' ? '' : 'mono '}muted">${esc(orderLabel(o))}</span></div>
+        <div class="row" style="gap:8px">${statusPill(viewStatus(o))}<span class="${o.source === 'ledger' ? '' : 'mono '}muted">${esc(orderLabel(o))}</span></div>
         <div style="font-weight:650;font-size:15px;margin-top:8px;line-height:1.35">${esc(o.title)}</div>
         <div class="muted" style="font-size:12.5px;margin-top:4px">${[
           o.approx_date ? `${new Date(o.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (from monthly sheet, exact date unknown)` : fmtDateTime(o.created_at),
@@ -1305,6 +1308,7 @@ export function openOrder(id) {
       <h4>eBay items</h4>
       ${o.items.map((i) => `<div class="sub-card"><div class="t">${esc(i.title)}</div><div class="m"><span>Qty ${i.quantity}</span>${sheet ? (i.unit_price > 0 ? `<span>${money(i.unit_price, 2)} payout (after fees)</span>` : '') : `<span>${money(i.unit_price)} each</span>`}${i.sku ? `<span class="mono">SKU ${esc(i.sku)}</span>` : ''}${i.item_id ? `<a href="https://www.ebay.com/itm/${esc(i.item_id)}" target="_blank" rel="noopener">View listing ↗</a>` : ''}</div></div>`).join('')}
 
+      ${o.status === 'awaiting_cost' ? awaitingPanel(o) : ''}
       <h4>Linked Amazon purchases</h4>
       ${o.amazon_orders.length ? o.amazon_orders.map((a) => `<div class="sub-card">
           <div class="row"><span class="mono">${esc(a.amazon_order_id)}</span><span class="pill ${a.method === 'manual' ? 'info' : 'good'}">${a.method === 'manual' ? 'Linked by hand' : 'Auto-matched'}</span><b style="margin-left:auto">${money(a.cost)}</b></div>
@@ -1324,6 +1328,7 @@ export function openOrder(id) {
   $('#scrim').classList.add('open');
   requestAnimationFrame(() => $('#drawer-x')?.focus({ preventScroll: true }));
   $('#drawer-x').onclick = closeDrawer;
+  $('#chk-email')?.addEventListener('click', () => checkEmailFor(o, id));
   $$('[data-unlink]').forEach((b) => (b.onclick = async () => {
     if (!confirm('Unlink this Amazon order from the sale? It won\'t be auto-matched to this sale again.')) return;
     await api('/api/links', { method: 'POST', body: { amazon_order_id: b.dataset.unlink, ebay_order_id: null } });
@@ -1333,6 +1338,56 @@ export function openOrder(id) {
     openOrder(id);
   }));
 }
+// Uncosted sale: say exactly what is missing. Not counted in any numbers until it is resolved.
+function awaitingPanel(o) {
+  if (viewStatus(o) === 'awaiting_email') {
+    return `<div class="await-box">
+      <div class="await-h">${ICONS.mail}<div><b>Awaiting the Amazon order email</b><div class="muted">This sale isn't in any totals until its Amazon purchase is matched. After ${10} days with no match it's treated as not a dropship sale.</div></div></div>
+      <button class="btn primary sm" id="chk-email">${ICONS.refresh} Check email now</button>
+      <div id="chk-out" class="await-out" aria-live="polite"></div>
+    </div>`;
+  }
+  return `<div class="await-box warn">
+      <div class="await-h">${ICONS.alert}<div><b>Amazon order found, but its cost is unknown</b><div class="muted">The Amazon email had no usable total (for example, paid with a gift card). Type the real cost in the spreadsheet and it counts right away.</div></div></div>
+      <a class="btn primary sm" href="#/editor?order=${encodeURIComponent(o.order_id)}">${ICONS.editor} Enter the cost</a>
+    </div>`;
+}
+
+async function checkEmailFor(o, id) {
+  const btn = $('#chk-email');
+  const out = $('#chk-out');
+  btn.disabled = true;
+  btn.innerHTML = `${ICONS.refresh} Checking email…`;
+  out.innerHTML = '';
+  try {
+    const r = await api(`/api/orders/${encodeURIComponent(id)}/check-email`, { method: 'POST' });
+    if (r.matched) {
+      toast(`Matched: Amazon order ${r.links.map((l) => l.amazon_order_id).join(', ')}${r.links[0]?.total ? ` (${money(Number(r.links[0].total), 2)})` : ''}`, 'good');
+      await loadData();
+      renderPage();
+      openOrder(id);
+      return;
+    }
+    const why = r.ok ? 'No matching Amazon order email yet.' : `The email check didn't run: ${esc(r.log?.at(-1) || 'unknown error')}`;
+    out.innerHTML = `<div class="await-res">${ICONS.info}<span>${why}${r.ok ? ' Checked just now.' : ''}</span></div>${r.candidates?.length ? `
+      <div class="await-cands"><div class="muted" style="font-size:12px;margin:10px 0 6px">Possible matches the matcher wasn't sure enough to link on its own:</div>
+      ${r.candidates.map((c) => `<div class="sub-card"><div class="row"><span class="mono">${esc(c.amazon_order_id)}</span><b style="margin-left:auto">${c.total === null ? '<span class="muted">total unknown</span>' : money(c.total, 2)}</b></div>
+        <div class="m">${c.order_date ? `<span>Ordered ${fmtDate(c.order_date + 'T12:00')}</span>` : ''}${c.ship ? `<span>Ship to ${esc(c.ship.slice(0, 60))}</span>` : ''}<span>${esc(c.reasons)}</span></div>
+        <div style="margin-top:8px"><button class="btn sm" data-link-az="${esc(c.amazon_order_id)}">${ICONS.link} This is the purchase: link it</button></div></div>`).join('')}</div>` : ''}`;
+    out.querySelectorAll('[data-link-az]').forEach((b) => (b.onclick = async () => {
+      if (!confirm(`Link Amazon order ${b.dataset.linkAz} to this sale? Its cost will count toward profit.`)) return;
+      await api('/api/links', { method: 'POST', body: { amazon_order_id: b.dataset.linkAz, ebay_order_id: id } });
+      toast('Linked', 'good');
+      await loadData();
+      renderPage();
+      openOrder(id);
+    }));
+  } catch (e) {
+    out.innerHTML = `<div class="await-res bad">${ICONS.alert}<span>${esc(e.message)}</span></div>`;
+  }
+  if (btn.isConnected) { btn.disabled = false; btn.innerHTML = `${ICONS.refresh} Check email again`; }
+}
+
 let drawerReturnFocus = null;
 export function closeDrawer() {
   const wasOpen = $('#drawer').classList.contains('open');

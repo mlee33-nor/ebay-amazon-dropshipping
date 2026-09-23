@@ -1049,3 +1049,17 @@ tr.row-bad td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
   .statement { border: 0 !important; box-shadow: none !important; background: #fff !important; color: #000 !important; }
   .statement * { color: #000 !important; }
 }
+
+/* ---- Order drawer: sale waiting for its Amazon email / cost ---- */
+.await-box { margin: 18px 0 6px; padding: 14px; border-radius: 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.await-box.warn { border-color: color-mix(in srgb, var(--warn, #d97706) 40%, var(--line)); background: color-mix(in srgb, var(--warn, #d97706) 7%, var(--surface)); }
+.await-h { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; font-size: 13.5px; line-height: 1.45; }
+.await-h > svg { width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--accent); }
+.await-box.warn .await-h > svg { color: var(--warn, #d97706); }
+.await-h .muted { font-size: 12.5px; margin-top: 2px; }
+.await-out:empty { display: none; }
+.await-out { margin-top: 12px; }
+.await-res { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink-2); }
+.await-res svg { width: 15px; height: 15px; flex: none; margin-top: 2px; color: var(--ink-3); }
+.await-res.bad, .await-res.bad svg { color: var(--bad-ink); }
+.await-cands .sub-card { margin-top: 8px; }

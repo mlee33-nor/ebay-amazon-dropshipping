@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { initDb, dbKind, q, one, getSetting, setSetting } from './db.js';
 import { syncEbay, ebayStatus, ebayConfigured, ebayCanConnect, ebayConsentUrl, ebayConnectWithCode, loadEbayConnection } from './ebay.js';
 import { importAmazonCsv } from './amazon.js';
-import { runMatcher, getSuggestions } from './matcher.js';
+import { runMatcher, getSuggestions, candidatesForSale } from './matcher.js';
 import { buildDataset, buildBooks } from './dataset.js';
 import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
@@ -289,6 +289,19 @@ app.get('/api/email/debug', wrap(async (_req, res) =>
 app.get('/api/email/log', wrap(async (_req, res) =>
   res.json(await q('select message_id, received_at, subject, kind, order_ids, ok, note from amazon_emails order by received_at desc nulls last limit 60'))));
 app.post('/api/rematch', wrap(async (_req, res) => res.json(await runMatcher())));
+// "Check email now" on one sale: pull new Amazon emails, run the matcher, then report whether this sale matched,
+// and if not, the closest Amazon orders (below the auto-link bar) so they can be linked by hand
+app.post('/api/orders/:id/check-email', wrap(async (req, res) => {
+  const id = String(req.params.id);
+  if (!(await one('select 1 from ebay_orders where order_id = $1', [id]))) return res.status(404).json({ error: `No eBay order ${id}` });
+  const sync = emailConfigured() ? await syncEmail() : { ok: false, log: ['The Amazon email import is not set up (Settings)'] };
+  await runMatcher();
+  const links = await q(
+    `select k.amazon_order_id, k.method, k.reasons, sum(l.line_total) as total
+     from order_links k left join amazon_lines l on l.amazon_order_id = k.amazon_order_id
+     where k.ebay_order_id = $1 group by k.amazon_order_id, k.method, k.reasons`, [id]);
+  res.json({ ok: sync.ok, log: sync.log, matched: links.length > 0, links, candidates: links.length ? [] : await candidatesForSale(id) });
+}));
 app.get('/api/sync-log', wrap(async (_req, res) => res.json(await q('select * from sync_log order by id desc limit 30'))));
 
 app.post('/api/demo/clear', wrap(async (_req, res) => {

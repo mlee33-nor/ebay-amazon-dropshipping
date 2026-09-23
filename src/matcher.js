@@ -228,14 +228,28 @@ async function matcherPass() {
     const open = list.filter((p) => (ctx.linkCounts.get(p.eb.order_id) || 0) < Math.max(1, p.eb.units));
     if (open.length > 1 && open[1].score >= open[0].score - 15 && !open[0].strong) ambiguous.add(id);
   }
-  // Same in the other direction: one eBay sale with two close Amazon candidates and room for only one
+  // Each Amazon order's best candidate sale (pairs are sorted best first). An Amazon order that clearly belongs to
+  // another sale must not count as a rival on this one, or it would block its own, better match.
+  const bestForAz = new Map();
+  for (const p of pairs) {
+    if (!p.evidence || bestForAz.has(p.az.amazon_order_id)) continue;
+    if ((ctx.linkCounts.get(p.eb.order_id) || 0) >= Math.max(1, p.eb.units) && !p.strong) continue; // that sale is full
+    bestForAz.set(p.az.amazon_order_id, p);
+  }
+  // Same in the other direction: one eBay sale with two close Amazon candidates and room for only one.
+  // Every plausible candidate is a rival, including one that is itself unsure between two sales (it may be this
+  // sale's real purchase). Only an Amazon order that clearly belongs to another sale (a tracking match there, or
+  // 15+ points better) is left out, so it can't block its own, better match.
   const byEb = new Map();
   for (const p of pairs) {
-    if (!p.evidence || p.score < 70 || ambiguous.has(p.az.amazon_order_id)) continue;
+    if (!p.evidence || p.score < 50) continue;
+    const best = bestForAz.get(p.az.amazon_order_id);
+    if (best && best.eb.order_id !== p.eb.order_id && (best.strong || best.score >= p.score + 15)) continue;
     if (!byEb.has(p.eb.order_id)) byEb.set(p.eb.order_id, []);
     byEb.get(p.eb.order_id).push(p);
   }
   for (const [ebId, list] of byEb) {
+    if (list[0].score < 70) continue; // nothing here would be linked anyway
     const room = Math.max(1, list[0].eb.units) - (ctx.linkCounts.get(ebId) || 0);
     if (list.length > room && room > 0 && list[room].score >= list[room - 1].score - 15 && !list[room - 1].strong)
       list.forEach((p) => ambiguous.add(p.az.amazon_order_id));
@@ -243,7 +257,8 @@ async function matcherPass() {
   const takenAmazon = new Set();
   let linked = 0;
   for (const p of pairs) {
-    if (takenAmazon.has(p.az.amazon_order_id) || ambiguous.has(p.az.amazon_order_id)) continue;
+    // A tracking-number match is definitive: an ambiguity flag never holds it back
+    if (takenAmazon.has(p.az.amazon_order_id) || (ambiguous.has(p.az.amazon_order_id) && !p.strong)) continue;
     if (!p.evidence || p.score < 70) continue;
     const existing = ctx.linkCounts.get(p.eb.order_id) || 0;
     // A second Amazon order on the same sale needs room (multi-unit sale) or a tracking match
@@ -259,6 +274,23 @@ async function matcherPass() {
   }
   const suggestions = new Set(pairs.filter((p) => !takenAmazon.has(p.az.amazon_order_id) && p.score >= 35).map((p) => p.az.amazon_order_id)).size;
   return { linked, suggestions };
+}
+
+// The unlinked Amazon orders that could be one sale's purchase, best first ("Check email now" on a sale)
+export async function candidatesForSale(ebayOrderId, limit = 3) {
+  const ctx = await loadCandidates();
+  const eb = ctx.ebay.find((e) => e.order_id === ebayOrderId);
+  if (!eb) return [];
+  return ctx.amazon
+    .filter((az) => !ctx.rejections.has(`${az.amazon_order_id}|${eb.order_id}`))
+    .map((az) => ({ az, s: scorePair(az, eb) }))
+    .filter((x) => x.s && x.s.score >= 20)
+    .sort((a, b) => b.s.score - a.s.score)
+    .slice(0, limit)
+    .map(({ az, s }) => ({
+      amazon_order_id: az.amazon_order_id, order_date: az.order_date, total: az.total,
+      ship: String(az.shipText || '').replace(/\s+/g, ' ').trim(), score: s.score, evidence: s.evidence, reasons: s.reasons,
+    }));
 }
 
 export async function getSuggestions(limit = 300) {
