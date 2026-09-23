@@ -334,6 +334,19 @@ export function refundSplit(orders) {
   }
   return { buyer, fee };
 }
+// Why an order shows no profit of its own (instead of a bare "pending")
+const NO_NET = {
+  in_sheet: ['on sheet', 'Counted once, on its monthly sheet row (with the sheet Amazon cost)'],
+  before_start: ['before start', 'Sold before the business start month; not counted'],
+  cancelled: ['cancelled', 'Cancelled order; not counted'],
+  check_sheet: ['check sheet', 'Looks like a reworded sheet row; link it or confirm it is separate'],
+  returned: ['returned', 'Returned; no Amazon cost on record yet'],
+  awaiting_cost: ['needs cost', 'No Amazon cost yet; enter it in the Editor or wait for the Amazon email'],
+};
+const noNetLabel = (o) => {
+  const [label, tip] = o.excluded ? ['excluded', 'Excluded from the numbers'] : NO_NET[o.status] || ['pending', 'Waiting for the Amazon cost'];
+  return `<span class="muted" title="${tip}">${label}</span>`;
+};
 const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded to buyer');
 
 // Every status pill carries an icon as well as a colour, so state never relies on colour alone
@@ -1106,7 +1119,7 @@ function orders(el) {
       { title: 'Amazon', field: 'cost', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 92, formatter: (c) => (c.getRow().getData().has_cost ? money(c.getValue()) : '<span class="muted">—</span>') },
       { title: 'Fees', field: 'fees', hozAlign: 'right', width: 82, minWidth: 78, sorter: (a, b, ra, rb) => (a + ra.getData().ad_fees) - (b + rb.getData().ad_fees), formatter: (c) => money(c.getValue() + c.getRow().getData().ad_fees) },
       { title: 'Refund', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 90, minWidth: 86, formatter: (c) => (c.getValue() ? `<span title="${refundWord(c.getRow().getData())}">${money(c.getValue(), 2)}</span>` : '<span class="muted">—</span>') },
-      { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 90, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : '<span class="muted">pending</span>'; } },
+      { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 90, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : noNetLabel(d); } },
       { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 86, minWidth: 82, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
       { title: 'Status', field: 'status', width: 160, minWidth: 156, formatter: (c) => statusPill(c.getValue()) },
     ],
@@ -1165,7 +1178,7 @@ export function openOrder(id) {
       <div class="drawer-summary">
         <div><div class="k"><i class="sw" style="background:${c.revenue}"></i>${sheet ? 'eBay payout' : 'Buyer paid'}</div><div class="v">${money(o.revenue)}</div></div>
         <div><div class="k"><i class="sw" style="background:${c.cost}"></i>Amazon cost</div><div class="v">${o.has_cost ? money(o.cost) : '<span class="muted">—</span>'}</div></div>
-        <div><div class="k"><i class="sw" style="background:${o.net < 0 ? c.bad : c.profit}"></i>Net profit</div><div class="v ${o.has_cost && !o.excluded ? (o.net < 0 ? 'neg' : 'pos') : 'muted'}">${o.has_cost && !o.excluded ? money(o.net) : 'pending'}</div></div>
+        <div><div class="k"><i class="sw" style="background:${o.net < 0 ? c.bad : c.profit}"></i>Net profit</div><div class="v ${o.has_cost && !o.excluded ? (o.net < 0 ? 'neg' : 'pos') : 'muted'}">${o.has_cost && !o.excluded ? money(o.net) : noNetLabel(o)}</div></div>
       </div>
       <h4>Profit math</h4>
       ${row(sheet ? 'eBay payout (after fees)' : 'Buyer paid (excl. tax)', money(o.revenue), c.revenue)}
@@ -1175,7 +1188,7 @@ export function openOrder(id) {
       ${o.refunds ? row(refundWord(o), `−${money(o.refunds, 2)}`, c.refunds) : ''}
       ${o.amazon_refund ? row('Recovered from Amazon', `+${money(o.amazon_refund)}`, c.good) : ''}
       ${o.extra_cost ? row('Other costs', `−${money(o.extra_cost)}`, c.ink3) : ''}
-      ${row('Net profit', o.has_cost && !o.excluded ? `<span class="${o.net < 0 ? 'neg' : 'pos'}">${money(o.net)}</span>` : '<span class="muted">pending</span>', null, 'total')}
+      ${row('Net profit', o.has_cost && !o.excluded ? `<span class="${o.net < 0 ? 'neg' : 'pos'}">${money(o.net)}</span>` : noNetLabel(o), null, 'total')}
       <div class="muted" style="font-size:12px">${o.has_cost ? `${pct(o.margin)} margin · ${pct(o.roi)} ROI` : 'Profit shows once an Amazon purchase is linked or a cost is entered in the Editor.'}${o.tax_collected ? ` · ${money(o.tax_collected)} sales tax collected by eBay (not revenue)` : ''}</div>
 
       ${o.ledger ? `<h4>Monthly sheet row</h4><div class="sub-card"><div class="t">${esc(o.ledger.title)}</div><div class="m"><span>${monthLabel(o.ledger.month, 'long')}</span><span>Amazon cost ${money(o.ledger.amazon_cost, 2)}</span><span>${o.ledger.sale_price < 0 ? `eBay refund fee ${money(-o.ledger.sale_price, 2)}` : `eBay payout ${money(o.ledger.sale_price, 2)}`}</span>${o.ledger.note ? `<span>${esc(o.ledger.note)}</span>` : ''}</div><div class="m" style="margin-top:6px">${o.source === 'ledger' ? 'Revenue here is the eBay payout after eBay fees, as the sheet records it. When eBay syncs this sale, it is matched automatically and the real order takes over.' : 'This eBay order was matched to the sheet row. Its Amazon cost comes from the sheet.'}</div></div>` : ''}
