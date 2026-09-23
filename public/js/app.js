@@ -3,6 +3,7 @@ import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProdu
 import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer } from './charts.js';
 import { renderEditor } from './editor.js';
 import { renderSettlement } from './settle-page.js';
+import { renderOpex } from './opex-page.js';
 import { settleMonth, monthKey, allMonths } from './settlement.js';
 
 // ---------------------------------------------------------------- state
@@ -26,6 +27,7 @@ const PAGES = [
   { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every eBay sale with its full profit math', group: 'Insights' },
   { id: 'returns', label: 'Returns', icon: 'returns', sub: 'Refunds, reasons and recovery', group: 'Insights' },
   { id: 'settlement', label: 'Settlement', icon: 'settle', sub: 'Monthly partner settlement', noRange: true, group: 'Partners' },
+  { id: 'costs', label: 'Operating costs', icon: 'wallet', sub: 'Monthly business expenses that come out of profit before the split', noRange: true, group: 'Partners' },
   { id: 'editor', label: 'Editor', icon: 'editor', sub: 'Spreadsheet mode: manual adjustments and matching', noRange: true, group: 'Data' },
   { id: 'import', label: 'Monthly sheets', icon: 'sheet', sub: 'Upload the partner settlement sheets', noRange: true, group: 'Data' },
   { id: 'settings', label: 'Settings', icon: 'settings', sub: 'eBay connection, Amazon email import, partners, goals', noRange: true, group: 'Data' },
@@ -213,7 +215,7 @@ export function renderPage() {
   void el.offsetWidth; // restart the enter animation
   el.classList.add('page-in');
   if (!state.data) { el.innerHTML = skeleton(); return; }
-  const fn = { overview, trends, products, orders, returns, settlement: renderSettlement, editor: renderEditor, import: importPage, settings }[p.id];
+  const fn = { overview, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
 }
 
@@ -383,7 +385,7 @@ function overview(el) {
     const due = dueStatus(settlementDueDate(latestUnpaid.month, dueDay));
     const [uy, um] = latestUnpaid.month.split('-').map(Number);
     const mLabel = new Date(uy, um - 1, 1).toLocaleDateString('en-US', { month: 'long' });
-    const older = olderUnpaid.length ? ` <span class="muted">· plus ${money(olderUnpaid.reduce((t, x) => t + x.balance, 0), 2)} from ${olderUnpaid.length} earlier month${olderUnpaid.length > 1 ? 's' : ''}${olderUnpaid.some((x) => dueStatus(settlementDueDate(x.month, dueDay)).kind === 'overdue') ? ', overdue' : ''}</span>` : '';
+    const older = olderUnpaid.length ? ` <span class="muted">plus ${money(olderUnpaid.reduce((t, x) => t + x.balance, 0), 2)} from ${olderUnpaid.length} earlier month${olderUnpaid.length > 1 ? 's' : ''}${olderUnpaid.some((x) => dueStatus(settlementDueDate(x.month, dueDay)).kind === 'overdue') ? ', overdue' : ''}</span>` : '';
     return `<a class="callout ${due.kind}" href="#/settlement">
       <span class="callout-ic">${ICONS.wallet}</span>
       <span class="callout-body"><b>${esc(B)} ${ICONS.arrow.replace('<svg', '<svg class="arr"')} ${esc(A)}</b> <span class="callout-amt num">${money(latestUnpaid.balance, 2)}</span> <span class="muted">for ${mLabel}</span>${older}</span>
@@ -459,7 +461,7 @@ function overview(el) {
   <div class="grid g-12 mt">
     ${card('Cumulative profit', 'Running total: item profit, minus each month’s operating costs', '<div class="chart" id="ch-cum"></div>', { cls: 'c-5' })}
     ${card('Order outcomes', 'Share of eBay orders in the range', '<div class="chart" id="ch-outcomes"></div>', { cls: 'c-3' })}
-    ${card('Operating costs', `${money(ox.total, 2)} in this range · the sheets' section 2`, `<div class="chart" id="ch-opex"></div>`, { cls: 'c-4', right: '<a class="btn sm" href="#/editor?tab=expenses">Edit</a>' })}
+    ${card('Operating costs', `${money(ox.total, 2)} in this range · the sheets' section 2`, `<div class="chart" id="ch-opex"></div>`, { cls: 'c-4', right: '<a class="btn sm" href="#/costs">Edit</a>' })}
   </div>
 
   <div class="grid g-12 mt">

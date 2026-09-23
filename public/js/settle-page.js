@@ -87,7 +87,7 @@ export function renderSettlement(el) {
       </div>
     </div>
 
-    <div class="card c-7"><div class="card-h"><div><h3>${monthLabel(selected)} settlement</h3><div class="sub">Same sections as the monthly sheet${approx ? ' · sheet rows have approximate dates within the month' : ''}</div></div><div class="right"><a class="btn sm" href="#/editor?tab=expenses">Edit expenses</a></div></div>
+    <div class="card c-7"><div class="card-h"><div><h3>${monthLabel(selected)} settlement</h3><div class="sub">Same sections as the monthly sheet${approx ? ' · sheet rows have approximate dates within the month' : ''}</div></div><div class="right"><a class="btn sm" href="#/costs">Edit expenses</a></div></div>
       <div class="card-b settle-grid">
         <div>
           <div class="settle-sec">${sec(1, 'Transactions')}
