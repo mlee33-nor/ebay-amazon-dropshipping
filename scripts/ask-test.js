@@ -76,6 +76,17 @@ await check('a wrong assumption is corrected first: "why are we up in september"
   assert.match(a.text, /^\*\*We're actually down, not up\./);
   assert.equal(a.trend, 'down');
 });
+await check('listings vs sales without eBay views: listings grew faster than orders (live numbers from Sep 22)', async () => {
+  const a = _test.listingsVsSales({
+    totals: { activeListings: 7355 }, stale: { count: 4246, criteria: { viewsBelowMedian: null } },
+    drivers: { listings: { current: 5474.97, previous: 2033.87 }, newListings: { current: 3062, previous: 3630 }, orders: { current: 49, previous: 28 },
+      impressions: { current: null, previous: null }, views: { current: null, previous: null }, viewsPerListing: { current: null, previous: null } },
+  });
+  assert.match(a.text, /listings grew faster than sales/);
+  assert.match(a.text, /13.8 → 9.0 orders per 1,000 listings|13.8 → 8.9 orders per 1,000 listings/);
+  assert.ok(!/steady/.test(a.text), 'never claims traffic is steady without traffic data');
+  assert.ok(a.bullets.some((b) => /4,?246 listings/.test(b)));
+});
 await check('top products all time: a table with profit per product', async () => {
   const a = await ask('what are our best products');
   assert.ok(a.table.rows.length >= 3);

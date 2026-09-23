@@ -13,7 +13,7 @@ const $ = (c) => `${c < 0 ? '−' : ''}$${(Math.abs(c) / 100).toLocaleString('en
 const signed$ = (c) => `${c >= 0 ? '+' : '−'}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const pct = (x, d = 1) => (x === null || !Number.isFinite(x) ? '—' : `${(x * 100).toFixed(d)}%`);
 const chg = (a, b) => (b ? (a - b) / Math.abs(b) : null);
-const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const plural = (n, w) => `${Number(n).toLocaleString('en-US')} ${w}${n === 1 ? '' : 's'}`;
 
 const toUTC = (ymd) => { const [y, m, d] = ymd.split('-').map(Number); return Date.UTC(y, m - 1, d); };
 const ymdOf = (t) => new Date(t).toISOString().slice(0, 10);
@@ -356,6 +356,7 @@ function listingFacts(ctx) {
     viewRate: [rate('views', 'impressions', 'previous'), rate('views', 'impressions', 'current')],
     orders: [val('orders', 'previous'), val('orders', 'current')],
     salesRate: [rate('orders', 'views', 'previous'), rate('orders', 'views', 'current')],
+    ordersPerK: [rate('orders', 'listings', 'previous') === null ? null : rate('orders', 'listings', 'previous') * 10, rate('orders', 'listings', 'current') === null ? null : rate('orders', 'listings', 'current') * 10],
   };
   const ch = (k) => { const [a, b] = m[k]; return a !== null && b !== null && a !== 0 ? (b - a) / Math.abs(a) : null; };
   return { L, m, ch, traffic: m.views[1] !== null && m.views[0] !== null };
@@ -367,7 +368,7 @@ const trend = (F, k, label, d = 0) => { const [a, b] = F.m[k]; return a === null
 function listingDrivers(ctx) {
   const F = listingFacts(ctx);
   if (!F) return null;
-  const bits = [trend(F, 'listings', 'active listings'), F.traffic ? trend(F, 'viewsPerListing', 'views per listing', 1) : null, F.traffic ? trend(F, 'salesRate', 'orders per 100 views', 2) : null].filter(Boolean);
+  const bits = [trend(F, 'listings', 'active listings'), trend(F, 'orders', 'orders'), trend(F, 'ordersPerK', 'orders per 1,000 listings', 1), F.traffic ? trend(F, 'viewsPerListing', 'views per listing', 1) : null, F.traffic ? trend(F, 'salesRate', 'orders per 100 views', 2) : null].filter(Boolean);
   return bits.length ? { summary: `**Listings (last 30 days vs the 30 before):** ${bits.join(', ')}.` } : null;
 }
 
@@ -385,20 +386,25 @@ function answerListingsVsSales(ctx) {
     F.traffic ? trend(F, 'viewsPerListing', '**Views per listing**', 1) : null,
     F.traffic ? trend(F, 'viewRate', '**Views per 100 times shown**', 2) : null,
     trend(F, 'orders', '**Orders**'),
+    trend(F, 'ordersPerK', '**Orders per 1,000 active listings**', 1),
     F.traffic ? trend(F, 'salesRate', '**Orders per 100 views**', 2) : null,
   ].filter(Boolean);
   const reasons = [];
+  // Listings growing faster than orders: each listing sells less (works with or without eBay's traffic data)
+  if (ch('ordersPerK') !== null && ch('ordersPerK') < -0.1) reasons.push(`listings grew faster than sales. Active listings are ${fmtCh(ch('listings')).trim().replace(/[()]/g, '')} but orders only ${fmtCh(ch('orders')).trim().replace(/[()]/g, '')}, so each listing sells less: ${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings. Most new listings aren't selling yet`);
   if (F.traffic) {
     if (ch('listings') > 0.05 && ch('viewsPerListing') < -0.05) reasons.push('you have more listings, but each one gets fewer views. The new listings aren’t pulling in much traffic, so the same views are spread across more items');
     if (ch('impressions') > 0.05 && ch('viewRate') < -0.05) reasons.push('eBay shows your listings more often, but fewer people click them. Price, main photo and title decide that click');
     if (ch('views') >= -0.05 && ch('salesRate') < -0.05) reasons.push('people still look at the listings, but fewer of them buy. Compare prices with competitors and check the handling time');
     if (ch('impressions') < -0.05) reasons.push('eBay is showing your listings less often in search. Listings lose visibility as they age, and promoted-listing changes matter too');
-  } else if (ch('listings') > 0.05 && ch('orders') < -0.05) {
-    reasons.push('listings are up while orders are down. I can’t see views yet, so I can’t tell whether the new listings aren’t being seen or aren’t converting. Reconnect eBay in Settings to allow listing traffic');
   }
-  const text = reasons.length
-    ? `**Short answer: ${reasons[0]}.**${reasons.length > 1 ? ` Also, ${reasons.slice(1).join('; also, ')}.` : ''}`
-    : '**Listing traffic and conversion are roughly steady**, so the change in sales looks like normal variation rather than a listings problem.';
+  if (!F.traffic) reasons.push('I can’t see listing views yet, so I can’t tell whether the new listings aren’t being seen or are seen but not bought. Reconnect eBay once in Settings to allow listing traffic');
+  const real = F.traffic ? reasons : reasons.slice(0, -1); // the last one is only the note about missing views
+  const text = real.length
+    ? `**Short answer: ${real[0]}.**${reasons.length > 1 ? ` Also, ${reasons.slice(1).join('; also, ')}.` : ''}`
+    : F.traffic
+      ? '**Listing traffic and conversion are roughly steady**, so the change in sales looks like normal variation rather than a listings problem.'
+      : `**Sales are keeping pace with listings** (${fmtN(m.ordersPerK[0], 1)} → ${fmtN(m.ordersPerK[1], 1)} orders per 1,000 listings). ${reasons[0]}.`;
   if (F.L.stale?.count) bullets.push(`**${plural(F.L.stale.count, 'listing')} ${F.L.stale.count === 1 ? 'has' : 'have'} been live 30+ days with no sales${F.L.stale.criteria?.viewsBelowMedian !== null && F.L.stale.criteria?.viewsBelowMedian !== undefined ? ' and below-median views' : ''}.** Refreshing or ending them keeps the store focused (Products → Listings).`);
   return { text, bullets, chips: ['Which listings get the most views?', 'Why are we down this month?'] };
 }
@@ -615,4 +621,4 @@ export async function ask(question, prev = null, route = null) {
   return { ...ans, understood: it.intent === 'help' ? null : { topic: it.intent, period: it.period?.label || null, product: it.product?.join(' ') || null }, context };
 }
 
-export const _test = { parsePeriods, understand: (q, ctx, prev) => understand(q, ctx, prev), osa };
+export const _test = { parsePeriods, understand: (q, ctx, prev) => understand(q, ctx, prev), osa, listingsVsSales: (listings) => answerListingsVsSales({ listings }) };
