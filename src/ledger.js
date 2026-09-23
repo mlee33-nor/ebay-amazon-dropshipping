@@ -182,40 +182,60 @@ export async function importLedgerCsv(buffer, filename) {
   };
 }
 
-// Pair ledger rows with real eBay orders once the API has them: same month (±3 days), similar title,
-// and the sheet's payout must look like this order's price after eBay fees.
+// Pair sheet rows with real eBay orders once the API has them. Sheet titles are shortened copies of the
+// eBay title, so similarity is "how much of the sheet title appears in the eBay title". Sale rows must be in
+// the same month (±3 days) with a payout that looks like this order's price after fees; refund rows link to
+// the refunded (or same-titled) eBay sale within ~6 weeks, since the refund can land a month after the sale.
+const WORDS = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+  .filter((t) => t.length > 1 && !['the', 'and', 'for', 'with', 'of', 'to', 'in', 'on', 'by', 'a', 'an', 'x'].includes(t));
+export function sheetTitleMatch(sheetTitle, ebayTitle) {
+  const a = [...new Set(WORDS(sheetTitle))];
+  const b = new Set(WORDS(ebayTitle));
+  if (a.length < 2 || !b.size) return 0;
+  return a.filter((t) => b.has(t)).length / a.length;
+}
+
 export async function matchLedger() {
-  const entries = await q('select * from ledger_entries where ebay_order_id is null and not is_refund');
+  const entries = await q('select * from ledger_entries where ebay_order_id is null');
   if (!entries.length) return 0;
-  const taken = new Set((await q('select ebay_order_id from ledger_entries where ebay_order_id is not null')).map((r) => r.ebay_order_id));
+  const taken = new Set((await q('select ebay_order_id from ledger_entries where ebay_order_id is not null and not is_refund')).map((r) => r.ebay_order_id));
   const orders = await q(
-    `select o.order_id, o.created_at, o.revenue, string_agg(li.title, ' | ') as title
+    `select o.order_id, o.created_at, o.revenue, o.refund_total, o.cancel_state, string_agg(li.title, ' | ') as title
      from ebay_orders o left join ebay_line_items li on li.order_id = o.order_id
      where o.order_id not like 'DEMO-%' group by o.order_id`
   );
   const pairs = [];
   for (const e of entries) {
     const [y, m] = e.month.split('-').map(Number);
-    const from = Date.UTC(y, m - 1, 1) - 3 * 86400_000;
+    const from = Date.UTC(y, m - 1, 1) - (e.is_refund ? 45 : 3) * 86400_000;
     const to = Date.UTC(y, m, 1) + 3 * 86400_000;
     for (const o of orders) {
       const t = new Date(o.created_at).getTime();
-      if (t < from || t > to || taken.has(o.order_id)) continue;
-      const sim = titleSimilarity(e.title, o.title);
-      if (sim < 0.5) continue;
+      if (t < from || t > to) continue;
+      const sim = sheetTitleMatch(e.title, o.title);
+      if (sim < 0.6) continue;
+      if (e.is_refund) {
+        const refunded = Number(o.refund_total) > 0 || /CANCEL/i.test(o.cancel_state || '');
+        pairs.push({ e, o, score: sim * 100 + (refunded ? 40 : 0) });
+        continue;
+      }
+      if (taken.has(o.order_id)) continue;
       const ratio = Number(o.revenue) > 0 ? Number(e.sale_price) / Number(o.revenue) : 0;
-      if (ratio < 0.7 || ratio > 1.02) continue;
+      const okRatio = sim >= 0.9 ? ratio >= 0.5 && ratio <= 1.05 : ratio >= 0.7 && ratio <= 1.02;
+      if (!okRatio) continue;
       pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 });
     }
   }
   pairs.sort((a, b) => b.score - a.score);
   const usedE = new Set();
+  const usedRefund = new Set();
   let n = 0;
   for (const p of pairs) {
-    if (usedE.has(p.e.entry_key) || taken.has(p.o.order_id)) continue;
+    if (usedE.has(p.e.entry_key)) continue;
+    if (p.e.is_refund ? usedRefund.has(p.o.order_id) : taken.has(p.o.order_id)) continue;
     await q('update ledger_entries set ebay_order_id = $2, match_method = $3 where entry_key = $1', [p.e.entry_key, p.o.order_id, 'auto']);
     usedE.add(p.e.entry_key);
-    taken.add(p.o.order_id);
+    if (p.e.is_refund) usedRefund.add(p.o.order_id); else taken.add(p.o.order_id);
     n++;
   }
   return n;

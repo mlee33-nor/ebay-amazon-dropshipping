@@ -421,7 +421,22 @@ function overview(el) {
       <div class="hero-value num" id="settle-value" style="font-size:36px;margin-top:2px">${money(thisSettle.sellerSends, 2)}</div>
       <div class="hero-meta" style="margin-top:8px"><span>Reimbursement <b>${money(thisSettle.cogs + thisSettle.opexAmazon, 2)}</b></span><span>${thisSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(thisSettle.shareAmazon), 2)}</b></span></div>
       <div class="status-card ${settleStatus.cls}" style="margin-top:14px"><div class="ic">${settleStatus.icon}</div><div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>${thisSettle.sellerSends > 0.009 ? `<span class="pill" title="Settlements are due on the ${dueDay}th of the following month">Due ${fmtDate(settlementDueDate(monthKey(now), dueDay))}</span>` : ''}</div>
-      <div class="stat-row" style="margin-top:8px"><span class="k">Owed across all months</span><span class="v ${owedAll > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? money(owedAll, 2) : 'All settled'}</span></div>
+      <div class="settle-track" role="list" aria-label="Settlement by month">${[...allSettled].reverse().slice(0, 6).map((x) => {
+        const [ty, tm] = x.month.split('-').map(Number);
+        const label = new Date(ty, tm - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        const settled = x.sellerSends <= 0.009 || (x.paid !== null && x.balance <= 0.009);
+        const d = dueStatus(settlementDueDate(x.month, dueDay));
+        const badge = settled
+          ? `<span class="pill good">${ICONS.check} Settled</span>`
+          : d.kind === 'overdue' ? `<span class="pill bad">${ICONS.alert} Overdue</span>`
+          : `<span class="pill warn">${ICONS.clock} Due ${fmtDate(settlementDueDate(x.month, dueDay))}</span>`;
+        return `<a class="settle-row ${settled ? 'ok' : d.kind}" role="listitem" href="#/settlement" data-month="${x.month}">
+          <span class="m">${label}</span>
+          <span class="amt num">${money(x.sellerSends, 2)}</span>
+          ${badge}
+        </a>`;
+      }).join('')}</div>
+      <div class="stat-row" style="margin-top:8px"><span class="k">Owed across all months</span><span class="v ${owedAll > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? money(owedAll, 2) : 'All settled ✓'}</span></div>
       <div style="margin-top:12px"><a class="btn sm" href="#/settlement">Open settlement ${ICONS.arrow}</a></div>
     </div>
     ${card('This month', now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), `

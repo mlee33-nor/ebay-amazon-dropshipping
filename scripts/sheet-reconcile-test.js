@@ -31,6 +31,8 @@ const ebay = [
   ['11-00001-00004', '2026-09-03T18:00:00Z', 'Areliaa Lipstick Color Changing Lip Balm', 19.6, 19.6], // refunded
   ['11-00001-00005', '2026-07-10T18:00:00Z', 'Something not in any sheet', 30.0, 0],
   ['11-00001-00006', '2026-10-02T18:00:00Z', 'October sale, no sheet yet', 50.0, 0],
+  ['11-00001-00007', '2026-06-10T18:00:00Z', 'Old sale before the partnership', 25.0, 0],
+  ['11-00001-00008', '2026-08-11T18:00:00Z', 'Replacement for Kubota 7J612-66323 K2581-66220 Hydraulic Filter', 27.99, 0],
 ];
 for (const [id, at, title, price, refund] of ebay) {
   await upsertOrder(normalizeOrder({
@@ -60,11 +62,21 @@ for (const [m, [month, profit, sends]] of Object.entries(SHEETS)) {
   check(`${m}: Drew sends Myles ${s.sellerSends} = sheet ${sends}`, () => assert.equal(s.sellerSends, sends));
 }
 const byId = (id) => data.find((o) => o.order_id === id);
-check('eBay orders in sheet months are shown but not counted again', () => {
-  for (const id of ['11-00001-00001', '11-00001-00002', '11-00001-00004', '11-00001-00005']) {
+check('eBay orders matched to a sheet row are shown but not counted again', () => {
+  for (const id of ['11-00001-00001', '11-00001-00002', '11-00001-00003']) {
     assert.equal(byId(id).counted, false);
     assert.equal(byId(id).status, 'in_sheet');
   }
+});
+check('short sheet title "Replacement for Kubota" matches the long eBay title', () => assert.equal(byId('11-00001-00008').status, 'in_sheet'));
+check('refund sheet row links to the refunded eBay sale', () => assert.equal(byId('11-00001-00004').status, 'in_sheet'));
+check('a sale missing from the sheet stays visible as needing a cost (not hidden, not counted)', () => {
+  assert.equal(byId('11-00001-00005').status, 'awaiting_cost');
+  assert.equal(byId('11-00001-00005').counted, false);
+});
+check('sales before the partnership are set aside', () => {
+  assert.equal(byId('11-00001-00007').status, 'before_start');
+  assert.equal(byId('11-00001-00007').counted, false);
 });
 check('matched sheet rows take the real eBay sale date', () => {
   const uke = data.find((o) => o.source === 'ledger' && /Kala Bamboo/.test(o.title));

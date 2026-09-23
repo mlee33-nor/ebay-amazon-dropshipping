@@ -189,6 +189,7 @@ export const STATUS_META = {
   cancelled_after_purchase: { label: 'Cancelled (bought)', cls: 'bad' },
   excluded: { label: 'Excluded', cls: '' },
   in_sheet: { label: 'In monthly sheet', cls: '' },
+  before_start: { label: 'Before partnership', cls: '' },
 };
 
 // Monthly operating costs that fall in a date range. A month fully inside the range counts in full;

@@ -1,6 +1,6 @@
 // Builds the per-order profit dataset the dashboard renders. All money math lives here so the
 // dashboard, the editor and CSV exports always agree.
-import { q, num } from './db.js';
+import { q, num, getSetting } from './db.js';
 
 // Business calendar month (sheets are calendar months in the partners' timezone)
 const TZ = process.env.BUSINESS_TZ || 'America/Phoenix';
@@ -33,6 +33,8 @@ export async function buildDataset() {
   // profit and settlement (so the dashboard equals the sheet to the cent). Real eBay orders in those months
   // stay visible but aren't counted again; when matched to a sheet row they give that row its real date.
   const sheetMonths = new Set(ledger.map((l) => l.month));
+  // Sales before the partnership started (default: the first sheet month) are not part of this business
+  const startMonth = (await getSetting('business_start')) || [...sheetMonths].sort()[0] || null;
   const ebayById = new Map(orders.map((o) => [o.order_id, o]));
 
   const group = (rows, key) => {
@@ -109,9 +111,12 @@ export async function buildDataset() {
       : null;
     const units = items.reduce((s, i) => s + (i.quantity || 0), 0) || 1;
 
-    const inSheet = Boolean(led) || sheetMonths.has(businessMonth(o.created_at));
+    // Only sales matched to a sheet row are covered by the sheet; any other sale stays visible (and needs a cost)
+    const inSheet = Boolean(led);
+    const beforeStart = Boolean(startMonth) && businessMonth(o.created_at) < startMonth;
     let status = 'profitable';
-    if (inSheet) status = 'in_sheet';
+    if (beforeStart) status = 'before_start';
+    else if (inSheet) status = 'in_sheet';
     else if (ov.excluded) status = 'excluded';
     else if (cancelled) status = hasCost && cost > 0 ? 'cancelled_after_purchase' : 'cancelled';
     else if (!hasCost) status = 'awaiting_cost';
@@ -154,10 +159,11 @@ export async function buildDataset() {
       cost_source: costSource,
       source: 'ebay',
       ledger: led ? { entry_key: led.entry_key, month: led.month, title: led.title, sale_price: num(led.sale_price), amazon_cost: num(led.amazon_cost) } : null,
-      counted: !inSheet && !ov.excluded && hasCost && !(cancelled && cost === 0),
+      counted: !inSheet && !beforeStart && !ov.excluded && hasCost && !(cancelled && cost === 0),
       cancelled,
       in_sheet: inSheet,
-      excluded: inSheet || Boolean(ov.excluded),
+      before_start: beforeStart,
+      excluded: inSheet || beforeStart || Boolean(ov.excluded),
       status,
       lag_days: lagDays,
       amazon_orders: amazonOrders,
