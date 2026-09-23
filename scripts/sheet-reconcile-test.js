@@ -33,6 +33,10 @@ const ebay = [
   ['11-00001-00006', '2026-10-02T18:00:00Z', 'October sale, no sheet yet', 50.0, 0],
   ['11-00001-00007', '2026-06-10T18:00:00Z', 'Old sale before the partnership', 25.0, 0],
   ['11-00001-00008', '2026-08-11T18:00:00Z', 'Replacement for Kubota 7J612-66323 K2581-66220 Hydraulic Filter', 27.99, 0],
+  ['11-00001-00009', '2026-10-05T18:00:00Z', 'October sale refunded before we bought it', 40.0, 40.0],
+  ['11-00001-00010', '2026-09-05T18:00:00Z', 'Vitaliq Korean Silk Peptide Serum Deep Collagen', 34.99, 30.2], // refunded
+  ['11-00001-00011', '2026-09-17T18:00:00Z', 'Vitaliq Korean Silk Peptide Serum Deep Collagen', 34.99, 0],
+  ['11-00001-00012', '2026-09-08T18:00:00Z', 'Vitaliq Korean Silk Peptide Serum Deep Collagen 2 Pack', 69.98, 0],
 ];
 for (const [id, at, title, price, refund] of ebay) {
   await upsertOrder(normalizeOrder({
@@ -74,6 +78,18 @@ check('a sale missing from the sheet stays visible as needing a cost (not hidden
   assert.equal(byId('11-00001-00005').status, 'awaiting_cost');
   assert.equal(byId('11-00001-00005').counted, false);
 });
+check('same-item sales: refunded one goes to the refund row, the normal row gets the un-refunded sale', () => {
+  assert.equal(byId('11-00001-00011').status, 'in_sheet');
+  const refundRow = data.find((o) => o.source === 'ledger' && /Vitaliq/.test(o.title) && o.ledger.note && /REFUND/i.test(o.ledger.note));
+  assert.equal(refundRow.ebay_order_id, '11-00001-00010');
+});
+check('refunded on eBay with no Amazon purchase: cost $0, only the $0.40 fee lost, counted', () => {
+  const o = byId('11-00001-00009');
+  assert.equal(o.counted, true);
+  assert.equal(o.cost, 0);
+  assert.equal(o.cost_source, 'refunded');
+  assert.equal(o.net, -0.4);
+});
 check('sales before the partnership are set aside', () => {
   assert.equal(byId('11-00001-00007').status, 'before_start');
   assert.equal(byId('11-00001-00007').counted, false);
@@ -89,7 +105,7 @@ check('October (no sheet) is driven by eBay: counted with its cost', () => {
   assert.equal(o.counted, true);
   assert.equal(o.cost, 30);
   const s = settleMonth({ month: '2026-10', orders: data, expenses, settlements, splitAmazon: 50 });
-  assert.equal(s.orders, 1);
+  assert.equal(s.orders, 2);
 });
 const totalProfit = Object.values(SHEETS).reduce((t, [month]) => t + settleMonth({ month, orders: data, expenses, settlements, splitAmazon: 50 }).businessProfit, 0);
 check(`Jul–Sep business profit $${totalProfit.toFixed(2)} = sheets $206.81`, () => assert.equal(Math.round(totalProfit * 100), 20681));

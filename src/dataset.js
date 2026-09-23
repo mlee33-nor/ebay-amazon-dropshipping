@@ -94,11 +94,16 @@ export async function buildDataset() {
     const cancelled = /CANCELED|CANCELLED/i.test(o.cancel_state || '') && !/NONE_REQUESTED|IN_PROGRESS/i.test(o.cancel_state || '');
     const amazonCost = r2(amazonOrders.reduce((s, a) => s + a.cost, 0));
     const led = ledgerByEbay.get(o.order_id);
-    const costSource = num(ov.cost_override) !== null ? 'override' : amazonOrders.length ? 'amazon' : led ? 'ledger' : null;
+    // Refunded on eBay and nothing bought on Amazon: no Amazon cost was ever incurred, and eBay credits back the
+    // final value fee except its fixed $0.40 per-order fee. (If an Amazon purchase is linked, its cost still counts.)
+    const rawRevenue = num(o.revenue) || 0;
+    const refundedNoPurchase = !cancelled && rawRevenue > 0 && (num(o.refund_total) || 0) >= 0.8 * rawRevenue
+      && !amazonOrders.length && num(ov.cost_override) === null && !led;
+    const costSource = num(ov.cost_override) !== null ? 'override' : amazonOrders.length ? 'amazon' : led ? 'ledger' : refundedNoPurchase ? 'refunded' : null;
     const hasCost = costSource !== null;
     const cost = num(ov.cost_override) ?? (amazonOrders.length ? amazonCost : led ? num(led.amazon_cost) : 0);
-    const revenue = cancelled ? 0 : num(o.revenue) || 0;
-    const fees = cancelled ? 0 : num(ov.fee_override) ?? (num(o.ebay_fees) || 0);
+    const revenue = cancelled ? 0 : rawRevenue;
+    const fees = cancelled ? 0 : num(ov.fee_override) ?? (refundedNoPurchase ? Math.min(num(o.ebay_fees) || 0, 0.4) : num(o.ebay_fees) || 0);
     const adFees = cancelled ? 0 : num(o.ad_fees) || 0;
     const refunds = cancelled ? 0 : num(ov.refund_override) ?? (num(o.refund_total) || 0);
     const emailRefund = r2(amazonOrders.reduce((t, a) => t + (refundBy.get(a.amazon_order_id) || 0), 0));

@@ -196,6 +196,8 @@ export function sheetTitleMatch(sheetTitle, ebayTitle) {
 }
 
 export async function matchLedger() {
+  // Automatic pairings are recomputed every run (cheap, and lets better evidence fix an earlier pick); manual links are kept
+  await q("update ledger_entries set ebay_order_id = null, match_method = null where match_method = 'auto'");
   const entries = await q('select * from ledger_entries where ebay_order_id is null');
   if (!entries.length) return 0;
   const taken = new Set((await q('select ebay_order_id from ledger_entries where ebay_order_id is not null and not is_refund')).map((r) => r.ebay_order_id));
@@ -223,7 +225,9 @@ export async function matchLedger() {
       const ratio = Number(o.revenue) > 0 ? Number(e.sale_price) / Number(o.revenue) : 0;
       const okRatio = sim >= 0.9 ? ratio >= 0.5 && ratio <= 1.05 : ratio >= 0.7 && ratio <= 1.02;
       if (!okRatio) continue;
-      pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 });
+      // A sale eBay says was (mostly) refunded belongs with a refund row, not a normal sale row
+      const mostlyRefunded = Number(o.refund_total) >= 0.5 * Number(o.revenue) || /CANCEL/i.test(o.cancel_state || '');
+      pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 - (mostlyRefunded ? 60 : 0) });
     }
   }
   pairs.sort((a, b) => b.score - a.score);
