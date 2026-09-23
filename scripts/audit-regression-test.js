@@ -73,6 +73,16 @@ await check('C3b: reworded sheet sale is flagged "check_sheet", September still 
   assert.equal(s.sellerSends, 625.65);
 });
 
+// Late-July sale logged on the August sheet still pairs (no same-month candidate)
+await order('EDGE-JUL31', '2026-07-31T18:00:00Z', 'Temptations Chicken Salmon Kitten Treats 48 Pouches', 44.99);
+await matchLedger();
+await check('a Jul 31 sale recorded on the August sheet pairs with that August row', async () => {
+  const data = await buildDataset();
+  assert.equal(data.find((o) => o.order_id === 'EDGE-JUL31').status, 'in_sheet');
+  const { s } = await settle('2026-08');
+  assert.equal(s.businessProfit, 129.49);
+});
+
 // C2: business month is decided in Arizona time on the server
 await order('C2-EDGE', '2026-11-01T05:30:00Z', 'Edge of month widget', 40);
 await check('C2: a sale at 10:30pm Oct 31 Arizona time belongs to October for every viewer', async () => {

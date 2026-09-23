@@ -207,9 +207,18 @@ export async function matchLedger() {
   for (const e of entries) {
     // Sale rows pair only with a sale from the same business month; a refund row can point at a sale from
     // the same month or the month before (the refund often lands a few weeks after the sale)
+    // (a sale on the last days of a month is sometimes logged on next month's sheet, so a sale within 3 days of
+    // the month edge is allowed but scored well below any same-month sale)
     const allowed = e.is_refund ? new Set([e.month, prevMonth(e.month)]) : new Set([e.month]);
+    const [ey, em] = e.month.split('-').map(Number);
+    const edgeFrom = Date.UTC(ey, em - 1, 1) - 3 * 86400_000;
+    const edgeTo = Date.UTC(ey, em, 1) + 3 * 86400_000;
     for (const o of orders) {
-      if (!allowed.has(businessMonth(o.created_at))) continue;
+      const om = businessMonth(o.created_at);
+      const t = new Date(o.created_at).getTime();
+      const crossMonth = !allowed.has(om);
+      if (crossMonth && (e.is_refund || t < edgeFrom || t > edgeTo)) continue;
+      o._crossPenalty = crossMonth ? 45 : 0;
       const sim = sheetTitleMatch(e.title, o.title);
       if (sim < 0.6) continue;
       if (e.is_refund) {
@@ -223,7 +232,7 @@ export async function matchLedger() {
       if (!okRatio) continue;
       // A sale eBay says was (mostly) refunded belongs with a refund row, not a normal sale row
       const mostlyRefunded = Number(o.refund_total) >= 0.5 * Number(o.revenue) || /CANCEL/i.test(o.cancel_state || '');
-      pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 - (mostlyRefunded ? 60 : 0) });
+      pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 - (mostlyRefunded ? 60 : 0) - o._crossPenalty });
     }
   }
   pairs.sort((a, b) => b.score - a.score);
