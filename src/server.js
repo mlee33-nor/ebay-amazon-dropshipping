@@ -260,6 +260,17 @@ app.post('/api/ledger/link', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 app.post('/api/email/sync', wrap(async (_req, res) => res.json(await syncEmail())));
+app.post('/api/email/reprocess', wrap(async (_req, res) => {
+  const ids = (await q("select distinct amazon_order_id from amazon_lines where source = 'email'")).map((r) => r.amazon_order_id);
+  if (ids.length) await q("delete from order_links where amazon_order_id = any($1) and method = 'auto'", [ids]);
+  await q("delete from amazon_lines where source = 'email'");
+  await q('delete from amazon_refunds');
+  await q('delete from amazon_emails');
+  await setSetting('email_last_sync', null);
+  res.json(await syncEmail());
+}));
+app.get('/api/email/debug', wrap(async (_req, res) =>
+  res.json(await q("select subject, kind, order_ids, ok, note, parsed->>'total' as total, parsed->>'shipText' as ship, parsed->>'excerpt' as excerpt from amazon_emails order by created_at desc limit 5"))));
 app.get('/api/email/log', wrap(async (_req, res) =>
   res.json(await q('select message_id, received_at, subject, kind, order_ids, ok, note from amazon_emails order by received_at desc nulls last limit 60'))));
 app.post('/api/rematch', wrap(async (_req, res) => res.json(await runMatcher())));

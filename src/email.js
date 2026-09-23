@@ -46,14 +46,17 @@ export function classify(subject, body) {
 // Amazon writes totals as "$12.60" in HTML and "12.6 USD" in the text part
 function moneyNear(text, labels) {
   for (const label of labels) {
-    const re = new RegExp(`${label}\\s*:?\\s*(?:\\$\\s*([\\d,]+(?:\\.\\d{1,2})?)|([\\d,]+(?:\\.\\d{1,2})?)\\s*USD)`, 'i');
-    const m = text.match(re);
-    if (m) return Number((m[1] || m[2]).replace(/,/g, ''));
+    const re = new RegExp(`${label}\\s*:?\\s*(?:USD\\s*)?(?:\\$\\s*(\\d[\\d,]*(?:\\.\\d{1,2})?)|(\\d[\\d,]*(?:\\.\\d{1,2})?)\\s*USD)`, 'gi');
+    for (const m of text.matchAll(re)) {
+      const v = Number((m[1] || m[2]).replace(/,/g, ''));
+      if (v > 0) return v;
+    }
   }
   return null;
 }
 
 export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
+  const excerptSource = `${text || ''}\n---html---\n${htmlToText(html || '')}`;
   const forwarded = /^\s*(fwd?|fw)\s*:/i.test(clean(subject));
   subject = unfwd(subject);
   const htmlText = clean(htmlToText(html));
@@ -116,6 +119,7 @@ export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
   } else if (kind === 'cancel') {
     out.fullOrder = /order[^.\n]{0,60}(has been|was|is) cancel/i.test(`${subject}\n${body.slice(0, 800)}`) && !/\bitem/i.test(subject);
   }
+  out.excerpt = clean(excerptSource).replace(/\n{3,}/g, '\n\n').slice(0, 2500);
   return out;
 }
 
