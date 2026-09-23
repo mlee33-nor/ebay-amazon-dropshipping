@@ -357,8 +357,9 @@ function answerWhy(ctx, it) {
   if (!cur.n && !prv.n) return { text: `There are no costed sales ${periodPhrase(ctx, p)} or in ${c.label} to compare yet.` };
   const d = cur.net - prv.net;
   const up = d >= 0;
+  const cIn = /^the same point/.test(c.label) ? `at ${c.label}` : `in ${c.label}`;
   const wrongPremise = (it.direction === 'down' && d > 0) || (it.direction === 'up' && d < 0);
-  const head = `Item profit ${periodTitle(ctx, p)} is ${$(cur.net)}, ${up ? 'up' : 'down'} ${$(Math.abs(d))}${prv.net ? ` (${pct(Math.abs(chg(cur.net, prv.net)))})` : ''} from ${$(prv.net)} in ${c.label}.`;
+  const head = `Item profit ${periodTitle(ctx, p)} is ${$(cur.net)}, ${up ? 'up' : 'down'} ${$(Math.abs(d))}${prv.net ? ` (${pct(Math.abs(chg(cur.net, prv.net)))})` : ''} from ${$(prv.net)} ${cIn}.`;
   const text = `**${wrongPremise ? `We're actually ${up ? 'up' : 'down'}, not ${up ? 'down' : 'up'}. ` : ''}${head}**`;
   const bullets = [];
 
@@ -387,7 +388,7 @@ function answerWhy(ctx, it) {
   // Money lost on refunded sales, then any other sales that lost money
   const refundLoss = (s) => s.losses.filter((x) => cents(x.o.refunds) > 0 || x.o.status === 'returned').reduce((t, x) => t + x.net, 0);
   const rc = refundLoss(cur); const rp = refundLoss(prv);
-  if (rc || rp) bullets.push(`**Refunds:** ${plural(cur.refundedSales, 'refunded sale')} lost ${$(-rc)} vs ${$(-rp)} in ${c.label}${rc !== rp ? ` (${effect(rc - rp)})` : ''}.`);
+  if (rc || rp) bullets.push(`**Refunds:** ${plural(cur.refundedSales, 'refunded sale')} lost ${$(-rc)} vs ${$(-rp)} ${cIn}${rc !== rp ? ` (${effect(rc - rp)})` : ''}.`);
   const otherLoss = cur.losses.filter((x) => !(cents(x.o.refunds) > 0 || x.o.status === 'returned'));
   if (otherLoss.length) bullets.push(`**${plural(otherLoss.length, 'sale')} lost money** without a refund (${$(otherLoss.reduce((t, x) => t + x.net, 0))}): ${otherLoss.slice(0, 3).map((x) => `${short(x.o.title, 34)} ${$(x.net)}`).join(', ')}.`);
 
