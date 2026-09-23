@@ -206,6 +206,17 @@ app.get('/api/ebay/connect', wrap(async (_req, res) => {
   await setSetting('ebay_oauth_state', { state, at: Date.now() });
   res.redirect(ebayConsentUrl(state));
 }));
+// Fallback when the RuName still uses eBay's default "Authorization successfully completed" page:
+// paste that page's address (it carries ?code=...) at /ebay-code.html. Codes expire after ~5 minutes.
+app.post('/api/ebay/code', wrap(async (req, res) => {
+  const raw = String(req.body?.url || '').trim();
+  let code = null;
+  try { code = new URL(raw).searchParams.get('code'); } catch { code = raw || null; }
+  if (!code) return res.status(400).json({ error: 'No code found in that address. Copy the full address from the eBay success page.' });
+  await ebayConnectWithCode(code);
+  syncEbay().catch((err) => console.error('first eBay sync failed', err));
+  res.json({ ok: true });
+}));
 app.get('/api/ebay/callback', wrap(async (req, res) => {
   const saved = await getSetting('ebay_oauth_state');
   if (req.query.error) return res.redirect(`/#/settings?ebay=${encodeURIComponent(String(req.query.error_description || req.query.error))}`);
