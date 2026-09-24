@@ -92,6 +92,48 @@ await check('a sale from an hour ago with no Amazon order yet is "awaiting cost"
   assert.equal(o.counted, false);
 });
 
+// Cancelled on eBay, and Amazon's "Item cancelled successfully" email for the one-item purchase: not a loss
+await upsertOrder(normalizeOrder({
+  orderId: 'CXL-1', creationDate: '2026-10-20T12:43:00Z', orderFulfillmentStatus: 'NOT_STARTED', cancelStatus: { cancelState: 'CANCELED' },
+  pricingSummary: { priceSubtotal: { value: '90.24' }, total: { value: '90.24' } }, totalMarketplaceFee: { value: '12.81' },
+  fulfillmentStartInstructions: [{ shippingStep: { shipTo: { fullName: 'Bart Clark', contactAddress: { city: 'Grandview', stateOrProvince: 'TX' } } } }],
+  lineItems: [{ lineItemId: 'CXL-1-1', title: '8 Packs 16 Grit Blue Zirconia Cloth Flap Discs', quantity: 1, lineItemCost: { value: '90.24' }, total: { value: '90.24' } }],
+}));
+await ingestMessage({ messageId: 'cxl-order@test', subject: 'Ordered: 1 Automotive item', date: '2026-10-20T18:49:00Z',
+  text: 'Thanks for your order!\nBart - GRANDVIEW, TX\nOrder # 111-3484881-0000001\nGrand Total: $64.94\n' });
+await q("insert into order_links (amazon_order_id, ebay_order_id, method) values ('111-3484881-0000001', 'CXL-1', 'auto')");
+await check('before the cancellation email: a cancelled sale with an Amazon purchase is a loss', async () => {
+  const o = (await buildDataset()).find((x) => x.order_id === 'CXL-1');
+  assert.equal(o.status, 'cancelled_after_purchase');
+  assert.equal(o.net, -64.94);
+});
+await ingestMessage({ messageId: 'cxl-cancel@test', subject: 'Item cancelled successfully: "8 Packs 8 x 19 inch 16 Grit..."', date: '2026-10-20T19:37:00Z',
+  text: 'We have cancelled the item you asked us to.\nOrder # 111-3484881-0000001\n' });
+await check('"Item cancelled successfully" on a one-item order cancels the purchase: no cost, no loss, not counted', async () => {
+  const o = (await buildDataset()).find((x) => x.order_id === 'CXL-1');
+  assert.equal(o.cost, 0);
+  assert.equal(o.counted, false);
+  assert.equal(o.status, 'cancelled');
+});
+await ingestMessage({ messageId: 'cxl-refund@test', subject: 'Your refund for 8 Packs 8 x 19 inch 16 Grit', date: '2026-10-21T10:00:00Z',
+  text: 'Refund issued\nOrder # 111-3484881-0000001\nRefund total: $64.94\n' });
+await check('a refund email for the cancelled purchase is the same money: no phantom profit', async () => {
+  const o = (await buildDataset()).find((x) => x.order_id === 'CXL-1');
+  assert.equal(o.amazon_refund, 0);
+  assert.equal(o.counted, false);
+  const { s } = await settle('2026-10');
+  assert.ok(!s.orders || s.businessProfit < 1000, 'October unaffected');
+});
+// A two-item order where one item is cancelled stays for review (can't tell which item's cost to drop)
+await ingestMessage({ messageId: 'two-order@test', subject: 'Ordered: 2 Home items', date: '2026-10-22T18:00:00Z',
+  text: 'Thanks for your order!\nPat - MESA, AZ\nOrder # 111-0000000-0000002\nGrand Total: $40.00\n' });
+await ingestMessage({ messageId: 'two-cancel@test', subject: 'Item cancelled successfully: "Lamp..."', date: '2026-10-22T19:00:00Z',
+  text: 'We have cancelled the item.\nOrder # 111-0000000-0000002\n' });
+await check('an item cancelled from a 2-item order is left for review, not cancelled wholesale', async () => {
+  const lines = await q("select order_status from amazon_lines where amazon_order_id = '111-0000000-0000002'");
+  assert.ok(lines.every((l) => l.order_status === 'Ordered'));
+});
+
 // C2: business month is decided in Arizona time on the server
 await order('C2-EDGE', '2026-11-01T05:30:00Z', 'Edge of month widget', 40);
 await check('C2: a sale at 10:30pm Oct 31 Arizona time belongs to October for every viewer', async () => {

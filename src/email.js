@@ -176,13 +176,35 @@ async function ingest(messageId, receivedAt, subject, p) {
   return ok ? 'ok' : 'failed';
 }
 
+// A cancellation email cancels the whole Amazon purchase when it says the order was cancelled, or when the order had a
+// single item ("Item cancelled successfully" on a one-item order). Runs after every email sync, so a cancellation read
+// before its order email, or before this rule existed, still gets applied. Multi-item orders stay for review.
+export async function applyCancellations() {
+  const rows = await q("select message_id, order_ids, parsed, note from amazon_emails where kind = 'cancel' and array_length(order_ids, 1) = 1");
+  const done = [];
+  for (const r of rows) {
+    const id = r.order_ids[0];
+    const lines = await q('select quantity, order_status from amazon_lines where amazon_order_id = $1 and not ignored', [id]);
+    if (!lines.length) continue; // the order email isn't in yet
+    const units = lines.reduce((t, l) => t + (Number(l.quantity) || 1), 0);
+    if (!(r.parsed?.fullOrder || units === 1)) continue;
+    if (lines.every((l) => /cancel/i.test(l.order_status || ''))) continue;
+    await q("update amazon_lines set order_status = 'Cancelled', updated_at = now() where amazon_order_id = $1", [id]);
+    await q('update amazon_emails set ok = true, note = $2 where message_id = $1', [r.message_id, r.parsed?.fullOrder ? 'order marked cancelled' : 'its only item was cancelled, so the order is marked cancelled']);
+    done.push(id);
+  }
+  return done;
+}
+
 export async function ingestMessage({ messageId, subject = '', text = '', html = '', date }) {
   const parsed = parseAmazonEmail({ subject, text, html, date });
   if (parsed.kind === 'other' || parsed.kind === 'shipment') return 'seen';
   if (parsed.forwarded && !parsed.fromAmazon) return 'seen'; // a forward that isn't an Amazon email
   if (parsed.originalDate) date = parsed.originalDate;
   const id = messageId || `${parsed.orderIds[0] || 'unknown'}|${parsed.kind}|${date}`;
-  return ingest(id, date ? new Date(date) : null, clean(subject), parsed);
+  const result = await ingest(id, date ? new Date(date) : null, clean(subject), parsed);
+  if (parsed.kind === 'cancel' || parsed.kind === 'order') await applyCancellations();
+  return result;
 }
 
 let running = null;
@@ -236,8 +258,10 @@ export async function syncEmail() {
       }
       await client.logout();
       await setSetting('email_last_sync', startedAt);
+      const cancelled = await applyCancellations();
       const m = await runMatcher();
       const log = [`emails: ${counts.ok} imported, ${counts.failed} need review, ${counts.seen} already seen`, `matcher: ${m.linked} new links`];
+      if (cancelled.length) log.push(`cancelled Amazon orders: ${cancelled.join(', ')}`);
       await setSetting('email_last_result', { ok: true, at: startedAt, log });
       return { ok: true, log };
     } catch (e) {

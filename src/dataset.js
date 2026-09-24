@@ -127,6 +127,8 @@ export async function buildDataset() {
       bump(businessMonth(at), 'credit', num(t.fee_amount) || 0, iso(at));
     }
     for (const a of amazonOrders) {
+      // A cancelled purchase already costs $0: its refund email is the same money, not extra
+      if (a.lines.length && a.lines.every((l) => /cancel/i.test(l.status || ''))) continue;
       for (const r of azRefundsBy.get(a.amazon_order_id) || []) {
         const at = r.received_at || o.created_at;
         bump(businessMonth(at), 'amazonRefund', num(r.amount) || 0, iso(at));

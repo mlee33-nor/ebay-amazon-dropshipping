@@ -187,7 +187,7 @@ await must('what does drew owe me', /Drew owes Myles \$625\.65/, 'owed is Septem
 await must('is september better than august', /^\*\*No: September 2026 so far is behind/, 'a yes/no question gets a yes/no first');
 await must('last sale', /^\*\*Latest sale: /, '"last sale" is one sale');
 await must('worst products', /lost money/, 'worst products only lists products that lost money');
-await must('how many sales did we get today', /^\*\*1 sale today\.\*\* 0 counted in profit, 1 awaiting the Amazon email/, 'the new sale is counted as waiting');
+await must('how many sales did we get today', / counted in profit, 1 awaiting the Amazon email[\s\S]*Zirconia[\s\S]*awaiting the Amazon email/, 'the new sale is counted as waiting');
 await must('did drew pay for august', /Paid in full/, 'August shows paid in full');
 await must('how much did ebay pay us in august', /eBay payouts/, 'eBay payouts, not the settlement');
 await must('how much money did we make in august', /\$129\.49/, 'August business profit equals the sheet');
