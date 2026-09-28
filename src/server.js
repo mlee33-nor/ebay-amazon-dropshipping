@@ -11,6 +11,7 @@ import { buildDataset, buildBooks } from './dataset.js';
 import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
 import { ask } from './ask.js';
+import { routeQuestion, llmConfigured } from './llm.js';
 import { syncListings, listingAnalytics } from './listings.js';
 import { promotionAnalytics, unpromotedListings } from './promotions.js';
 
@@ -86,7 +87,7 @@ app.get('/api/data', wrap(async (_req, res) => {
     emailStatus(),
     buildBooks(),
   ]);
-  res.json({ orders, ebay: status, email, amazon: { ...amazonStats, suggestions }, settings, books, db: dbKind() });
+  res.json({ orders, ebay: status, email, amazon: { ...amazonStats, suggestions }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
 }));
 
 async function runMatcherSuggestionsCount() {
@@ -327,11 +328,21 @@ app.post('/api/demo/clear', wrap(async (_req, res) => {
   res.json({ ok: true });
 }));
 
-// ---------- Ask AI: exact figures for a question (read-only). The language model runs in the browser. ----------
+// ---------- Ask AI: answers written from the numbers (read-only). A question the built-in reader can't place is
+// read by the hosted AI model (only the question text is sent), then answered from the numbers the same way. ----------
 app.post('/api/ask', wrap(async (req, res) => {
   const question = String(req.body?.question || '').slice(0, 1000);
   if (!question.trim()) return res.status(400).json({ error: 'Ask a question' });
-  res.json(await ask(question, req.body?.context || null, req.body?.route || null));
+  const context = req.body?.context || null;
+  let a = await ask(question, context, null);
+  if (!a.understood && llmConfigured()) {
+    const route = await routeQuestion(question);
+    if (route && route.topic !== 'other') {
+      const b = await ask(question, context, route);
+      if (b.understood) a = b;
+    }
+  }
+  res.json(a);
 }));
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
