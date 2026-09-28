@@ -1,11 +1,12 @@
 // Hosted AI model for Ask AI (any OpenAI-compatible API, e.g. FreeLLMAPI). Its only job is to read a question the
 // built-in reader couldn't place and name the topic and period. It never sees the business's numbers and never
-// writes the answer: the question text is all that is sent. Configured with AI_API_BASE, AI_API_KEY, AI_MODEL.
+// writes the answer: the question text is all that is sent. Configured with AI_API_BASE, AI_API_KEY, AI_MODEL, and
+// AI_PROXY when the model is only reachable through a proxy (Tailscale, set by scripts/start.sh).
 import { TOPICS } from './ask.js';
 
 export const llmConfigured = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
 const base = () => String(process.env.AI_API_BASE || '').replace(/\/+$/, '');
-const model = () => process.env.AI_MODEL || 'auto:fast';
+const model = () => process.env.AI_MODEL || 'auto';
 
 const SYSTEM = `You turn questions about an eBay-to-Amazon dropshipping business into a data lookup.
 Reply with one JSON object and nothing else: {"topic": "...", "period": "...", "compare_to": "...", "product": "..."}
@@ -30,7 +31,7 @@ topic, pick exactly one:
 - recent_sales: the latest sales, or what sold on a day
 - awaiting_amazon: sales not yet bought on Amazon / waiting for the Amazon email
 - best_period: best or worst day, week or month
-- promotions: promoted listings, campaigns, ad rates, whether promotion paid off
+- promotions: promoted listings, ads, advertising, campaigns, ad rates, whether ads or promotion paid off
 - other: anything else
 period: the time words from the question ("this month", "august", "last 7 days", "last week", "all time"), or "" if none.
 compare_to: the second period when comparing two periods, else "".
@@ -43,33 +44,58 @@ function firstJson(s) {
   try { return JSON.parse(m[0]); } catch { return null; }
 }
 
-// { topic, period, compare_to, product } or null (not configured, failed, timed out, or an unknown topic)
+// Through AI_PROXY (an HTTP proxy, e.g. Tailscale's) when set, else a plain fetch
+let proxied = null;
+async function send(url, init) {
+  if (!process.env.AI_PROXY) return fetch(url, init);
+  if (!proxied) {
+    const { fetch: ufetch, ProxyAgent } = await import('undici');
+    const dispatcher = new ProxyAgent(process.env.AI_PROXY);
+    proxied = (u, i) => ufetch(u, { ...i, dispatcher });
+  }
+  return proxied(url, init);
+}
+
+// One read of the question: the topic JSON, or null for an error reply or one that isn't a known topic
+async function readOnce(question, signal) {
+  const res = await send(`${base()}/chat/completions`, {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.AI_API_KEY}` },
+    body: JSON.stringify({
+      model: model(),
+      temperature: 0,
+      max_tokens: 800, // room for providers that think before replying
+      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: String(question).slice(0, 500) }],
+    }),
+  });
+  if (!res.ok) { console.error(`AI model: ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
+  const body = await res.json();
+  const r = firstJson(body?.choices?.[0]?.message?.content);
+  if (!r || typeof r.topic !== 'string' || !TOPICS[r.topic]) return null;
+  const str = (v) => (typeof v === 'string' ? v.slice(0, 80) : '');
+  return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
+}
+
+// { topic, period, compare_to, product } or null (not configured, failed, timed out, or an unknown topic). A reply
+// that can't be used, or a first try that stalls, is asked once more (a router like FreeLLMAPI's "auto" may hand it to a
+// different provider). The first try gets 60% of the time, the second the rest, so the whole wait is timeoutMs.
 export async function routeQuestion(question, { timeoutMs = Number(process.env.AI_TIMEOUT_MS || 12000) } = {}) {
   if (!llmConfigured()) return null;
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${base()}/chat/completions`, {
-      method: 'POST',
-      signal: ctl.signal,
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.AI_API_KEY}` },
-      body: JSON.stringify({
-        model: model(),
-        temperature: 0,
-        max_tokens: 150,
-        messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: String(question).slice(0, 500) }],
-      }),
-    });
-    if (!res.ok) { console.error(`AI model: ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
-    const body = await res.json();
-    const r = firstJson(body?.choices?.[0]?.message?.content);
-    if (!r || typeof r.topic !== 'string' || !TOPICS[r.topic]) return null;
-    const str = (v) => (typeof v === 'string' ? v.slice(0, 80) : '');
-    return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
-  } catch (e) {
-    console.error(`AI model: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
-    return null;
-  } finally {
-    clearTimeout(timer);
+  const deadline = Date.now() + timeoutMs;
+  for (const ms of [Math.round(timeoutMs * 0.6), null]) {
+    const limit = ms ?? deadline - Date.now();
+    if (limit < 50) break;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), limit);
+    try {
+      const r = await readOnce(question, ctl.signal);
+      if (r) return r;
+    } catch (e) {
+      console.error(`AI model: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return null;
 }

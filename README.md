@@ -60,6 +60,14 @@ node scripts/stress-test.js 7 realistic
    **App Password** (myaccount.google.com/apppasswords, needs 2-Step Verification). App passwords don't expire.
    Alternative: set `INBOUND_TOKEN` and POST emails to `/api/email/inbound` from Zapier/Make/Apps Script.
 4. **Railway**: New project → Deploy from this GitHub repo → Variables: everything from `.env.example`, plus
-   `DASHBOARD_PASSWORD` and `SESSION_SECRET` (any long random string). Railway runs `npm start` and health-checks `/api/health`.
+   `DASHBOARD_PASSWORD` and `SESSION_SECRET` (any long random string). Railway runs `scripts/start.sh` and health-checks `/api/health`.
+5. **Ask AI model (optional)**: any OpenAI-compatible API reads the questions the built-in reader can't place (only the
+   question text is sent). For FreeLLMAPI running on your own PC over Tailscale:
+   - On the PC: `tailscale serve --bg 31415` (tailnet-only HTTPS in front of FreeLLMAPI; not Funnel).
+   - Tailscale admin → Settings → Keys → generate an auth key: **Ephemeral** on, Reusable on (so redeploys can rejoin).
+   - Railway Variables: `TS_AUTHKEY` = that key, `AI_API_BASE` = `https://<pc-name>.<tailnet>.ts.net/v1`,
+     `AI_API_KEY` = the FreeLLMAPI key, `AI_MODEL` = `auto`.
+   The server joins the tailnet in userspace mode and only the Ask AI request goes through it. When the PC is off,
+   Ask AI keeps working with the built-in reader.
 
 Local: `npm install`, copy `.env.example` to `.env`, `npm run dev`. With no `DATABASE_URL` it runs an embedded Postgres in `./.localdb`.
