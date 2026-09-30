@@ -60,6 +60,10 @@ export async function buildDataset({ sheets = true } = {}) {
   // row stay visible but aren't counted again; the sheet row takes their real date.
   const sheetMonths = new Set(ledger.map((l) => l.month));
   // Sales before the partnership started (default: the first sheet month) are not part of this business
+  // Refunds are grouped by pay cycle (26th-to-26th from Sep 2026), so a refund after a payment's cutoff lands in
+  // the next payment and never changes one already settled
+  const dueDay = Number(await getSetting('settlement_day')) || 26;
+  const cycleOf = (at) => settlePeriodOf(businessDay(at), dueDay);
   const startMonth = (await getSetting('business_start')) || [...new Set(allLedger.map((l) => l.month))].sort()[0] || null;
   // Unpaired sheet sale rows per month, used to flag eBay sales that are probably a reworded sheet row
   const unpairedSheetRows = group(ledger.filter((l) => !l.ebay_order_id && !l.is_refund), 'month');
@@ -72,6 +76,7 @@ export async function buildDataset({ sheets = true } = {}) {
   for (const o of orders) {
     const ov = ovBy.get(o.order_id) || {};
     const saleMonth = businessMonth(o.created_at);
+    const saleCycle = cycleOf(o.created_at); // the payment this sale settles in
     const items = (linesBy.get(o.order_id) || []).map((li) => ({
       title: li.title,
       sku: li.sku,
@@ -114,11 +119,11 @@ export async function buildDataset({ sheets = true } = {}) {
     const rawRevenue = num(o.revenue) || 0;
     const rawFees = num(o.ebay_fees) || 0;
 
-    // ---- refunds, booked in the month they happened (eBay Finances REFUND records carry the date and
+    // ---- refunds, booked in the pay cycle they happened (eBay Finances REFUND records carry the date and
     // the fee eBay credits back). Without Finances records, the order-level refund total is used.
     const txs = refundTxBy.get(o.order_id) || [];
     const hasTx = txs.length > 0;
-    const byMonth = new Map(); // month -> { refund, credit, amazonRefund, last }
+    const byMonth = new Map(); // pay cycle -> { refund, credit, amazonRefund, last }
     const bump = (m, k, v, at) => {
       if (!byMonth.has(m)) byMonth.set(m, { refund: 0, credit: 0, amazonRefund: 0, last: at });
       const e = byMonth.get(m);
@@ -127,18 +132,18 @@ export async function buildDataset({ sheets = true } = {}) {
     };
     for (const t of txs) {
       const at = t.transaction_at || o.created_at;
-      bump(businessMonth(at), 'refund', num(t.amount) || 0, iso(at));
-      bump(businessMonth(at), 'credit', num(t.fee_amount) || 0, iso(at));
+      bump(cycleOf(at), 'refund', num(t.amount) || 0, iso(at));
+      bump(cycleOf(at), 'credit', num(t.fee_amount) || 0, iso(at));
     }
     for (const a of amazonOrders) {
       // A cancelled purchase already costs $0: its refund email is the same money, not extra
       if (a.lines.length && a.lines.every((l) => /cancel/i.test(l.status || ''))) continue;
       for (const r of azRefundsBy.get(a.amazon_order_id) || []) {
         const at = r.received_at || o.created_at;
-        bump(businessMonth(at), 'amazonRefund', num(r.amount) || 0, iso(at));
+        bump(cycleOf(at), 'amazonRefund', num(r.amount) || 0, iso(at));
       }
     }
-    const same = byMonth.get(saleMonth) || { refund: 0, credit: 0, amazonRefund: 0 };
+    const same = byMonth.get(saleCycle) || { refund: 0, credit: 0, amazonRefund: 0 };
     const totalTxRefund = txs.reduce((s, t) => s + (num(t.amount) || 0), 0);
     const lastRefundAt = txs.map((t) => t.transaction_at).filter(Boolean).map(iso).sort().at(-1) || rets.map((r) => r.created_at).filter(Boolean).sort().at(-1) || null;
     const totalRefund = hasTx ? totalTxRefund : num(o.refund_total) || 0;
@@ -279,8 +284,8 @@ export async function buildDataset({ sheets = true } = {}) {
     if (beforeStart || ov.excluded || refundOverride !== null || cancelled) continue;
     if (!inSheet && !counted) continue; // the sale itself isn't in the books yet (e.g. awaiting cost)
     for (const [m, e] of byMonth) {
-      if (m === saleMonth && !inSheet) continue; // same-month refunds are on the order row
-      if (m < saleMonth) continue;
+      if (m === saleCycle && !inSheet) continue; // refunds in the sale's own pay cycle are on the order row
+      if (m < saleCycle) continue;
       if (inSheet && sheetMonths.has(m)) continue;
       if (!e.refund && !e.credit && !e.amazonRefund) continue;
       const ovAmazon = num(ov.amazon_refund) !== null; // a manual Amazon refund replaces email-dated ones
@@ -289,7 +294,7 @@ export async function buildDataset({ sheets = true } = {}) {
         order_id: `REFUND:${o.order_id}:${m}`,
         refund_of: o.order_id,
         created_at: e.last || iso(o.created_at),
-        business_month: m,
+        business_month: businessMonth(e.last || o.created_at), // analytics: the calendar month it happened
         buyer: o.buyer_username, ship_name: o.ship_name, ship_city: o.ship_city, ship_state: o.ship_state, ship_zip: o.ship_zip,
         fulfillment_status: null, cancel_state: null,
         title: `Refund · ${title}`,
@@ -376,7 +381,6 @@ export async function buildDataset({ sheets = true } = {}) {
   out.push(...events);
   // Which payment each row settles in (26th-to-26th from Sep 2026; see settlement.js). A sheet row without a real
   // eBay date stays in its sheet's month.
-  const dueDay = Number(await getSetting('settlement_day')) || 26;
   for (const r of out) r.settle_month = r.approx_date ? r.business_month : settlePeriodOf(businessDay(r.created_at), dueDay);
   out.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   return out;

@@ -199,6 +199,22 @@ await check('Gift card: $0.00 Grand Total never becomes a $0 cost; the sale wait
   assert.equal(o.status, 'awaiting_cost');
 });
 
+// 26th-to-26th pay cycles: a Nov 20 sale (Nov 26 payment) refunded Nov 28 (Dec 26 payment), same calendar month
+await order('CYC-NOV', '2026-11-20T18:00:00Z', 'Cycle Test Widget', 40);
+await q("insert into order_overrides (order_id, cost_override) values ('CYC-NOV', 20)");
+await tx('T8', 'CYC-NOV', 'REFUND', 40, 5.44, '2026-11-28T18:00:00Z');
+await check('a refund after the 26th cutoff goes on the next payment; the paid one never changes', async () => {
+  const { data, s } = await settle('2026-11');
+  const sale = data.find((o) => o.order_id === 'CYC-NOV');
+  assert.equal(sale.refunds, 0, 'the November payment keeps the full sale');
+  assert.equal(s.orders >= 1 && data.filter((o) => o.counted && o.settle_month === '2026-11').some((o) => o.order_id === 'CYC-NOV'), true);
+  const ev = data.find((o) => o.order_id === 'REFUND:CYC-NOV:2026-12');
+  assert.ok(ev, 'a refund line in the December payment');
+  assert.equal(ev.settle_month, '2026-12');
+  assert.equal(ev.business_month, '2026-11', 'analytics show it in November, when it happened');
+  assert.equal(ev.net, -34.56); // -$40 refund + $5.44 fee credit
+});
+
 await check('Sheet months still equal the sheets after all of the above', async () => {
   for (const [m, p, sends] of [['2026-07', -27.56, 217.63], ['2026-08', 129.49, 1304.76], ['2026-09', 104.88, 625.65]]) {
     const { s } = await settle(m);
