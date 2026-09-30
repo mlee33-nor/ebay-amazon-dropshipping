@@ -14,8 +14,10 @@ const isoDate = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : d);
 // Days after a sale with no Amazon order found before it counts as not a dropship sale
 const NOT_DROPSHIP_AFTER_DAYS = 10;
 
-export async function buildDataset() {
-  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, ledger, refundTx] = await Promise.all([
+// { sheets: false } builds from live eBay/Amazon data only, ignoring uploaded sheets (to check the live numbers
+// against a sheet kept by hand)
+export async function buildDataset({ sheets = true } = {}) {
+  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx] = await Promise.all([
     q(`select order_id, created_at, buyer_username, ship_name, ship_city, ship_state, ship_zip, ship_country,
               fulfillment_status, payment_status, cancel_state, item_subtotal, shipping_charged, discount,
               tax_collected, revenue, ebay_fees, fee_credit, ad_fees, refund_total, tracking_numbers
@@ -32,6 +34,7 @@ export async function buildDataset() {
     q("select order_id, amount, fee_amount, transaction_at from ebay_transactions where type = 'REFUND'"),
   ]);
 
+  const ledger = sheets ? allLedger : [];
   const group = (rows, key) => {
     const m = new Map();
     for (const r of rows) {
@@ -57,7 +60,7 @@ export async function buildDataset() {
   // row stay visible but aren't counted again; the sheet row takes their real date.
   const sheetMonths = new Set(ledger.map((l) => l.month));
   // Sales before the partnership started (default: the first sheet month) are not part of this business
-  const startMonth = (await getSetting('business_start')) || [...sheetMonths].sort()[0] || null;
+  const startMonth = (await getSetting('business_start')) || [...new Set(allLedger.map((l) => l.month))].sort()[0] || null;
   // Unpaired sheet sale rows per month, used to flag eBay sales that are probably a reworded sheet row
   const unpairedSheetRows = group(ledger.filter((l) => !l.ebay_order_id && !l.is_refund), 'month');
 
