@@ -87,7 +87,7 @@ app.get('/api/data', wrap(async (_req, res) => {
     emailStatus(),
     buildBooks(),
   ]);
-  res.json({ orders, ebay: status, email, amazon: { ...amazonStats, suggestions }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
+  res.json({ orders, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
 }));
 
 async function runMatcherSuggestionsCount() {

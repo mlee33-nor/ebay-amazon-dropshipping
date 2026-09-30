@@ -159,8 +159,10 @@ async function ingest(messageId, receivedAt, subject, p) {
     }
   } else if (p.kind === 'refund') {
     if (p.orderIds.length === 1 && p.refund) {
-      await q('insert into amazon_refunds (message_id, amazon_order_id, amount, received_at) values ($1,$2,$3,$4) on conflict do nothing',
-        [messageId, p.orderIds[0], p.refund, receivedAt]);
+      const item = p.itemTitle || null;
+      await q(`insert into amazon_refunds (message_id, amazon_order_id, amount, received_at, title) values ($1,$2,$3,$4,$5)
+               on conflict (message_id, amazon_order_id) do update set title = coalesce(amazon_refunds.title, excluded.title)`,
+        [messageId, p.orderIds[0], p.refund, receivedAt, item]);
     } else { ok = false; note = 'refund email without a single order number + amount'; }
   } else if (p.kind === 'cancel') {
     if (p.fullOrder && p.orderIds.length === 1) {

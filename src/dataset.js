@@ -5,7 +5,7 @@ import { q, num, getSetting } from './db.js';
 import { businessMonth, businessDay } from './time.js';
 import { sheetTitleMatch } from './ledger.js';
 import { loadUnlinkedAmazon, scorePair } from './matcher.js';
-import { settlePeriodOf } from '../public/js/settlement.js';
+import { settlePeriodOf, CYCLE_START } from '../public/js/settlement.js';
 
 const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
@@ -17,7 +17,7 @@ const NOT_DROPSHIP_AFTER_DAYS = 10;
 // { sheets: false } builds from live eBay/Amazon data only, ignoring uploaded sheets (to check the live numbers
 // against a sheet kept by hand)
 export async function buildDataset({ sheets = true } = {}) {
-  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx] = await Promise.all([
+  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx, allAzIds] = await Promise.all([
     q(`select order_id, created_at, buyer_username, ship_name, ship_city, ship_state, ship_zip, ship_country,
               fulfillment_status, payment_status, cancel_state, item_subtotal, shipping_charged, discount,
               tax_collected, revenue, ebay_fees, fee_credit, ad_fees, refund_total, tracking_numbers
@@ -29,9 +29,10 @@ export async function buildDataset({ sheets = true } = {}) {
     q(`select l.line_key, l.amazon_order_id, l.order_date, l.asin, l.title, l.quantity, l.line_total, l.tax, l.shipping,
               l.order_status, l.tracking, l.cost_override, l.ignored, l.ship_name, l.ship_zip, l.source
        from amazon_lines l join order_links k on k.amazon_order_id = l.amazon_order_id`),
-    q('select amazon_order_id, amount, received_at from amazon_refunds'),
+    q('select amazon_order_id, amount, received_at, title from amazon_refunds'),
     q('select * from ledger_entries order by month, row_no'),
     q("select order_id, amount, fee_amount, transaction_at from ebay_transactions where type = 'REFUND'"),
+    q('select distinct amazon_order_id from amazon_lines'),
   ]);
 
   const ledger = sheets ? allLedger : [];
@@ -67,6 +68,32 @@ export async function buildDataset({ sheets = true } = {}) {
   const startMonth = (await getSetting('business_start')) || [...new Set(allLedger.map((l) => l.month))].sort()[0] || null;
   // Unpaired sheet sale rows per month, used to flag eBay sales that are probably a reworded sheet row
   const unpairedSheetRows = group(ledger.filter((l) => !l.ebay_order_id && !l.is_refund), 'month');
+
+  // Amazon refunds for purchases this inbox never saw (bought before its Amazon emails began) are matched to the one
+  // sale whose known Amazon cost (sheet or entered cost) equals the refund to the cent, sold within 120 days before
+  // it, whose title fits the item the refund email names. No single fit: listed for review, never guessed.
+  const knownAz = new Set(allAzIds.map((r) => r.amazon_order_id));
+  const orphanRefundsBy = new Map(); // eBay order id -> Amazon refunds matched to it
+  const unmatchedRefunds = [];
+  const words = (t) => new Set(String(t || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []);
+  for (const r of azRefunds.filter((x) => !knownAz.has(x.amazon_order_id))) {
+    const amount = num(r.amount) || 0;
+    const at = new Date(r.received_at || 0).getTime();
+    const named = words(r.title);
+    const fits = orders.filter((o) => {
+      const t = new Date(o.created_at).getTime();
+      if (!(t < at && at - t <= 120 * 86400_000)) return false;
+      const cost = num(ovBy.get(o.order_id)?.cost_override) ?? num(ledgerByEbay.get(o.order_id)?.amazon_cost);
+      if (cost === null || Math.abs(cost - amount) > 0.005) return false;
+      if (!named.size) return true;
+      const own = words((linesBy.get(o.order_id) || [])[0]?.title || ledgerByEbay.get(o.order_id)?.title);
+      return [...named].filter((w) => own.has(w)).length >= Math.min(2, named.size);
+    });
+    if (fits.length === 1) {
+      if (!orphanRefundsBy.has(fits[0].order_id)) orphanRefundsBy.set(fits[0].order_id, []);
+      orphanRefundsBy.get(fits[0].order_id).push(r);
+    } else unmatchedRefunds.push({ amazon_order_id: r.amazon_order_id, amount, received_at: iso(r.received_at), title: r.title || null, candidates: fits.map((o) => o.order_id) });
+  }
 
   // Unlinked Amazon orders: a refunded sale is only assumed to have had no purchase if none of these could be its purchase
   const unlinkedAmazon = await loadUnlinkedAmazon();
@@ -142,6 +169,10 @@ export async function buildDataset({ sheets = true } = {}) {
         const at = r.received_at || o.created_at;
         bump(cycleOf(at), 'amazonRefund', num(r.amount) || 0, iso(at));
       }
+    }
+    for (const r of orphanRefundsBy.get(o.order_id) || []) {
+      const at = r.received_at || o.created_at;
+      bump(cycleOf(at), 'amazonRefund', num(r.amount) || 0, iso(at));
     }
     const same = byMonth.get(saleCycle) || { refund: 0, credit: 0, amazonRefund: 0 };
     const totalTxRefund = txs.reduce((s, t) => s + (num(t.amount) || 0), 0);
@@ -286,7 +317,9 @@ export async function buildDataset({ sheets = true } = {}) {
     for (const [m, e] of byMonth) {
       if (m === saleCycle && !inSheet) continue; // refunds in the sale's own pay cycle are on the order row
       if (m < saleCycle) continue;
-      if (inSheet && sheetMonths.has(m)) continue;
+      // A sheet month's sheet already shows its refunds (through August, and any refund row it has). A refund
+      // the sheet doesn't have is booked, so the books don't depend on the sheet being complete.
+      if (inSheet && sheetMonths.has(m) && (m < CYCLE_START || refundRowByEbay.get(o.order_id)?.month === m)) continue;
       if (!e.refund && !e.credit && !e.amazonRefund) continue;
       const ovAmazon = num(ov.amazon_refund) !== null; // a manual Amazon refund replaces email-dated ones
       const azr = ovAmazon ? 0 : e.amazonRefund;
@@ -383,6 +416,7 @@ export async function buildDataset({ sheets = true } = {}) {
   // eBay date stays in its sheet's month.
   for (const r of out) r.settle_month = r.approx_date ? r.business_month : settlePeriodOf(businessDay(r.created_at), dueDay);
   out.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  out.unmatchedRefunds = unmatchedRefunds; // not serialized with the rows; /api/data sends it separately
   return out;
 }
 

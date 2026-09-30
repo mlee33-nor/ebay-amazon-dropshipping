@@ -215,6 +215,29 @@ await check('a refund after the 26th cutoff goes on the next payment; the paid o
   assert.equal(ev.net, -34.56); // -$40 refund + $5.44 fee credit
 });
 
+// Amazon refunds for purchases the inbox never saw (e.g. the Govee Control Box, bought before the emails began)
+await order('ORPH-1', '2026-11-03T18:00:00Z', 'Govee Control Box for Govee Permanent Outdoor Lights', 64.99);
+await q("insert into order_overrides (order_id, cost_override) values ('ORPH-1', 42.89)");
+await q("insert into amazon_refunds (message_id, amazon_order_id, amount, received_at, title) values ('m-orph-1', '114-9999999-0000001', 42.89, '2026-11-29T03:23:00Z', 'Govee Control Box for Govee')");
+await order('ORPH-2', '2026-11-04T18:00:00Z', 'Blue Widget', 60);
+await order('ORPH-3', '2026-11-05T18:00:00Z', 'Red Gadget', 60);
+await q("insert into order_overrides (order_id, cost_override) values ('ORPH-2', 44.44), ('ORPH-3', 44.44)");
+await q("insert into amazon_refunds (message_id, amazon_order_id, amount, received_at) values ('m-orph-2', '114-9999999-0000002', 44.44, '2026-11-20T18:00:00Z')");
+await check('an Amazon refund for a purchase the inbox never saw is matched by exact cost + item name, on the next payment', async () => {
+  const data = await buildDataset();
+  const ev = data.find((o) => o.order_id === 'REFUND:ORPH-1:2026-12');
+  assert.ok(ev, 'refund line on the Dec 26 payment (refund came Nov 28 Arizona time)');
+  assert.equal(ev.amazon_refund, 42.89);
+  assert.equal(data.find((o) => o.order_id === 'ORPH-1').amazon_refund, 0, 'the November sale itself is unchanged');
+});
+await check('a refund that fits two sales is listed for review, never guessed', async () => {
+  const data = await buildDataset();
+  const u = data.unmatchedRefunds.find((r) => r.amazon_order_id === '114-9999999-0000002');
+  assert.ok(u, 'listed as unmatched');
+  assert.deepEqual(u.candidates.sort(), ['ORPH-2', 'ORPH-3']);
+  assert.ok(!data.some((o) => /^REFUND:ORPH-[23]:/.test(o.order_id)), 'not booked on either sale');
+});
+
 await check('Sheet months still equal the sheets after all of the above', async () => {
   for (const [m, p, sends] of [['2026-07', -27.56, 217.63], ['2026-08', 129.49, 1304.76], ['2026-09', 104.88, 625.65]]) {
     const { s } = await settle(m);

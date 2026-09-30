@@ -233,6 +233,8 @@ create table if not exists amazon_refunds (
   received_at     timestamptz,
   primary key (message_id, amazon_order_id)
 );
+-- the item named in the refund email ("Refund issued for <item>"), used to match refunds for purchases this inbox never saw
+alter table amazon_refunds add column if not exists title text;
 -- eBay listing analytics (src/listings.js)
 create table if not exists ebay_listings (
   item_id            text primary key,

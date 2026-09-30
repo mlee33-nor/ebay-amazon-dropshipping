@@ -462,6 +462,10 @@ function setupBanner() {
     out.push(notice({ key: 'email-stale', text: `<b>Amazon email hasn't been checked since ${fmtDateTime(d.email.last.at)}.</b> It normally runs every 30 minutes.`, action: 'Details', href: '#/settings?focus=email' }));
   if (!d.email.configured)
     out.push(notice({ key: 'email-setup', kind: 'info', icon: ICONS.mail, soft: true, text: '<b>Amazon email import is off.</b> Add a Gmail App Password so every Amazon purchase and its cost arrives automatically.', action: 'Set up', href: '#/settings?focus=email' }));
+  // Amazon refunds that couldn't be tied to one sale are not in the settlement until someone places them
+  const unplaced = d.amazon?.unmatchedRefunds || [];
+  if (unplaced.length)
+    out.push(notice({ key: 'refund-unmatched', kind: 'bad', text: `<b>${unplaced.length === 1 ? 'An Amazon refund isn’t' : `${unplaced.length} Amazon refunds aren’t`} in the settlement yet.</b> It couldn’t be matched to exactly one sale. ${unplaced.slice(0, 3).map((r) => `<span class="muted">${money(r.amount, 2)} on ${fmtDate(r.received_at)}${r.title ? ` for “${esc(r.title.slice(0, 50))}”` : ''} (Amazon order ${esc(r.amazon_order_id)})</span>`).join(' ')} Set that sale’s Amazon refund in the Editor.`, action: 'Open Editor', href: '#/editor' }));
   if (d.orders.some((o) => o.order_id.startsWith('DEMO-')))
     out.push(notice({ key: 'demo', kind: 'info', icon: ICONS.info, soft: true, text: "<b>You're looking at demo data.</b> It shows how the dashboard works before your real eBay and Amazon data arrives. Remove it any time.", action: 'Remove demo data', href: '#/settings' }));
   const html = out.filter(Boolean).join('');
