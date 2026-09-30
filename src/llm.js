@@ -78,27 +78,36 @@ async function readOnce(question, signal) {
   return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
 }
 
-// { topic, period, compare_to, product } or null (not configured, failed, timed out, or an unknown topic). A reply
-// that can't be used, or a first try that stalls, is asked once more (a router like FreeLLMAPI's "auto" may hand it to a
-// different provider). The first try gets 60% of the time, the second the rest, so the whole wait is timeoutMs.
-export async function routeQuestion(question, { timeoutMs = Number(process.env.AI_TIMEOUT_MS || 12000) } = {}) {
+// { topic, period, compare_to, product } or null (not configured, failed, timed out, or an unknown topic). A router like
+// FreeLLMAPI's "auto" hands each request to some provider, and some are slow or reply with nothing usable. So a second
+// request starts right away when the first fails, or after hedgeMs while it is still thinking; the first usable
+// reply wins and the other is cancelled. Never more than two requests, never longer than timeoutMs.
+export async function routeQuestion(question, { timeoutMs = Number(process.env.AI_TIMEOUT_MS || 15000), hedgeMs = Math.min(3500, timeoutMs * 0.4) } = {}) {
   if (!llmConfigured()) return null;
-  const deadline = Date.now() + timeoutMs;
-  for (const ms of [Math.round(timeoutMs * 0.6), null]) {
-    const limit = ms ?? deadline - Date.now();
-    if (limit < 50) break;
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), limit);
-    try {
-      const r = await readOnce(question, ctl.signal);
-      if (r) return r;
-    } catch (e) {
-      console.error(`AI model: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return null;
+  const ctls = [];
+  let launched = 0;
+  let settled = 0;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (done) return; done = true; clearTimeout(hedge); clearTimeout(cutoff); ctls.forEach((c) => c.abort()); resolve(r); };
+    const launch = () => {
+      if (done || launched >= 2) return;
+      launched++;
+      const ctl = new AbortController();
+      ctls.push(ctl);
+      readOnce(question, ctl.signal)
+        .catch((e) => { if (!done && e.name !== 'AbortError') console.error(`AI model: ${e.message}`); return null; })
+        .then((r) => {
+          settled++;
+          if (r) return finish(r);
+          if (launched < 2) launch(); // the first failed: ask again now rather than waiting
+          else if (settled >= 2) finish(null);
+        });
+    };
+    const hedge = setTimeout(launch, hedgeMs);
+    const cutoff = setTimeout(() => { if (!done) console.error('AI model: timed out'); finish(null); }, timeoutMs);
+    launch();
+  });
 }
 
 // Startup check for the deploy log: can the server reach the model? Logs the outcome only, never the key.

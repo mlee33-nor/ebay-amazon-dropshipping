@@ -330,7 +330,7 @@ export async function buildDataset({ sheets = true } = {}) {
         business_month: businessMonth(e.last || o.created_at), // analytics: the calendar month it happened
         buyer: o.buyer_username, ship_name: o.ship_name, ship_city: o.ship_city, ship_state: o.ship_state, ship_zip: o.ship_zip,
         fulfillment_status: null, cancel_state: null,
-        title: `Refund · ${title}`,
+        title: `Refund · ${led?.title || title}`, // a sheet sale's refund carries the sheet's name, so they group together
         item_id: items[0]?.item_id || null,
         items: [],
         units: 0,
