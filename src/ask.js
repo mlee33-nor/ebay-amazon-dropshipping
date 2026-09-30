@@ -254,7 +254,7 @@ const RULES = [
   ['help', /^(hi|hey|hello|yo|help|thanks|thank you|ok|okay)\b|\bwhat can (you|i) (do|ask)\b|\bhow does this work\b/],
   ['why', /\b(why|how come|what happened|what went wrong|reasons?|explain|what caused|what'?s causing)\b/],
   ['awaiting', /\b(awaiting|waiting (on|for)|not (yet )?(been )?(ordered|bought|purchased)|havent (we |you |i )?(yet )?(ordered|bought|purchased)|(ordered|bought) yet|still need to (order|buy)|needs? to be (ordered|bought)|need to (order|buy)|unmatched|no amazon (order|purchase|match|email)|without an? amazon|missing (amazon|cost)|not matched)\b/],
-  ['promotions', /^(?!.*\bfees?\b).*\b(promot\w*|campaigns?|ad rates?)\b/],
+  ['promotions', /^(?!.*\bfees?\b).*\b(promot\w*|campaigns?|ad rates?|ads|advertis\w*)\b/],
   ['fees', /\b(fees?|advertising|ad spend|promoted)\b/],
   ['listings', /\b(listings?|listed|delist\w*|posted|posting|views?|viewed|watchers?|watching|watch ?count|impressions?|traffic|stale|inventory)\b/],
   ['best_period', /\b(best|worst|biggest|highest|lowest|slowest|busiest|strongest|weakest|top)\s+(day|week|month|weekday)s?\b/],
