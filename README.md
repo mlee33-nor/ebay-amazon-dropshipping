@@ -66,7 +66,9 @@ node scripts/stress-test.js 7 realistic
    - On the PC: `tailscale serve --bg 31415` (tailnet-only HTTPS in front of FreeLLMAPI; not Funnel).
    - Tailscale admin → Settings → Keys → generate an auth key: **Ephemeral** on, Reusable on (so redeploys can rejoin).
    - Railway Variables: `TS_AUTHKEY` = that key, `AI_API_BASE` = `https://<pc-name>.<tailnet>.ts.net/v1`,
-     `AI_API_KEY` = the FreeLLMAPI key, `AI_MODEL` = `auto`.
+     `AI_API_KEY` = the FreeLLMAPI key, `AI_MODEL` = `auto`. Tailscale's userspace proxy can't look up tailnet names, so also run
+     `tailscale serve --bg --http=80 http://127.0.0.1:31415` and use `AI_API_BASE` = `http://<pc tailscale ip>/v1` with
+     `AI_HOST` = `<pc-name>.<tailnet>.ts.net` (traffic inside the tailnet is already encrypted).
    The server joins the tailnet in userspace mode and only the Ask AI request goes through it. When the PC is off,
    Ask AI keeps working with the built-in reader.
 

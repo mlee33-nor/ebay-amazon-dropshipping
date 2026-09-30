@@ -44,16 +44,17 @@ function firstJson(s) {
   try { return JSON.parse(m[0]); } catch { return null; }
 }
 
-// Through AI_PROXY (an HTTP proxy, e.g. Tailscale's) when set, else a plain fetch
-let proxied = null;
-async function send(url, init) {
-  if (!process.env.AI_PROXY) return fetch(url, init);
-  if (!proxied) {
-    const { fetch: ufetch, ProxyAgent } = await import('undici');
-    const dispatcher = new ProxyAgent(process.env.AI_PROXY);
-    proxied = (u, i) => ufetch(u, { ...i, dispatcher });
-  }
-  return proxied(url, init);
+// Through AI_PROXY (an HTTP proxy, e.g. Tailscale's) when set. AI_HOST sends that Host name while connecting to the
+// address in AI_API_BASE: Tailscale's proxy can't look up tailnet names, so the base is the PC's Tailscale IP and
+// `tailscale serve` still needs its name to route the request. fetch() can't set Host, so this uses undici.request.
+let dispatcher;
+async function send(url, { method = 'GET', headers = {}, body, signal } = {}) {
+  const u = await import('undici');
+  if (process.env.AI_PROXY && !dispatcher) dispatcher = new u.ProxyAgent(process.env.AI_PROXY);
+  const h = { ...headers, ...(process.env.AI_HOST ? { host: process.env.AI_HOST } : {}) };
+  const res = await u.request(url, { method, headers: h, body, signal, ...(process.env.AI_PROXY ? { dispatcher } : {}) });
+  const text = await res.body.text();
+  return { ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text, json: async () => JSON.parse(text) };
 }
 
 // One read of the question: the topic JSON, or null for an error reply or one that isn't a known topic
