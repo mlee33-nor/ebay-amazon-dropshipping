@@ -6,6 +6,9 @@
 if [ -n "$TS_AUTHKEY" ]; then
   if command -v tailscaled >/dev/null 2>&1; then
     mkdir -p /tmp/tailscale
+    # Railway drops large UDP packets on the direct path (small replies arrive, big ones stall), so traffic goes
+    # through Tailscale's relays over TCP instead. TS_DIRECT=1 turns that off.
+    [ "$TS_DIRECT" = "1" ] || export TS_DEBUG_ALWAYS_USE_DERP=true
     tailscaled --tun=userspace-networking --state=mem: --socket=/tmp/tailscale/sock \
       --outbound-http-proxy-listen=127.0.0.1:1055 >/tmp/tailscale/log 2>&1 &
     (
