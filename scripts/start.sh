@@ -14,8 +14,10 @@ if [ -n "$TS_AUTHKEY" ]; then
       if tailscale --socket=/tmp/tailscale/sock up --authkey="$TS_AUTHKEY" \
         --hostname="${TS_HOSTNAME:-dropship-dashboard}" --timeout=60s; then
         echo "Tailscale: connected"
+        tailscale --socket=/tmp/tailscale/sock status 2>&1 | head -5
       else
-        echo "Tailscale: could not connect (see /tmp/tailscale/log); Ask AI will use its built-in reader"
+        echo "Tailscale: could not connect; Ask AI will use its built-in reader. Last lines of its log:"
+        tail -20 /tmp/tailscale/log
       fi
     ) &
     export AI_PROXY="${AI_PROXY:-http://127.0.0.1:1055}"

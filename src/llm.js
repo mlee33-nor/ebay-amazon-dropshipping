@@ -99,3 +99,22 @@ export async function routeQuestion(question, { timeoutMs = Number(process.env.A
   }
   return null;
 }
+
+// Startup check for the deploy log: can the server reach the model? Logs the outcome only, never the key.
+export async function checkModel({ timeoutMs = 15000 } = {}) {
+  if (!llmConfigured()) return false;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await send(`${base()}/models`, { signal: ctl.signal, headers: { authorization: `Bearer ${process.env.AI_API_KEY}` } });
+    const body = await res.json().catch(() => null);
+    const n = Array.isArray(body?.data) ? body.data.length : 0;
+    console.log(res.ok ? `AI model: reachable (${n} models${process.env.AI_PROXY ? ', through Tailscale' : ''})` : `AI model: ${res.status} from ${base()}`);
+    return res.ok;
+  } catch (e) {
+    console.error(`AI model: can't reach ${base()}: ${e.name === 'AbortError' ? 'timed out' : e.cause?.message || e.message}`);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}

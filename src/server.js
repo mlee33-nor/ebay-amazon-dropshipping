@@ -11,7 +11,7 @@ import { buildDataset, buildBooks } from './dataset.js';
 import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
 import { ask } from './ask.js';
-import { routeQuestion, llmConfigured } from './llm.js';
+import { routeQuestion, llmConfigured, checkModel } from './llm.js';
 import { syncListings, listingAnalytics } from './listings.js';
 import { promotionAnalytics, unpromotedListings } from './promotions.js';
 
@@ -365,6 +365,8 @@ if (every > 0) {
   setTimeout(tick, 5_000);
   setInterval(tick, every * 60_000);
 }
+// Ask AI model: check it can be reached once Tailscale (if used) has had time to connect, and again later if not
+if (llmConfigured()) setTimeout(() => checkModel().then((ok) => { if (!ok) setTimeout(checkModel, 90_000); }), 20_000);
 if (!ebayConfigured()) console.log('eBay not connected yet: set EBAY_CLIENT_ID / EBAY_CLIENT_SECRET / EBAY_RUNAME, then Settings -> Connect eBay');
 if (emailConfigured() && every > 0) {
   const tickMail = () => syncEmail().then((r) => console.log('Email sync:', r.log.join(' | '))).catch((e) => console.error('Email sync error', e));
