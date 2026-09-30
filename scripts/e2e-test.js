@@ -14,7 +14,9 @@ import assert from 'node:assert/strict';
 
 const E = 'E2E-';
 const now = Date.now();
-const saleAt = new Date(now - 26 * 3600_000); // yesterday
+// Yesterday at noon Arizona time, so the sale and its Amazon order (2 hours later) are on the same business day
+// whatever time the test runs
+const saleAt = new Date(`${new Date(now - 7 * 3600_000 - 86400_000).toISOString().slice(0, 10)}T19:00:00Z`);
 const orderId = `${E}27-14203-55891`;
 // Real-format Amazon order numbers (the parser only accepts ###-#######-#######); 999- never occurs in practice
 const amazonId = '999-9990001-0000001';

@@ -13,13 +13,16 @@ const { initDb, q, closeDb } = await import('../src/db.js');
 const { importLedgerCsv } = await import('../src/ledger.js');
 const { normalizeOrder, upsertOrder } = await import('../src/ebay.js');
 const { ask } = await import('../src/ask.js');
+const { businessDay } = await import('../src/time.js');
+// A moment ago, but always earlier today in Arizona (an hour ago is yesterday just after midnight)
+const justNowToday = () => { const t = Date.now() - 3600_000; return new Date(businessDay(t) === businessDay(Date.now()) ? t : Date.now() - 60_000).toISOString(); };
 await initDb();
 const sheetDir = process.env.LEDGER_SHEETS_DIR || path.resolve('private');
 for (const m of ['JUL', 'AUG', 'SEP']) await importLedgerCsv(fs.readFileSync(path.join(sheetDir, `sheet-${m}-26.csv`)), `sheet ${m} 26.csv`);
 await q("insert into settlements (month, paid, paid_at) values ('2026-07', 217.63, '2026-07-26'), ('2026-08', 1304.76, '2026-09-01') on conflict (month) do nothing");
 // A sale from an hour ago with no Amazon order yet (it must show as waiting, never counted)
 await upsertOrder(normalizeOrder({
-  orderId: 'WAIT-1', creationDate: new Date(Date.now() - 3600_000).toISOString(), orderFulfillmentStatus: 'NOT_STARTED', cancelStatus: { cancelState: 'NONE_REQUESTED' },
+  orderId: 'WAIT-1', creationDate: justNowToday(), orderFulfillmentStatus: 'NOT_STARTED', cancelStatus: { cancelState: 'NONE_REQUESTED' },
   pricingSummary: { priceSubtotal: { value: '90.24' }, total: { value: '90.24' } }, totalMarketplaceFee: { value: '12.27' },
   fulfillmentStartInstructions: [{ shippingStep: { shipTo: { fullName: 'Pat Doe', contactAddress: { city: 'Mesa', stateOrProvince: 'AZ' } } } }],
   lineItems: [{ lineItemId: 'WAIT-1-1', title: '8 Packs 16 Grit Blue Zirconia Cloth Flap Discs', quantity: 1, lineItemCost: { value: '90.24' }, total: { value: '90.24' } }],

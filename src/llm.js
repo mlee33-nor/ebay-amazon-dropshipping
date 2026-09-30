@@ -1,7 +1,8 @@
-// Hosted AI model for Ask AI (any OpenAI-compatible API, e.g. FreeLLMAPI). Its only job is to read a question the
-// built-in reader couldn't place and name the topic and period. It never sees the business's numbers and never
-// writes the answer: the question text is all that is sent. Configured with AI_API_BASE, AI_API_KEY, AI_MODEL, and
-// AI_PROXY when the model is only reachable through a proxy (Tailscale, set by scripts/start.sh).
+// Hosted AI model for Ask AI (any OpenAI-compatible API, e.g. FreeLLMAPI). It reads every question (topic and
+// period), the dashboard works out the answer from the books, and the model writes it in its own words from those
+// facts. A reply with any number that isn't in the facts is thrown away, so the figures are always the dashboard's.
+// Configured with AI_API_BASE, AI_API_KEY, AI_MODEL, AI_HOST, and AI_PROXY when the model is only reachable through a
+// proxy (Tailscale, set by scripts/start.sh).
 import { TOPICS } from './ask.js';
 
 export const llmConfigured = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
@@ -27,7 +28,7 @@ topic, pick exactly one:
 - top_products: best products, best sellers
 - worst_products: worst products, products losing money, what to stop selling
 - product: a question about one specific product (put its name in "product")
-- compare: compare two periods
+- compare: compare two periods, including "up or down vs August", "better than last month", "compared to July" (when only one period is named, put it in "period" and "this month" in "compare_to")
 - recent_sales: the latest sales, or what sold on a day
 - awaiting_amazon: sales not yet bought on Amazon / waiting for the Amazon email
 - best_period: best or worst day, week or month
@@ -57,57 +58,82 @@ async function send(url, { method = 'GET', headers = {}, body, signal } = {}) {
   return { ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text, json: async () => JSON.parse(text) };
 }
 
-// One read of the question: the topic JSON, or null for an error reply or one that isn't a known topic
-async function readOnce(question, signal) {
+// One chat request: the reply text, or null for an error reply
+async function chat(messages, signal, { maxTokens = 800 } = {}) {
   const res = await send(`${base()}/chat/completions`, {
     method: 'POST',
     signal,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.AI_API_KEY}` },
-    body: JSON.stringify({
-      model: model(),
-      temperature: 0,
-      max_tokens: 800, // room for providers that think before replying
-      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: String(question).slice(0, 500) }],
-    }),
+    body: JSON.stringify({ model: model(), temperature: 0, max_tokens: maxTokens, messages }), // room for providers that think first
   });
   if (!res.ok) { console.error(`AI model: ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
   const body = await res.json();
-  const r = firstJson(body?.choices?.[0]?.message?.content);
-  if (!r || typeof r.topic !== 'string' || !TOPICS[r.topic]) return null;
-  const str = (v) => (typeof v === 'string' ? v.slice(0, 80) : '');
-  return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
+  // A reply cut off at the length limit (a provider that spent it thinking) is not an answer
+  if (body?.choices?.[0]?.finish_reason === 'length') { console.error('AI model: reply was cut off, asking again'); return null; }
+  return body?.choices?.[0]?.message?.content ?? null;
 }
 
-// { topic, period, compare_to, product } or null (not configured, failed, timed out, or an unknown topic). A router like
-// FreeLLMAPI's "auto" hands each request to some provider, and some are slow or reply with nothing usable. So a second
-// request starts right away when the first fails, or after hedgeMs while it is still thinking; the first usable
-// reply wins and the other is cancelled. Never more than two requests, never longer than timeoutMs.
-export async function routeQuestion(question, { timeoutMs = Number(process.env.AI_TIMEOUT_MS || 15000), hedgeMs = Math.min(3500, timeoutMs * 0.4) } = {}) {
+// Up to two tries, one after the other (a router like FreeLLMAPI's "auto" may give the second try to another
+// provider). The first gets 40% of the time, the second the rest, so the whole wait is at most timeoutMs.
+async function twoTries(fn, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (const ms of [Math.round(timeoutMs * 0.4), null]) { // a stalled first provider is dropped sooner
+    const limit = ms ?? deadline - Date.now();
+    if (limit < 50) break;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), limit);
+    try {
+      const r = await fn(ctl.signal);
+      if (r) return r;
+    } catch (e) {
+      console.error(`AI model: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+// { topic, period, compare_to, product } or null (not configured, failed, timed out, or an unknown topic).
+// `prev` is what the previous question was about ({ intent, period }), so follow-ups ("and July?") read right.
+export async function routeQuestion(question, { prev = null, timeoutMs = Number(process.env.AI_TIMEOUT_MS || 40000) } = {}) {
   if (!llmConfigured()) return null;
-  const ctls = [];
-  let launched = 0;
-  let settled = 0;
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (r) => { if (done) return; done = true; clearTimeout(hedge); clearTimeout(cutoff); ctls.forEach((c) => c.abort()); resolve(r); };
-    const launch = () => {
-      if (done || launched >= 2) return;
-      launched++;
-      const ctl = new AbortController();
-      ctls.push(ctl);
-      readOnce(question, ctl.signal)
-        .catch((e) => { if (!done && e.name !== 'AbortError') console.error(`AI model: ${e.message}`); return null; })
-        .then((r) => {
-          settled++;
-          if (r) return finish(r);
-          if (launched < 2) launch(); // the first failed: ask again now rather than waiting
-          else if (settled >= 2) finish(null);
-        });
-    };
-    const hedge = setTimeout(launch, hedgeMs);
-    const cutoff = setTimeout(() => { if (!done) console.error('AI model: timed out'); finish(null); }, timeoutMs);
-    launch();
-  });
+  const before = prev?.intent ? `\n(The previous question was about: ${prev.intent}${prev.period?.label ? `, ${prev.period.label}` : ''}. A short follow-up like "and July?" keeps that topic.)` : '';
+  return twoTries(async (signal) => {
+    const r = firstJson(await chat([{ role: 'system', content: SYSTEM + before }, { role: 'user', content: String(question).slice(0, 500) }], signal));
+    if (!r || typeof r.topic !== 'string' || !TOPICS[r.topic]) return null;
+    const str = (v) => (typeof v === 'string' ? v.slice(0, 80) : '');
+    return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
+  }, timeoutMs);
+}
+
+const WRITER = `You are the assistant in a small eBay-to-Amazon dropshipping business's dashboard. Myles buys the items on Amazon; Drew collects the eBay payouts, pays operating costs and sends Myles his money on the 26th. Profit is split 50/50.
+Answer the user's question in plain, friendly words using ONLY the facts below, which the dashboard worked out from the books.
+Rules:
+- Copy every number exactly as it appears in the facts (same dollar amounts, counts, dates and percentages).
+- Never calculate, add, subtract, round, estimate or invent a number.
+- Keep who pays whom, and whether something is paid, owed or still building up, exactly as the facts say.
+- Don't mention anything that isn't in the facts. If the facts don't answer the question, say what they do show.
+- 1 to 4 short sentences, no headings or lists. You may put the single most important figure in **bold**.`;
+
+// Every number in a text, normalized ("$1,304.76" -> "1304.76", "7.0%" -> "7")
+const numbersIn = (s) => (String(s).match(/\d[\d,]*(?:\.\d+)?/g) || []).map((n) => String(Number(n.replace(/,/g, ''))));
+
+// The model's wording of an answer the dashboard computed, or null. The facts are the dashboard's own answer; the
+// reply is used only if every number in it appears in those facts or in the question (so no figure can be made up).
+export async function writeAnswer(question, facts, { timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 40000) } = {}) {
+  if (!llmConfigured()) return null;
+  const lines = [facts.text, ...(facts.bullets || []), ...(facts.table ? [facts.table.head.join(' | '), ...facts.table.rows.map((r) => r.join(' | '))] : [])]
+    .filter(Boolean).map((l) => String(l).replace(/\*\*/g, ''));
+  const allowed = new Set([...numbersIn(lines.join('\n')), ...numbersIn(question), ...numbersIn(WRITER)]); // + the 50/50 split, the 26th
+  return twoTries(async (signal) => {
+    const out = await chat([{ role: 'system', content: WRITER }, { role: 'user', content: `Question: ${String(question).slice(0, 500)}\n\nFacts:\n${lines.map((l) => `- ${l}`).join('\n')}` }], signal, { maxTokens: 1200 });
+    const text = String(out || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    if (!text) return null;
+    const bad = numbersIn(text).filter((n) => !allowed.has(n));
+    if (bad.length) { console.error(`AI model: reply used numbers not in the facts (${bad.slice(0, 5).join(', ')}); showing the dashboard's answer`); return null; }
+    return text.slice(0, 1500);
+  }, timeoutMs);
 }
 
 // Startup check for the deploy log: can the server reach the model? Logs the outcome only, never the key.

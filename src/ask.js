@@ -585,7 +585,7 @@ function answerMetric(ctx, it) {
       if (sm) {
         const st = settle(ctx, sm);
         const r = settlePeriodRange(sm, ctx.s.dueDay);
-        b.push(`${monthName(sm).split(' ')[0]} payment (sales ${dayLabel(r.from)}–${dayLabel(r.to)}): ${p.cycle ? '' : `${$(cents(st.businessProfit))} business profit, `}${ctx.s.B} sends ${ctx.s.A} ${$(cents(st.sellerSends))}.`);
+        b.push(`${monthName(sm).split(' ')[0]} payment (sales ${dayLabel(r.from)}–${dayLabel(r.to)}): ${p.cycle ? '' : `${$(cents(st.businessProfit))} business profit; `}it comes to ${$(cents(st.sellerSends))} for ${ctx.s.B} to send ${ctx.s.A}.`);
       }
       if (it.defaulted) { const all = stats(rowsFor(ctx, allTime(ctx))); b.push(`All time: ${$(all.net - opexIn(ctx, allTime(ctx)))} business profit from ${plural(all.n, 'sale')}.`); }
       return { text: `**Net business profit ${periodTitle(ctx, p)}: ${$(s.net - oc)}.**${waitNote}`, bullets: b, chips: [`Why are we ${s.net >= 0 ? 'up' : 'down'} ${p.label}?`, `Top products ${p.label}`, `How many sales ${p.label}?`] };
@@ -969,11 +969,14 @@ function fromRoute(route, ctx, question) {
 const DEFAULT_ALL = new Set(['top', 'worst', 'product', 'best_period']);
 const NO_PERIOD = new Set(['settlement', 'listings', 'listings_vs_sales', 'awaiting', 'recent', 'help', 'compare', 'promotions']);
 
-export async function ask(question, prev = null, route = null) {
+// route: the AI model's reading of the question. With { modelFirst: true } it decides the topic whenever it has one;
+// otherwise it is only used for a question the built-in reader couldn't place.
+export async function ask(question, prev = null, route = null, { modelFirst = false } = {}) {
   const ctx = await load();
   const parsed = understand(question, ctx, prev);
   const modelRead = fromRoute(route, ctx, question);
-  const routed = parsed.intent === 'help' ? modelRead : null;
+  // An explicit comparison ("vs August", "compared to July") is always a comparison, whatever the model picked
+  const routed = (modelFirst && !(parsed.intent === 'compare' && modelRead?.intent !== 'compare')) || parsed.intent === 'help' ? modelRead : null;
   const it = { ...(routed || parsed), raw: norm(question) };
   // "that month" with no earlier context: the model's reading of the conversation supplies the period
   if (!routed && !it.period && modelRead?.period && DEICTIC.test(it.raw)) { it.period = modelRead.period; it.periods = modelRead.periods; }

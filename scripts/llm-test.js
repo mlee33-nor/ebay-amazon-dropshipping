@@ -1,4 +1,4 @@
-// Hosted AI model connector (OpenAI-compatible, e.g. FreeLLMAPI) against a mock server: it only ever receives the
+// Hosted AI model connector (OpenAI-compatible, e.g. FreeLLMAPI) against a mock server: reading a question sends only the
 // question text, a bad or slow reply is ignored, an unusable reply is asked once more, an unknown topic is never used,
 // and with AI_PROXY set the request goes through that proxy (Tailscale on Railway).
 import http from 'node:http';
@@ -75,6 +75,25 @@ await check('never more than two tries', async () => {
   reply = 'no idea';
   assert.equal(await routeQuestion('x'), null);
   assert.equal(seen.length - before, 2);
+});
+
+const { writeAnswer } = await import('../src/llm.js');
+const facts = { text: '**Drew owes Myles $45.96** for October 2026.', bullets: ['Due Oct 26 (in 27 days)', 'Paid so far: $2,226.79'] };
+await check('the model writes the answer from the facts when every number matches', async () => {
+  reply = "Drew owes you **$45.96** for October, and it's due Oct 26.";
+  assert.equal(await writeAnswer('what does drew owe me', facts), reply);
+  const s = seen.at(-1);
+  assert.match(s.body.messages[1].content, /\$45\.96/, 'the facts are sent to write from');
+});
+await check('a written answer with a made-up number is thrown away (the dashboard\'s wording is used)', async () => {
+  reply = 'Drew owes you about $46 for October.';
+  const before = seen.length;
+  assert.equal(await writeAnswer('what does drew owe me', facts), null);
+  assert.equal(seen.length - before, 2, 'asked twice, then gave up');
+});
+await check('thinking tags from reasoning models are removed', async () => {
+  reply = '<think>45.96 plus 10 is 55.96</think>Drew owes you $45.96.';
+  assert.equal(await writeAnswer('what does drew owe me', facts), 'Drew owes you $45.96.');
 });
 
 // A small HTTP proxy standing in for Tailscale's (CONNECT tunnels and plain forwarding)

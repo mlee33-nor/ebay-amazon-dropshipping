@@ -11,7 +11,7 @@ import { buildDataset, buildBooks } from './dataset.js';
 import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
 import { ask } from './ask.js';
-import { routeQuestion, llmConfigured, checkModel } from './llm.js';
+import { routeQuestion, writeAnswer, llmConfigured, checkModel } from './llm.js';
 import { syncListings, listingAnalytics } from './listings.js';
 import { promotionAnalytics, unpromotedListings } from './promotions.js';
 
@@ -328,22 +328,41 @@ app.post('/api/demo/clear', wrap(async (_req, res) => {
   res.json({ ok: true });
 }));
 
-// ---------- Ask AI: answers written from the numbers (read-only). A question the built-in reader can't place is
-// read by the hosted AI model (only the question text is sent), then answered from the numbers the same way. ----------
-app.post('/api/ask', wrap(async (req, res) => {
+// ---------- Ask AI: the AI model (FreeLLMAPI) reads every question, the dashboard works the answer out from the books,
+// and the model writes it in its own words from those facts (any number not in the facts and the reply is dropped).
+// Progress streams as one JSON object per line so the page can show each step while it waits. If the model is off or
+// can't be reached, the built-in reader and the dashboard's own wording answer instead. ----------
+app.post('/api/ask', async (req, res) => {
   const question = String(req.body?.question || '').slice(0, 1000);
   if (!question.trim()) return res.status(400).json({ error: 'Ask a question' });
   const context = req.body?.context || null;
-  let a = await ask(question, context, null);
-  if (!a.understood && llmConfigured()) {
-    const route = await routeQuestion(question);
-    if (route && route.topic !== 'other') {
-      const b = await ask(question, context, route);
-      if (b.understood) a = b;
+  res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('cache-control', 'no-cache');
+  res.setHeader('x-accel-buffering', 'no');
+  const step = (o) => res.write(`${JSON.stringify(o)}\n`);
+  try {
+    const ai = llmConfigured();
+    let a = null;
+    if (ai) {
+      step({ stage: 'reading' });
+      const route = await routeQuestion(question, { prev: context });
+      if (route && route.topic !== 'other') { const b = await ask(question, context, route, { modelFirst: true }); if (b.understood) a = b; }
+      if (!a) step({ stage: 'reading', note: 'The AI model couldn’t place that question, so the built-in reader is answering.' });
     }
+    if (!a) a = await ask(question, context, null);
+    step({ stage: 'numbers', understood: a.understood || null });
+    if (ai && a.understood) {
+      step({ stage: 'writing' });
+      const text = await writeAnswer(question, a);
+      a = text ? { ...a, facts: { text: a.text, bullets: a.bullets || [], table: a.table || null }, text, bullets: [], table: null, writtenBy: 'model' } : { ...a, writtenBy: 'dashboard' };
+    }
+    step({ done: true, answer: a });
+  } catch (e) {
+    console.error(e);
+    step({ error: e.message });
   }
-  res.json(a);
-}));
+  res.end();
+});
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
