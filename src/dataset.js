@@ -5,6 +5,7 @@ import { q, num, getSetting } from './db.js';
 import { businessMonth, businessDay } from './time.js';
 import { sheetTitleMatch } from './ledger.js';
 import { loadUnlinkedAmazon, scorePair } from './matcher.js';
+import { settlePeriodOf } from '../public/js/settlement.js';
 
 const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
@@ -370,6 +371,10 @@ export async function buildDataset() {
     });
   }
   out.push(...events);
+  // Which payment each row settles in (26th-to-26th from Sep 2026; see settlement.js). A sheet row without a real
+  // eBay date stays in its sheet's month.
+  const dueDay = Number(await getSetting('settlement_day')) || 26;
+  for (const r of out) r.settle_month = r.approx_date ? r.business_month : settlePeriodOf(businessDay(r.created_at), dueDay);
   out.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   return out;
 }

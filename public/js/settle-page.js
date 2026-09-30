@@ -1,12 +1,14 @@
 // Settlement page: the monthly partner sheet, computed live from orders + operating expenses.
 import { $, $$, esc, money, count, fmtDate, api, toast, downloadCsv, ICONS, countUp, settlementDueDate, dueStatus, monthLabel as mLabel, settleView } from './util.js';
-import { settleMonth, allMonths } from './settlement.js';
+import { settleMonth, allMonths, settlePeriodRange } from './settlement.js';
 import { state, loadData, renderPage } from './app.js';
 import { mount, colors, tooltipBase, axisBase, ttRow, ttHead, shadowPointer } from './charts.js';
 
 let selected = null;
 const monthLabel = (m) => mLabel(m, 'long');
 const monthShort = (m) => mLabel(m, 'short');
+// "Aug 27 – Sep 26": the sale dates a payment covers
+const periodText = (m, dueDay) => { const r = settlePeriodRange(m, dueDay); const f = (d) => fmtDate(new Date(`${d}T12:00:00Z`), { month: 'short', day: 'numeric', timeZone: 'UTC' }); return `${f(r.from)} – ${f(r.to)}`; };
 const sumCents = (arr, f) => Math.round(arr.reduce((t, x) => t + Math.round((Number(f(x)) || 0) * 100), 0)) / 100;
 
 // Paid / owed state for one month, in words and colour. `v` is settleView(), `due` comes from dueStatus().
@@ -99,7 +101,7 @@ export function renderSettlement(el) {
   <div class="grid g-12">
     <div class="card settle-card c-5">
       <div class="settle-head">
-        <span class="eyebrow">${ICONS.wallet} ${monthLabel(selected)} settlement</span>
+        <span class="eyebrow" title="Sales from ${esc(periodText(selected, dueDay))} are in this payment">${ICONS.wallet} ${monthLabel(selected)} settlement · <span class="muted">${esc(periodText(selected, dueDay))}</span></span>
         <span class="pill ${duePillCls}" title="Settlements are due on the ${dueDay}th of each month">${ICONS.calendar} ${due.kind === 'paid' ? due.text : due.kind === 'later' || v.paid !== null ? `Due ${due.label}` : `${due.text} · ${due.label}`}</span>
       </div>
       <div class="settle-who">${avatar(v.from)}<b>${esc(v.from)}</b><span class="muted">sends</span>${ICONS.arrowRight.replace('<svg', '<svg class="arrow"')}${avatar(v.to)}<b>${esc(v.to)}</b></div>
