@@ -86,7 +86,7 @@ function recompute(d) {
   const keep = notCounted || (d.status === 'not_dropship' && !hasCost) || d.status === 'check_sheet' || d.status === 'cancelled' || d.status === 'cancelled_after_purchase';
   d.live_counted = !notCounted && !d.excluded && hasCost && !(d.cancelled && !cost);
   d.view_status = keep && !(d.status === 'check_sheet' && hasCost) ? d.status
-    : d.excluded ? 'excluded' : !hasCost ? (d.amazon_ids ? 'awaiting_cost' : 'awaiting_email') : refunds > 0 || d.has_returns ? 'returned' : d.net < 0 ? 'loss' : 'profitable';
+    : d.excluded ? 'excluded' : !hasCost ? (d.amazon_ids ? 'awaiting_cost' : 'awaiting_email') : d.return_open && !(refunds > 0) ? 'return_open' : refunds > 0 || d.has_returns ? 'returned' : d.net < 0 ? 'loss' : 'profitable';
   return d;
 }
 
@@ -96,7 +96,7 @@ function ebaySheet(focusOrder) {
   // Monthly-sheet rows carry their Amazon cost from the sheet, so they are costed like any linked order
   const rows = state.data.orders.map((o) => recompute({
     order_id: o.order_id, source: o.source, ebay_order_id: o.ebay_order_id || null, created_at: o.created_at, title: o.title, revenue: o.revenue, status: o.status, cancelled: o.cancelled,
-    base_fees: o.cancelled ? 0 : o.raw_fees, ad_fees: o.ad_fees, has_returns: o.returns.length > 0,
+    base_fees: o.cancelled ? 0 : o.raw_fees, ad_fees: o.ad_fees, has_returns: o.returns.length > 0, return_open: Boolean(o.return_open),
     base_refunds: o.cancelled ? 0 : o.raw_refunds, amazon_cost: o.amazon_cost, has_link: o.source === 'ledger' || (o.amazon_orders.length > 0 && o.cost_source === 'amazon'),
     cost_origin: o.source === 'ledger' ? 'sheet' : o.amazon_orders.length ? 'amazon' : null,
     amazon_ids: o.amazon_orders.map((a) => a.amazon_order_id).join(', '),

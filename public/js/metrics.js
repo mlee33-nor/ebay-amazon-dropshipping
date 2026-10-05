@@ -184,6 +184,7 @@ export const STATUS_META = {
   profitable: { label: 'Profitable', cls: 'good' },
   loss: { label: 'Loss', cls: 'bad' },
   returned: { label: 'Returned', cls: 'warn' },
+  return_open: { label: 'Return open', cls: 'warn' },
   awaiting_email: { label: 'Awaiting email', cls: 'info' },
   awaiting_cost: { label: 'Needs cost', cls: 'warn' },
   cancelled: { label: 'Cancelled', cls: '' },

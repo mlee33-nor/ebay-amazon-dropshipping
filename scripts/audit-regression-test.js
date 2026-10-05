@@ -145,7 +145,8 @@ await check('C2: a sale at 10:30pm Oct 31 Arizona time belongs to October for ev
 await order('C1-REF', '2026-10-10T18:00:00Z', 'Full refund gadget', 100, { fee: 13.6 });
 await q("insert into order_overrides (order_id, cost_override, amazon_refund) values ('C1-REF', 70, 70)");
 await tx('T1', 'C1-REF', 'SALE', 86.4, 13.6, '2026-10-10T18:00:00Z');
-await tx('T2', 'C1-REF', 'REFUND', 100, 13.2, '2026-10-14T18:00:00Z');
+// eBay's REFUND amount is what it took from the seller: the buyer's refund minus the fees it gave back
+await tx('T2', 'C1-REF', 'REFUND', 86.8, 13.2, '2026-10-14T18:00:00Z');
 await tx('T3', 'C1-REF', 'NON_SALE_CHARGE', 5, 0, '2026-10-11T18:00:00Z', { feeType: 'AD_FEE', booking: 'DEBIT' });
 await tx('T4', 'C1-REF', 'NON_SALE_CHARGE', 2, 0, '2026-10-20T18:00:00Z', { feeType: 'AD_FEE', booking: 'CREDIT' });
 await applyFinanceTotals(['C1-REF']);
@@ -163,11 +164,11 @@ await check('H4: ad fee = all charges minus all credits across syncs ($5 - $2 = 
 });
 
 // H1: refunds land in the month they happen
-await tx('T5', 'C3A-SEP', 'REFUND', 117, 15.2, '2026-10-05T18:00:00Z'); // sheet-covered Sep sale refunded in October
+await tx('T5', 'C3A-SEP', 'REFUND', 101.8, 15.2, '2026-10-05T18:00:00Z'); // sheet-covered Sep sale refunded in October
 await order('H1-OCT', '2026-10-06T18:00:00Z', 'October thing', 50, { fee: 6.8 });
 await q("insert into order_overrides (order_id, cost_override) values ('H1-OCT', 30)");
 await tx('T6', 'H1-OCT', 'SALE', 43.2, 6.8, '2026-10-06T18:00:00Z');
-await tx('T7', 'H1-OCT', 'REFUND', 50, 6.4, '2026-11-03T18:00:00Z');
+await tx('T7', 'H1-OCT', 'REFUND', 43.6, 6.4, '2026-11-03T18:00:00Z');
 await check('H1: an October refund of a September sheet sale is booked in October (September unchanged)', async () => {
   const { data, s } = await settle('2026-09');
   assert.equal(s.businessProfit, 104.88);
@@ -202,7 +203,7 @@ await check('Gift card: $0.00 Grand Total never becomes a $0 cost; the sale wait
 // 26th-to-26th pay cycles: a Nov 20 sale (Nov 26 payment) refunded Nov 28 (Dec 26 payment), same calendar month
 await order('CYC-NOV', '2026-11-20T18:00:00Z', 'Cycle Test Widget', 40);
 await q("insert into order_overrides (order_id, cost_override) values ('CYC-NOV', 20)");
-await tx('T8', 'CYC-NOV', 'REFUND', 40, 5.44, '2026-11-28T18:00:00Z');
+await tx('T8', 'CYC-NOV', 'REFUND', 34.56, 5.44, '2026-11-28T18:00:00Z');
 await check('a refund after the 26th cutoff goes on the next payment; the paid one never changes', async () => {
   const { data, s } = await settle('2026-11');
   const sale = data.find((o) => o.order_id === 'CYC-NOV');
@@ -236,6 +237,63 @@ await check('a refund that fits two sales is listed for review, never guessed', 
   assert.ok(u, 'listed as unmatched');
   assert.deepEqual(u.candidates.sort(), ['ORPH-2', 'ORPH-3']);
   assert.ok(!data.some((o) => /^REFUND:ORPH-[23]:/.test(o.order_id)), 'not booked on either sale');
+});
+
+// An open return (eBay holding the money, no refund yet) is flagged but still counted where it was settled
+await order('RET-OPEN', '2026-11-10T18:00:00Z', 'Open Return Widget', 142.41, { fee: 13.72 });
+await q("insert into order_overrides (order_id, cost_override) values ('RET-OPEN', 107.89)");
+await q(`insert into ebay_returns (return_id, order_id, item_id, state, status, reason, return_type, created_at, refund_amount, raw, synced_at)
+         values ('R-OPEN-1', 'RET-OPEN', null, 'ITEM_SHIPPED', 'ITEM_SHIPPED', 'ORDERED_WRONG_ITEM', 'MONEY_BACK', '2026-11-18T18:00:00Z', 142.41, '{}', now())`);
+await check('an open return is flagged "return open", still counted, with what a refund would take off', async () => {
+  const o = (await buildDataset()).find((x) => x.order_id === 'RET-OPEN');
+  assert.equal(o.status, 'return_open');
+  assert.equal(o.counted, true);
+  assert.equal(o.net, 20.8);
+  assert.equal(o.return_open.amount, 142.41);
+  assert.equal(o.return_open.profit_hit, 129.09); // $142.41 refund minus the $13.32 fee eBay gives back
+});
+await tx('T9', 'RET-OPEN', 'REFUND', 129.09, 13.32, '2026-11-30T18:00:00Z');
+await check('once the refund posts it is an ordinary refund on the payment for that day, and the flag goes away', async () => {
+  const data = await buildDataset();
+  const o = data.find((x) => x.order_id === 'RET-OPEN');
+  assert.equal(o.return_open, null);
+  assert.equal(o.status, 'returned');
+  const ev = data.find((x) => x.order_id === 'REFUND:RET-OPEN:2026-12');
+  assert.ok(ev, 'refund line on the December payment');
+  assert.equal(ev.net, -129.09);
+});
+
+// eBay's own records, copied: the Govee Control Box (all fees returned) and the Leg Straps (eBay kept $0.40)
+await order('REAL-GOVEE', '2026-11-02T18:00:00Z', 'Govee Control Box Real', 64.99, { fee: 9.25 });
+await q("insert into order_overrides (order_id, cost_override) values ('REAL-GOVEE', 42.89)");
+await tx('T10', 'REAL-GOVEE', 'REFUND', 55.74, 9.25, '2026-12-04T18:00:00Z');
+await order('REAL-STRAPS', '2026-11-09T18:00:00Z', 'Leg Straps Real', 26.59, { fee: 3.99 });
+await q("insert into order_overrides (order_id, cost_override) values ('REAL-STRAPS', 0)");
+await tx('T11', 'REAL-STRAPS', 'REFUND', 23.0, 3.59, '2026-11-10T18:00:00Z');
+await check('a later refund takes exactly what eBay took back (Govee: -$55.74, the whole payout)', async () => {
+  const ev = (await buildDataset()).find((o) => o.order_id === 'REFUND:REAL-GOVEE:2026-12');
+  assert.equal(ev.net, -55.74);
+  assert.equal(ev.refunds, 64.99, 'the buyer got the whole $64.99 back');
+});
+await check('a same-period refund nets to what eBay kept (Leg Straps: -$0.40)', async () => {
+  const o = (await buildDataset()).find((x) => x.order_id === 'REAL-STRAPS');
+  assert.equal(o.net, -0.4); // $22.60 paid out, $23.00 taken back
+});
+
+// The Govee case: Amazon's refund lands on a payment Drew already made, the buyer's refund on the next one. Both go
+// on the next unpaid payment as one line (= the sale's profit coming back), and the paid payment never changes.
+await order('PAID-SKIP', '2027-02-05T19:00:00Z', 'Paid Skip Control Box', 64.99, { fee: 9.25 });
+await q("insert into order_overrides (order_id, cost_override) values ('PAID-SKIP', 42.89)");
+await q("insert into amazon_refunds (message_id, amazon_order_id, amount, received_at, title) values ('m-skip', '114-8888888-0000001', 42.89, '2027-03-10T03:00:00Z', 'Paid Skip Control Box')");
+await q("insert into settlements (month, paid) values ('2027-03', 500)");
+await tx('T12', 'PAID-SKIP', 'REFUND', 55.74, 9.25, '2027-04-02T19:00:00Z');
+await check('a refund for a payment already made goes on the next unpaid one, merged with the rest of that sale\'s refunds', async () => {
+  const data = await buildDataset();
+  assert.ok(!data.some((o) => o.refund_of === 'PAID-SKIP' && o.settle_month === '2027-03'), 'nothing added to the paid March payment');
+  const ev = data.filter((o) => o.refund_of === 'PAID-SKIP');
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].settle_month, '2027-04');
+  assert.equal(ev[0].net, -12.85); // +$42.89 back from Amazon, -$55.74 to the buyer = the sale's $12.85 profit reversed
 });
 
 await check('Sheet months still equal the sheets after all of the above', async () => {

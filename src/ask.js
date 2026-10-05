@@ -714,6 +714,8 @@ function answerSettlement(ctx, it) {
     ...over.map((x) => `${payName(x.month)}: came to ${$(cents(x.sellerSends))}, ${B} paid ${$(cents(x.paid))}, so ${B} overpaid ${$(-owedOf(x))}.`),
     ...building.map((x) => `${payName(x.month)}: ${$(cents(x.sellerSends))} so far, ${whenDue(x.month)}.`),
     over.length && building.length ? `After the ${$(overTotal)} overpayment, ${B} would send ${$(cents(building.at(-1).sellerSends) - overTotal)} for ${monthName(building.at(-1).month).split(' ')[0]} so far.` : null,
+    // Returns still open: nothing refunded yet, so they're a heads-up, not part of any amount above
+    ...ctx.orders.filter((o) => o.counted && o.return_open).map((o) => `Return open on ${short(o.title, 40)}: ${$(cents(o.return_open.amount))} on hold since ${dayLabel(businessDay(o.return_open.since))}, not refunded yet. If it is, about ${$(cents(o.return_open.profit_hit))} comes off the profit, so ${B} sends about ${$(Math.round(cents(o.return_open.profit_hit) * ctx.s.split / 100))} less, on the payment for the day of the refund.`),
   ].filter(Boolean);
   // "Did Drew pay?" / "how much has he paid me" leads with the payments
   if ((/\b(paid|sent|received|gotten|got)\b/.test(it.raw || '') || /\bdid\b.*\b(pay|send)\b/.test(it.raw || '')) && !/\bowe/.test(it.raw || '')) {

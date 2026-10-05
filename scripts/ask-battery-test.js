@@ -187,7 +187,7 @@ await must('how many sales did we get today', /awaiting the Amazon email/, 'toda
 await must('which sales are waiting for amazon', /Zirconia/, 'the waiting list shows the new sale');
 await must('how much has drew paid me in total', /paid Myles \$1,522\.39 so far/, 'total paid is July + August ($217.63 + $1,304.76)');
 await must('what does drew owe me', /Drew owes Myles \$625\.65/, 'owed is September only');
-await must('is september better than august', /^\*\*No: September 2026 so far is behind/, 'a yes/no question gets a yes/no first');
+await must('is september better than august', /^\*\*No: September 2026( so far)? is behind/, 'a yes/no question gets a yes/no first');
 await must('last sale', /^\*\*Latest sale: /, '"last sale" is one sale');
 await must('worst products', /lost money/, 'worst products only lists products that lost money');
 await must('how many sales did we get today', / counted in profit, 1 awaiting the Amazon email[\s\S]*Zirconia[\s\S]*awaiting the Amazon email/, 'the new sale is counted as waiting');

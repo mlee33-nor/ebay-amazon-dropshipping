@@ -92,11 +92,20 @@ export function renderSettlement(el) {
   const sec = (n, title) => `<h4><span class="no">${n}</span>${title}</h4>`;
   const sumLine = `${esc(A)} pays Amazon · ${esc(B)} collects eBay and pays operating costs · profit split ${split}/${100 - split}`;
 
+  // Heads-up for returns still open: eBay holds the money but hasn't refunded, so nothing has moved yet. A refund
+  // comes off the payment for the day it happens; the Amazon partner's share of the profit is what changes hands.
+  const openReturns = d.orders.filter((o) => o.counted && o.return_open);
+  const returnsNote = openReturns.length ? `<div class="banner" style="margin-bottom:16px">${ICONS.clock}<div><b>${openReturns.length === 1 ? '1 return is open' : `${openReturns.length} returns are open`}, not refunded yet.</b> ${openReturns.map((o) => {
+    const r = o.return_open;
+    return `<span class="muted">${esc(o.title.slice(0, 48))}: ${money(r.amount, 2)} on hold since ${fmtDate(r.since)}. If refunded, about ${money(r.profit_hit, 2)} comes off the profit, so ${esc(B)} sends about ${money(Math.round(r.profit_hit * split) / 100, 2)} less, on the payment for the day of the refund.</span>`;
+  }).join(' ')}</div></div>` : '';
+
   el.innerHTML = `
   <div class="row" style="margin-bottom:16px;gap:12px">
     <div class="seg" id="st-months" role="tablist" aria-label="Month">${months.map((m) => `<button data-m="${m}" class="${m === selected ? 'on' : ''}" role="tab" aria-selected="${m === selected}">${monthShort(m)}</button>`).join('')}</div>
     <span class="muted" style="font-size:12.5px;margin-left:auto">${sumLine}</span>
   </div>
+  ${returnsNote}
 
   <div class="grid g-12">
     <div class="card settle-card c-5">

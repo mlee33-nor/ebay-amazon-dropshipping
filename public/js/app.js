@@ -392,7 +392,7 @@ const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded
 
 // Every status pill carries an icon as well as a colour, so state never relies on colour alone
 const STATUS_ICON = {
-  profitable: 'trendUp', loss: 'trendDown', returned: 'return', awaiting_cost: 'clock', awaiting_email: 'mail', cancelled: 'x',
+  profitable: 'trendUp', loss: 'trendDown', returned: 'return', return_open: 'clock', awaiting_cost: 'clock', awaiting_email: 'mail', cancelled: 'x',
   cancelled_after_purchase: 'circleX', excluded: 'eyeOff', not_dropship: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert',
 };
 export function statusPill(s) {
@@ -1213,7 +1213,7 @@ function orders(el) {
   const q = new URLSearchParams(location.hash.split('?')[1] || '');
   if (q.get('f')) state.ordersFilter = q.get('f');
   const filters = [
-    ['all', 'All'], ['profitable', 'Profitable'], ['loss', 'Loss'], ['returned', 'Returned'], ['awaiting_cost', 'Awaiting email'], ['cancelled', 'Cancelled'], ['excluded', 'Excluded'],
+    ['all', 'All'], ['profitable', 'Profitable'], ['loss', 'Loss'], ['returned', 'Returned'], ['return_open', 'Return open'], ['awaiting_cost', 'Awaiting email'], ['cancelled', 'Cancelled'], ['excluded', 'Excluded'],
   ];
   const counts = Object.fromEntries(filters.map(([k]) => [k, all.filter((o) => matchFilter(o, k)).length]));
   el.innerHTML = `<div class="card"><div class="sheet-bar">
@@ -1315,6 +1315,7 @@ export function openOrder(id) {
       ${o.items.map((i) => `<div class="sub-card"><div class="t">${esc(i.title)}</div><div class="m"><span>Qty ${i.quantity}</span>${sheet ? (i.unit_price > 0 ? `<span>${money(i.unit_price, 2)} payout (after fees)</span>` : '') : `<span>${money(i.unit_price)} each</span>`}${i.sku ? `<span class="mono">SKU ${esc(i.sku)}</span>` : ''}${i.item_id ? `<a href="https://www.ebay.com/itm/${esc(i.item_id)}" target="_blank" rel="noopener">View listing ↗</a>` : ''}</div></div>`).join('')}
 
       ${o.status === 'awaiting_cost' ? awaitingPanel(o) : ''}
+      ${o.return_open ? returnOpenPanel(o) : ''}
       <h4>Linked Amazon purchases</h4>
       ${o.amazon_orders.length ? o.amazon_orders.map((a) => `<div class="sub-card">
           <div class="row"><span class="mono">${esc(a.amazon_order_id)}</span><span class="pill ${a.method === 'manual' ? 'info' : 'good'}">${a.method === 'manual' ? 'Linked by hand' : 'Auto-matched'}</span><b style="margin-left:auto">${money(a.cost)}</b></div>
@@ -1345,6 +1346,15 @@ export function openOrder(id) {
   }));
 }
 // Uncosted sale: say exactly what is missing. Not counted in any numbers until it is resolved.
+// An open return: eBay is holding the money but hasn't refunded yet, so the sale still counts where it was settled
+function returnOpenPanel(o) {
+  const r = o.return_open;
+  const why = r.reason ? ` (${esc(r.reason.toLowerCase().replace(/_/g, ' '))})` : '';
+  return `<div class="await-box warn">
+      <div class="await-h">${ICONS.clock}<div><b>Return open since ${fmtDate(r.since)} · ${money(r.amount, 2)} on hold</b><div class="muted">The buyer started a return${why} and eBay is holding the money, but no refund has been issued, so nothing is lost yet and this sale still counts where it was settled. If it's refunded, about <b>${money(r.profit_hit, 2)}</b> comes off the profit on the payment for the day of the refund (eBay gives its fees back except $0.40). If the item goes back to Amazon, that refund is added too.</div></div></div>
+    </div>`;
+}
+
 function awaitingPanel(o) {
   if (viewStatus(o) === 'awaiting_email') {
     return `<div class="await-box">
