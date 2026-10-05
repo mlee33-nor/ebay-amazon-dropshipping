@@ -1430,9 +1430,10 @@ function returns(el) {
   if (!all.length) return emptyState(el);
   const c = colors();
   const s = summarize(all);
-  const ret = all.filter((o) => o.returns.length || o.refunds > 0);
+  // Only what's in the books: a sheet-covered sale appears once (its sheet row), and later refunds are their own lines
+  const ret = all.filter((o) => o.counted && (o.returns.length || o.refunds > 0 || o.return_open || o.source === 'refund'));
   const lossOnReturns = ret.filter((o) => o.counted).reduce((a, o) => a + Math.min(0, o.net), 0);
-  const open = ret.filter((o) => o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
+  const open = ret.filter((o) => o.return_open || o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
   const recovered = ret.reduce((a, o) => a + o.amazon_refund, 0);
   const needRecovery = ret.filter((o) => o.has_cost && !o.amazon_refund && o.cost > 0);
   const rs = refundSplit(all.filter((o) => o.counted));

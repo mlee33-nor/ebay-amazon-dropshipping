@@ -296,6 +296,19 @@ await check('a refund for a payment already made goes on the next unpaid one, me
   assert.equal(ev[0].net, -12.85); // +$42.89 back from Amazon, -$55.74 to the buyer = the sale's $12.85 profit reversed
 });
 
+// Drew paid May early (May 20); a May 24 refund of a May sale must not change what he already paid
+await order('EARLY-PAY', '2027-05-03T19:00:00Z', 'Early Pay Gadget', 40, { fee: 5.44 });
+await q("insert into order_overrides (order_id, cost_override) values ('EARLY-PAY', 20)");
+await q("insert into settlements (month, paid, paid_at) values ('2027-05', 300, '2027-05-20')");
+await tx('T13', 'EARLY-PAY', 'REFUND', 34.56, 5.44, '2027-05-24T19:00:00Z');
+await check('a refund after a payment was made (even inside its own period) goes on the next payment', async () => {
+  const data = await buildDataset();
+  assert.equal(data.find((o) => o.order_id === 'EARLY-PAY').refunds, 0, 'the paid May sale is unchanged');
+  const ev = data.find((o) => o.refund_of === 'EARLY-PAY');
+  assert.equal(ev?.settle_month, '2027-06');
+  assert.equal(ev.net, -34.56);
+});
+
 await check('Sheet months still equal the sheets after all of the above', async () => {
   for (const [m, p, sends] of [['2026-07', -27.56, 217.63], ['2026-08', 129.49, 1304.76], ['2026-09', 104.88, 625.65]]) {
     const { s } = await settle(m);
