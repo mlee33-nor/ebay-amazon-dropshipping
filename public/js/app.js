@@ -38,7 +38,7 @@ const PAGES = [
   { id: 'reports', label: 'Reports', icon: 'receipt', sub: 'Monthly statement for the partners and the year-end export for taxes', noRange: true, group: 'Partners' },
   { id: 'costs', label: 'Operating costs', icon: 'wallet', sub: 'Monthly business expenses that come out of profit before the split', noRange: true, group: 'Partners' },
   { id: 'editor', label: 'Editor', icon: 'editor', sub: 'Spreadsheet mode: manual adjustments and matching', noRange: true, group: 'Data' },
-  { id: 'import', label: 'Monthly sheets', icon: 'sheet', sub: 'Upload the partner settlement sheets', noRange: true, group: 'Data' },
+  { id: 'import', label: 'Monthly sheets', icon: 'sheet', sub: 'Check the partners\' sheets against the site', noRange: true, group: 'Data' },
   { id: 'settings', label: 'Settings', icon: 'settings', sub: 'eBay connection, Amazon email import, partners, goals', noRange: true, group: 'Data' },
 ];
 
@@ -1542,8 +1542,8 @@ async function importPage(el) {
       <label class="dropzone" id="dz">
         <input type="file" id="file" accept=".csv,text/csv" multiple hidden />
         <div class="dz-ic">${ICONS.sheet}</div>
-        <div class="t">Drop a monthly settlement sheet here</div>
-        <div class="s">The partner CSV with <b>Item Name · Amazon Cost · eBay Sale Price</b>. Re-uploading a month updates it; nothing is ever double-counted.</div>
+        <div class="t">Drop a monthly sheet to check it against the site</div>
+        <div class="s">The partner CSV with <b>Item Name · Amazon Cost · eBay Sale Price</b>. From October 2026 a sheet is only <b>checked</b>: every line is compared with the site and each difference explained. Nothing is changed, and a paid month is never rewritten.</div>
         <span class="btn sm">${ICONS.import} Choose files</span>
       </label>
       <div id="import-result" class="stack"></div>
@@ -1573,6 +1573,33 @@ async function importPage(el) {
 
   const okIcon = ICONS.check.replace('<svg', '<svg style="width:15px;height:15px;color:var(--good-ink);vertical-align:-2px"');
   const warnIcon = ICONS.alert.replace('<svg', '<svg style="width:15px;height:15px;color:var(--warn-ink);vertical-align:-2px"');
+  // A sheet checked against the site: totals side by side, then every line that differs and why
+  function sheetCheckCard(r) {
+    const diff = r.difference;
+    const same = diff !== null && Math.abs(diff) < 0.01;
+    const head = `<div class="result-grid">
+        <div class="result-cell"><div class="v">${r.sheet.sends === null ? '—' : money(r.sheet.sends, 2)}</div><div class="k">the sheet says Drew sends Myles</div></div>
+        <div class="result-cell"><div class="v pos">${money(r.site.sellerSends, 2)}</div><div class="k">the site (${count(r.site.orders)} lines on this payment)</div></div>
+        <div class="result-cell"><div class="v ${same ? 'pos' : 'neg'}">${diff === null ? '—' : same ? 'Match' : `${diff > 0 ? '+' : '−'}${money(Math.abs(diff), 2)}`}</div><div class="k">${diff === null ? 'no total on the sheet' : same ? 'sheet and site agree' : diff > 0 ? 'the sheet overpays Myles' : 'the sheet underpays Myles'}</div></div>
+        <div class="result-cell"><div class="v">${count(r.counts.matches)}</div><div class="k">lines match to the cent</div></div>
+      </div>`;
+    const row = (l) => {
+      const t = esc(l.sheet ? l.sheet.title : l.site.title);
+      const label = l.status === 'differs' ? '<span class="pill warn">differs</span>' : l.status === 'only_on_sheet' ? '<span class="pill bad">only on the sheet</span>' : '<span class="pill bad">missing from the sheet</span>';
+      const nums = `<span class="muted num">${l.sheet ? `sheet ${money(l.sheet.net, 2)}` : ''}${l.sheet && l.site ? ' · ' : ''}${l.site ? `site ${money(l.site.net, 2)}` : ''}</span>`;
+      return `<li>${label} <b>${t}</b> ${nums}<ul>${l.why.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></li>`;
+    };
+    const issues = r.lines.filter((l) => l.status !== 'matches');
+    const notes = r.lines.filter((l) => l.note);
+    const body = `${head}
+      ${r.structural.length ? `<div class="banner bad" style="margin-top:12px">${ICONS.alert}<div><b>The sheet's own math:</b><ul class="check-list">${r.structural.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
+      ${issues.length ? `<h4 style="margin:14px 0 6px">${issues.length} line${issues.length > 1 ? 's' : ''} to fix</h4><ul class="check-list">${issues.map(row).join('')}</ul>` : '<div class="pos" style="margin-top:12px">✓ Every line matches the site.</div>'}
+      ${notes.length ? `<div class="muted" style="font-size:12px;margin-top:8px">${notes.map((l) => `${esc(l.sheet.title)}: ${esc(l.note)}`).join(' · ')}</div>` : ''}
+      ${r.waiting.length ? `<div class="muted" style="font-size:12px;margin-top:8px">Not on either yet (waiting for the Amazon cost): ${r.waiting.map((w) => esc(w.title.slice(0, 40))).join(', ')}</div>` : ''}
+      <div class="muted" style="font-size:11.5px;margin-top:10px">Checked only. Nothing was changed.</div>`;
+    return card(`${same && !issues.length ? okIcon : warnIcon} ${esc(r.filename)}`, `Sheet check · ${monthName(r.month)} payment`, body);
+  }
+
   async function upload(files) {
     if (!files.length) return;
     const fd = new FormData();
@@ -1580,7 +1607,7 @@ async function importPage(el) {
     $('#import-result').innerHTML = `<div class="card"><div class="card-b"><div class="row" style="margin-bottom:6px"><span class="dot spin"></span>Reading ${files.length} sheet${files.length > 1 ? 's' : ''} and matching rows to eBay sales…</div>${skeletonRows(4).replace('class="sk-rows"', 'class="sk-rows" style="padding:8px 0 0"')}</div></div>`;
     try {
       const results = await api('/api/amazon/import', { method: 'POST', body: fd });
-      $('#import-result').innerHTML = results.map((r) => r.kind === 'ledger' ? card(`${okIcon} ${esc(r.filename)}`, `Monthly settlement sheet · ${monthName(r.month)}`, `
+      $('#import-result').innerHTML = results.map((r) => r.kind === 'sheet_check' ? sheetCheckCard(r) : r.kind === 'ledger' ? card(`${okIcon} ${esc(r.filename)}`, `Monthly settlement sheet · ${monthName(r.month)}`, `
         <div class="result-grid">
           <div class="result-cell"><div class="v">${count(r.linesNew)}</div><div class="k">new sales rows</div></div>
           <div class="result-cell"><div class="v">${count(r.linesUnchanged + r.linesUpdated)}</div><div class="k">already on file (${count(r.linesUpdated)} updated), not duplicated</div></div>
@@ -1590,7 +1617,7 @@ async function importPage(el) {
         </div>
         <div style="margin-top:10px;font-size:12.5px" class="${r.checks.every((c) => c.ok) ? 'pos' : 'neg'}">${r.checks.length ? (r.checks.every((c) => c.ok) ? '✓ Totals match the sheet’s Total Transactions row' : `Totals differ from the sheet: ${r.checks.filter((c) => !c.ok).map((c) => `${c.field} sheet ${c.sheet} vs ${c.computed}`).join(', ')}`) : ''}</div>`)
         : card(`${warnIcon} ${esc(r.filename)}`, 'Not a monthly settlement sheet', `<div class="ink2" style="font-size:13px">This file has no <b>Item Name / Amazon Cost / eBay Sale Price</b> columns, so it was not treated as a sheet. Amazon purchases come in through the <a href="#/settings?focus=email">email import</a>; upload only the partner settlement sheets here.</div>`)).join('');
-      toast('Sheet import complete', 'good');
+      toast(results.every((r) => r.kind === 'sheet_check') ? 'Sheet checked. Nothing was changed' : 'Sheet import complete', 'good');
       await loadData();
       $('#imports').innerHTML = sheetsTable(sheetsOnFile());
     } catch (e) {

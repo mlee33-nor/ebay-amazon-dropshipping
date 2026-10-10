@@ -8,7 +8,10 @@ import { syncEbay, ebayStatus, ebayConfigured, ebayCanConnect, ebayConsentUrl, e
 import { importAmazonCsv } from './amazon.js';
 import { runMatcher, getSuggestions, candidatesForSale } from './matcher.js';
 import { buildDataset, buildBooks } from './dataset.js';
-import { isLedgerCsv, importLedgerCsv, matchLedger } from './ledger.js';
+import { isLedgerCsv, importLedgerCsv, matchLedger, parseLedgerCsv } from './ledger.js';
+import { checkSheet } from './sheetcheck.js';
+import { businessDay } from './time.js';
+import { settleMonth, CYCLE_START } from '../public/js/settlement.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
 import { ask } from './ask.js';
 import { routeQuestion, writeAnswer, llmConfigured, checkModel } from './llm.js';
@@ -23,16 +26,29 @@ app.use(express.json({ limit: '10mb' }));
 // ---------- auth (single shared password) ----------
 const PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const SECRET = process.env.SESSION_SECRET || crypto.createHash('sha256').update(`dd:${PASSWORD}`).digest('hex');
-const sessionValue = () => crypto.createHmac('sha256', SECRET).update('ok').digest('hex');
+// Equal-length digests, so comparing never throws (timingSafeEqual throws on different byte lengths)
+const sameSecret = (a, b) => crypto.timingSafeEqual(crypto.createHash('sha256').update(String(a)).digest(), crypto.createHash('sha256').update(String(b)).digest());
+const SESSION_DAYS = 30;
+const sign = (v) => crypto.createHmac('sha256', SECRET).update(v).digest('hex');
+// A session is '<expiry ms>.<signature>': it ends after SESSION_DAYS, and can't be forged without SESSION_SECRET
+const newSession = () => { const exp = String(Date.now() + SESSION_DAYS * 86400_000); return `${exp}.${sign(exp)}`; };
+const validSession = (v) => { const [exp, sig] = String(v || '').split('.'); return Boolean(exp && sig && Number(exp) > Date.now() && sameSecret(sig, sign(exp))); };
+// Wrong-password attempts per address: 10 per 15 minutes, then locked out until the window passes
+const attempts = new Map();
+const tooMany = (ip) => { const a = attempts.get(ip); return Boolean(a && a.until > Date.now() && a.n >= 10); };
+const failed = (ip) => { const a = attempts.get(ip); if (!a || a.until < Date.now()) attempts.set(ip, { n: 1, until: Date.now() + 15 * 60_000 }); else a.n++; };
 const readCookie = (req, name) =>
   (req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).find(([k]) => k === name)?.[1];
 
 app.post('/api/login', (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (tooMany(ip)) return res.status(429).json({ error: 'Too many wrong passwords. Try again in 15 minutes.' });
   const given = String(req.body?.password || '');
-  const ok = PASSWORD && given.length === PASSWORD.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(PASSWORD));
-  if (!ok) return res.status(401).json({ error: 'Wrong password' });
+  const ok = Boolean(PASSWORD) && sameSecret(given, PASSWORD);
+  if (!ok) { failed(ip); return res.status(401).json({ error: 'Wrong password' }); }
+  attempts.delete(ip);
   const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `dd_session=${sessionValue()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 60}${secure}`);
+  res.setHeader('Set-Cookie', `dd_session=${newSession()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * SESSION_DAYS}${secure}`);
   res.json({ ok: true });
 });
 // Inbound email webhook (Zapier / Make / Google Apps Script): POST JSON {subject, text, html, date, messageId}
@@ -40,7 +56,7 @@ app.post('/api/login', (req, res) => {
 app.post('/api/email/inbound', async (req, res) => {
   const token = process.env.INBOUND_TOKEN;
   const given = String(req.headers['x-inbound-token'] || req.query.token || '');
-  if (!token || given.length !== token.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(token)))
+  if (!token || !sameSecret(given, token))
     return res.status(401).json({ error: 'Bad or missing inbound token' });
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
@@ -57,10 +73,11 @@ app.get('/login', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public
 // Accounting data must never be open on the internet: in production, no password means no access
 const PRODUCTION = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production');
 app.use((req, res, next) => {
-  if (!PASSWORD && PRODUCTION && req.path !== '/api/health') return res.status(503).send('DASHBOARD_PASSWORD is not set. Add it in Railway -> Variables.');
+  if (req.path === '/api/health') return next(); // Railway's health check, no data in it
+  if (!PASSWORD && PRODUCTION) return res.status(503).send('DASHBOARD_PASSWORD is not set. Add it in Railway -> Variables.');
   if (!PASSWORD) return next();
   if (req.path === '/login' || req.path.startsWith('/css/') || req.path === '/favicon.svg') return next();
-  if (readCookie(req, 'dd_session') === sessionValue()) return next();
+  if (validSession(readCookie(req, 'dd_session'))) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Not logged in' });
   res.redirect('/login');
 });
@@ -126,10 +143,22 @@ app.post('/api/amazon/import', upload.array('files', 20), wrap(async (req, res) 
   if (!req.files?.length) return res.status(400).json({ error: 'No file uploaded' });
   const results = [];
   for (const f of req.files) {
-    const r = isLedgerCsv(f.buffer) ? await importLedgerCsv(f.buffer, f.originalname) : { kind: 'amazon', ...(await importAmazonCsv(f.buffer, f.originalname)) };
-    results.push({ filename: f.originalname, ...r });
+    if (isLedgerCsv(f.buffer)) {
+      // From October 2026 a hand sheet is a check on the site, never an input; a paid month is never rewritten
+      const month = parseLedgerCsv(f.buffer, f.originalname).month;
+      const paid = await one('select 1 from settlement_payments where month = $1', [month]);
+      if (month > CYCLE_START || paid) { results.push({ filename: f.originalname, kind: 'sheet_check', month, ...(await checkSheet(f.buffer, f.originalname)) }); continue; }
+      results.push({ filename: f.originalname, ...(await importLedgerCsv(f.buffer, f.originalname)) });
+    } else results.push({ filename: f.originalname, kind: 'amazon', ...(await importAmazonCsv(f.buffer, f.originalname)) });
   }
   res.json(results);
+}));
+
+// Check a hand-kept sheet against the site without changing anything
+app.post('/api/sheets/check', upload.single('file'), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  if (!isLedgerCsv(req.file.buffer)) return res.status(400).json({ error: "That doesn't look like a monthly settlement sheet" });
+  res.json(await checkSheet(req.file.buffer, req.file.originalname));
 }));
 
 // ---------- editor saves ----------
@@ -272,12 +301,67 @@ app.post('/api/expenses', wrap(async (req, res) => {
   }
   res.json({ ok: true, ...(await buildBooks()) });
 }));
+// Payments. Each payment is its own row (a correction is a negative amount); settlements.paid is their sum and
+// paid_at the latest date. The first payment for a month closes it: what it covered is recorded, and anything that
+// turns up later for that period goes on the next open payment (see settlement_freeze in dataset.js).
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+async function syncPaid(month) {
+  const [t] = await q('select sum(amount) as paid, max(paid_at) as paid_at, count(*)::int as n from settlement_payments where month = $1', [month]);
+  await q(`insert into settlements (month, paid, paid_at) values ($1, $2, $3)
+           on conflict (month) do update set paid = excluded.paid, paid_at = excluded.paid_at, updated_at = now()`,
+    [month, t.n ? Number(t.paid) : null, t.paid_at || null]);
+  if (!t.n) await q('delete from settlement_freeze where month = $1', [month]); // every payment removed: reopen it
+}
+async function closePeriod(month) {
+  if (await one('select 1 from settlement_freeze where month = $1', [month])) return;
+  const [orders, books] = await Promise.all([buildDataset(), buildBooks()]);
+  const split = Number((await getSetting('split_amazon')) ?? 50);
+  const keys = orders.filter((o) => o.counted && o.settle_month === month).map((o) => o.order_id).sort();
+  const s = settleMonth({ month, orders, expenses: books.expenses, settlements: books.settlements, splitAmazon: split });
+  const totals = { orders: s.orders, collected: s.collected, cogs: s.cogs, adFees: s.adFees, opex: s.opex, businessProfit: s.businessProfit, sellerSends: s.sellerSends, paid: s.paid };
+  await q('insert into settlement_freeze (month, row_keys, totals, source) values ($1, $2::jsonb, $3::jsonb, $4) on conflict (month) do nothing',
+    [month, JSON.stringify(keys), JSON.stringify(totals), 'first payment recorded']);
+}
+app.post('/api/settlements/payments', wrap(async (req, res) => {
+  const { month, amount, paid_at, note } = req.body || {};
+  if (!MONTH_RE.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  const amt = Math.round(Number(amount) * 100) / 100;
+  if (!Number.isFinite(amt) || Math.abs(amt) < 0.01) return res.status(400).json({ error: 'Enter the amount paid (a correction can be negative)' });
+  const day = paid_at ? String(paid_at) : businessDay(new Date());
+  if (!DAY_RE.test(day)) return res.status(400).json({ error: 'paid_at must be YYYY-MM-DD' });
+  await q('insert into settlement_payments (month, amount, paid_at, note) values ($1, $2, $3, $4)', [month, amt, day, note ? String(note).slice(0, 500) : null]);
+  await syncPaid(month);
+  await closePeriod(month);
+  res.json({ ok: true, ...(await buildBooks()) });
+}));
+// "Paid in full": the server works out what's left from fresh numbers, so a stale page can't record the wrong amount
+app.post('/api/settlements/pay-remaining', wrap(async (req, res) => {
+  const { month, note } = req.body || {};
+  if (!MONTH_RE.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  const [orders, books] = await Promise.all([buildDataset(), buildBooks()]);
+  const split = Number((await getSetting('split_amazon')) ?? 50);
+  const s = settleMonth({ month, orders, expenses: books.expenses, settlements: books.settlements, splitAmazon: split });
+  const left = Math.round((s.sellerSends - (s.paid || 0)) * 100) / 100;
+  if (Math.abs(left) < 0.01) return res.json({ ok: true, nothing: true, ...books });
+  await q('insert into settlement_payments (month, amount, paid_at, note) values ($1, $2, $3, $4)', [month, left, businessDay(new Date()), note ? String(note).slice(0, 500) : 'remaining balance']);
+  await syncPaid(month);
+  await closePeriod(month);
+  res.json({ ok: true, amount: left, ...(await buildBooks()) });
+}));
+app.delete('/api/settlements/payments/:id', wrap(async (req, res) => {
+  const row = await one('select month from settlement_payments where id = $1', [Number(req.params.id)]);
+  if (!row) return res.status(404).json({ error: 'No such payment' });
+  await q('delete from settlement_payments where id = $1', [Number(req.params.id)]);
+  await syncPaid(row.month);
+  res.json({ ok: true, ...(await buildBooks()) });
+}));
+// The month's note only; amounts are recorded as payments above (an overwrite here used to wipe earlier payments)
 app.post('/api/settlements', wrap(async (req, res) => {
-  const { month, paid, paid_at, note } = req.body || {};
-  if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM' });
-  await q(`insert into settlements (month, paid, paid_at, note) values ($1,$2,$3,$4)
-           on conflict (month) do update set paid=excluded.paid, paid_at=excluded.paid_at, note=excluded.note, updated_at=now()`,
-    [month, paid === '' || paid === null || paid === undefined ? null : Number(paid), paid_at || null, note || null]);
+  const { month, note } = req.body || {};
+  if (!MONTH_RE.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  if ('paid' in (req.body || {}) || 'paid_at' in (req.body || {})) return res.status(400).json({ error: 'Record payments with "Add a payment"' });
+  await q(`insert into settlements (month, note) values ($1, $2) on conflict (month) do update set note = excluded.note, updated_at = now()`, [month, note || null]);
   res.json({ ok: true, ...(await buildBooks()) });
 }));
 app.post('/api/ledger/link', wrap(async (req, res) => {
@@ -364,7 +448,7 @@ app.post('/api/ask', async (req, res) => {
   res.end();
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/health', wrap(async (_req, res) => { await q('select 1'); res.json({ ok: true }); }));
 
 const port = Number(process.env.PORT || 3000);
 const kind = await initDb();

@@ -157,10 +157,7 @@ export async function importLedgerCsv(buffer, filename) {
       [p.month, x.category, x.amount, x.note]
     );
   }
-  if (p.paid !== null) {
-    await q(`insert into settlements (month, paid, note) values ($1, $2, 'from monthly sheet')
-             on conflict (month) do update set paid = excluded.paid, updated_at = now()`, [p.month, p.paid]);
-  }
+  // A sheet never records a payment: payments are entered on the Settlements page, one per transfer
   const matched = await matchLedger();
   return {
     kind: 'ledger',

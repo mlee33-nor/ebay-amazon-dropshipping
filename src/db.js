@@ -9,6 +9,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Load .env for local runs (Railway injects env vars directly)
 try { process.loadEnvFile?.(path.join(ROOT, '.env')); } catch {}
 
+// DATE columns come back as the stored 'YYYY-MM-DD' text. Turned into a JS Date they mean UTC midnight, which an
+// Arizona reader sees as the day before (a payment on Oct 26 would read as Oct 25).
+pg.types.setTypeParser(1082, (v) => v);
+
 let impl = null;
 
 const SCHEMA = `
@@ -213,6 +217,25 @@ create table if not exists settlements (
   note       text,
   updated_at timestamptz default now()
 );
+-- Every payment Drew makes (or a correction, as a negative amount). settlements.paid is their sum and paid_at the
+-- latest date, so a second payment (e.g. a missed sale paid later) never overwrites the first.
+create table if not exists settlement_payments (
+  id          serial primary key,
+  month       text not null,
+  amount      numeric(12,2) not null,
+  paid_at     date,
+  note        text,
+  recorded_at timestamptz default now()
+);
+-- A payment, once made, is closed: the rows it covered are recorded here when its first payment is entered. Anything
+-- that turns up later for that period goes on the next unpaid payment, so a paid payment never changes.
+create table if not exists settlement_freeze (
+  month     text primary key,
+  frozen_at timestamptz not null default now(),
+  row_keys  jsonb not null,
+  totals    jsonb,
+  source    text
+);
 
 alter table amazon_lines add column if not exists source text default 'csv';
 create table if not exists amazon_emails (
@@ -356,6 +379,10 @@ export async function initDb() {
     };
   }
   await impl.exec(SCHEMA);
+  // Payments recorded before the payments table existed become one payment each (the note keeps any split)
+  await impl.query(`insert into settlement_payments (month, amount, paid_at, note)
+    select s.month, s.paid, s.paid_at, coalesce(s.note, 'recorded before payments were itemised') from settlements s
+    where s.paid is not null and not exists (select 1 from settlement_payments p where p.month = s.month)`);
   return impl.kind;
 }
 

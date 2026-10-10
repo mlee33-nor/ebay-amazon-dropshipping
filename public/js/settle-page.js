@@ -92,6 +92,11 @@ export function renderSettlement(el) {
   const sec = (n, title) => `<h4><span class="no">${n}</span>${title}</h4>`;
   const sumLine = `${esc(A)} pays Amazon · ${esc(B)} collects eBay and pays operating costs · profit split ${split}/${100 - split}`;
 
+  // This month's payments (each transfer is its own entry) and whether the payment is closed
+  const payments = (d.books.payments || []).filter((p) => p.month === selected);
+  const closedRec = (d.books.closed || []).find((c) => c.month === selected);
+  const azToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+
   // Heads-up for returns still open: eBay holds the money but hasn't refunded, so nothing has moved yet. A refund
   // comes off the payment for the day it happens; the Amazon partner's share of the profit is what changes hands.
   const openReturns = d.orders.filter((o) => o.counted && o.return_open);
@@ -123,12 +128,14 @@ export function renderSettlement(el) {
       <div class="state ${st.cls}" role="status"><div class="ic">${stIcon}</div><div><div class="lbl"><span class="live"></span>${stLabel}</div><div class="t">${st.t}</div><div class="s">${esc(st.s)}</div></div>${stSide}</div>
       ${paidPct !== null ? `<div class="paid-bar ${v.outstanding < -0.009 ? 'over' : ''}" title="${paidPct.toFixed(0)}% of the amount due"><div style="width:${paidPct.toFixed(1)}%"></div></div>` : ''}
       <div class="settle-sec" style="margin-top:20px">
-        <div class="row" style="justify-content:space-between;gap:8px"><h4 style="margin:0">${v.fullyPaid ? 'Payment recorded' : 'Record a payment'}</h4>${v.fullyPaid ? `<button class="btn sm ghost" type="button" id="pay-edit" aria-expanded="false" aria-controls="pay-form">${ICONS.editor} Edit payment</button>` : ''}</div>
-        <form class="pay-form" id="pay-form" style="margin-top:8px" ${v.fullyPaid ? 'hidden' : ''}>
-          <label class="field">Amount ${esc(v.from)} paid ${esc(v.to)}<input class="input num" name="paid" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" value="${v.paid ?? ''}" /></label>
-          <label class="field">Date<input class="input" name="paid_at" type="date" value="${s.paidAt || ''}" /></label>
-          <label class="field full">Note<input class="input" name="note" placeholder="e.g. Zelle, Venmo, cash" value="${esc(s.note || '')}" /></label>
-          <div class="actions"><button class="btn primary" type="submit">${ICONS.save} Save payment</button><button class="btn" type="button" id="pay-full">${ICONS.check} Mark paid in full</button></div>
+        <div class="row" style="justify-content:space-between;gap:8px"><h4 style="margin:0">Payments</h4>${closedRec ? `<span class="pill good" title="Recorded what this payment covered on ${esc(fmtDate(closedRec.frozen_at))}. Anything that turns up later for this period (a late refund, a sale costed later) goes on the next payment, so this one never changes.">${ICONS.check} Closed</span>` : ''}</div>
+        ${payments.length ? `<ul class="pay-list">${payments.map((p) => `<li><span class="num"><b>${money(Math.abs(p.amount), 2)}</b>${p.amount < 0 ? ' <span class="muted">(correction)</span>' : ''}</span><span class="muted">${p.paid_at ? esc(fmtDate(`${p.paid_at}T12:00`, { month: 'short', day: 'numeric', year: 'numeric' })) : 'date not recorded'}${p.note ? ` · ${esc(p.note)}` : ''}</span><button class="btn sm ghost pay-del" data-id="${p.id}" title="Remove this payment (entered by mistake)" aria-label="Remove payment">${ICONS.x}</button></li>`).join('')}</ul>` : `<div class="muted" style="font-size:13px;margin-top:6px">No payment recorded yet.</div>`}
+        <form class="pay-form" id="pay-form" style="margin-top:10px">
+          <label class="field">Amount ${esc(v.from)} sent ${esc(v.to)}<input class="input num" name="amount" type="number" step="0.01" inputmode="decimal" placeholder="0.00" required /></label>
+          <label class="field">Date<input class="input" name="paid_at" type="date" value="${azToday()}" required /></label>
+          <label class="field full">Note<input class="input" name="note" placeholder="e.g. Zelle, the fishing line he missed" /></label>
+          <div class="actions"><button class="btn primary" type="submit">${ICONS.save} Add payment</button>${Math.abs(v.outstanding ?? v.amount) >= 0.01 && !(v.paid !== null && v.outstanding < 0) ? `<button class="btn" type="button" id="pay-full" title="Records exactly what's left, worked out on the server from the latest numbers">${ICONS.check} Pay the remaining ${money(Math.abs(v.paid === null ? v.amount : v.outstanding), 2)}</button>` : ''}</div>
+          <div class="muted" style="font-size:11.5px;margin-top:6px">Each transfer is its own payment, so a later one (like a missed sale) never overwrites the first. A mistake can be removed, or corrected with a negative amount.</div>
         </form>
       </div>
     </div>
@@ -180,28 +187,30 @@ export function renderSettlement(el) {
 
   $('#st-months').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { selected = b.dataset.m; renderPage(); } });
   $$('tr[data-m]', el).forEach((tr) => tr.addEventListener('click', () => { selected = tr.dataset.m; renderPage(); window.scrollTo({ top: 0, behavior: 'smooth' }); }));
-  const save = async (body) => {
-    await api('/api/settlements', { method: 'POST', body: { month: selected, ...body } });
-    toast('Payment saved', 'good');
-    await loadData();
-    renderPage();
-  };
-  $('#pay-form').addEventListener('submit', (e) => {
+  const done = async (msg) => { toast(msg, 'good'); await loadData(); renderPage(); };
+  $('#pay-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
-    const raw = String(f.get('paid') ?? '').trim();
-    if (raw !== '' && !(Number(raw) >= 0)) { toast('Enter the amount that was sent as a positive number', 'bad'); return; }
-    // A transfer in the reverse direction (A → B) is stored as a negative payment so balance = sends − paid holds
-    const paid = raw === '' ? '' : v.reverse ? -Math.abs(Number(raw)) : Number(raw);
-    save({ paid, paid_at: f.get('paid_at'), note: f.get('note') });
+    const raw = Number(String(f.get('amount') ?? '').trim());
+    if (!Number.isFinite(raw) || Math.abs(raw) < 0.01) { toast('Enter the amount that was sent', 'bad'); return; }
+    // A transfer in the reverse direction (A → B) is stored as a negative payment so balance = sends − paid holds;
+    // a negative entry the other way is a correction
+    const amount = v.reverse ? -raw : raw;
+    try {
+      await api('/api/settlements/payments', { method: 'POST', body: { month: selected, amount, paid_at: f.get('paid_at'), note: f.get('note') } });
+      await done('Payment added');
+    } catch (err) { toast(err.message, 'bad'); }
   });
-  $('#pay-edit')?.addEventListener('click', (e) => {
-    const form = $('#pay-form');
-    form.hidden = !form.hidden;
-    e.currentTarget.setAttribute('aria-expanded', String(!form.hidden));
-    if (!form.hidden) form.querySelector('[name=paid]').focus();
+  $('#pay-full')?.addEventListener('click', async () => {
+    try {
+      const r = await api('/api/settlements/pay-remaining', { method: 'POST', body: { month: selected, note: $('#pay-form [name=note]').value || undefined } });
+      await done(r.nothing ? 'Nothing left to pay' : `Recorded ${money(Math.abs(r.amount), 2)}`);
+    } catch (err) { toast(err.message, 'bad'); }
   });
-  $('#pay-full').onclick = () => save({ paid: s.sellerSends, paid_at: new Date().toISOString().slice(0, 10), note: $('#pay-form [name=note]').value });
+  $$('.pay-del', el).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Remove this payment? Use this only for an entry made by mistake.')) return;
+    try { await api(`/api/settlements/payments/${b.dataset.id}`, { method: 'DELETE' }); await done('Payment removed'); } catch (err) { toast(err.message, 'bad'); }
+  }));
   $('#st-dl').onclick = () => downloadCsv('settlements.csv', all, [
     { title: 'Month', get: (x) => x.month }, { title: 'Items', get: (x) => x.orders }, { title: 'eBay payouts', get: (x) => x.collected },
     { title: 'Amazon COGS', get: (x) => x.cogs }, { title: 'Ad fees', get: (x) => x.adFees }, { title: 'Operating expenses', get: (x) => x.opex },

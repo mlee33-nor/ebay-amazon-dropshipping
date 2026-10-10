@@ -285,7 +285,9 @@ await check('a same-period refund nets to what eBay kept (Leg Straps: -$0.40)', 
 await order('PAID-SKIP', '2027-02-05T19:00:00Z', 'Paid Skip Control Box', 64.99, { fee: 9.25 });
 await q("insert into order_overrides (order_id, cost_override) values ('PAID-SKIP', 42.89)");
 await q("insert into amazon_refunds (message_id, amazon_order_id, amount, received_at, title) values ('m-skip', '114-8888888-0000001', 42.89, '2027-03-10T03:00:00Z', 'Paid Skip Control Box')");
+// March was paid (and closed: what it covered is recorded, as the payments endpoint does) before the refunds came in
 await q("insert into settlements (month, paid) values ('2027-03', 500)");
+await q("insert into settlement_freeze (month, row_keys, source) values ('2027-03', '[]', 'test')");
 await tx('T12', 'PAID-SKIP', 'REFUND', 55.74, 9.25, '2027-04-02T19:00:00Z');
 await check('a refund for a payment already made goes on the next unpaid one, merged with the rest of that sale\'s refunds', async () => {
   const data = await buildDataset();
@@ -345,6 +347,47 @@ await check('HHLPRO: the sale keeps its ad fee; the refund line has the buyer re
   assert.equal(ev.settle_month, '2027-09');
   assert.equal(ev.amazon_refund, 104.79, 'matched by the item name even though it is less than the cost');
   assert.equal(ev.net, -19.63); // -128.69 to the buyer + 4.27 ad fee back + 104.79 from Amazon
+});
+
+// P0 from the audit: paying a period must NOT push that period's own refund lines onto the next one (October would
+// have shown $163.92 still owed the moment Drew paid it). A refund that arrives after the payment does move on.
+await order('CLOSE-SALE', '2027-09-02T19:00:00Z', 'Close Test Item', 50, { fee: 6.8 });
+await q("insert into order_overrides (order_id, cost_override) values ('CLOSE-SALE', 25)");
+await order('CLOSE-OLD', '2027-08-02T19:00:00Z', 'Close Old Item', 30, { fee: 4.08 });
+await q("insert into order_overrides (order_id, cost_override) values ('CLOSE-OLD', 15)");
+await tx('T15', 'CLOSE-OLD', 'REFUND', 25.92, 4.08, '2027-09-10T19:00:00Z'); // an August sale refunded during September
+const { closePeriodForTest } = await import('../src/dataset.js').then((m) => ({ closePeriodForTest: async (month, paidAt, amount) => {
+  const data = await m.buildDataset();
+  const keys = data.filter((o) => o.counted && o.settle_month === month).map((o) => o.order_id);
+  await q('insert into settlement_payments (month, amount, paid_at) values ($1, $2, $3)', [month, amount, paidAt]);
+  await q('insert into settlements (month, paid, paid_at) values ($1, $2, $3) on conflict (month) do update set paid = excluded.paid, paid_at = excluded.paid_at', [month, amount, paidAt]);
+  await q("insert into settlement_freeze (month, row_keys, source) values ($1, $2::jsonb, 'test')", [month, JSON.stringify(keys)]);
+} }));
+await check('paying a period keeps its own refund lines on it (they never jump to the next payment)', async () => {
+  const before = await settle('2027-09');
+  assert.ok(before.data.some((o) => o.refund_of === 'CLOSE-OLD' && o.settle_month === '2027-09'), 'the refund line is on September before paying');
+  await closePeriodForTest('2027-09', '2027-09-26', before.s.sellerSends);
+  const after = await settle('2027-09');
+  assert.equal(after.s.sellerSends, before.s.sellerSends, 'September unchanged by being paid');
+  assert.equal(after.s.balance, 0);
+  assert.ok(after.data.some((o) => o.refund_of === 'CLOSE-OLD' && o.settle_month === '2027-09'), 'still on September');
+  assert.ok(!after.data.some((o) => o.settle_month === '2027-10' && /CLOSE-/.test(o.order_id + (o.refund_of || ''))), 'nothing moved to October');
+});
+await tx('T16', 'CLOSE-SALE', 'REFUND', 43.2, 6.8, '2027-09-28T19:00:00Z'); // refund after September was paid
+await check('a refund that arrives after a period was paid goes on the next payment; the paid one stays put', async () => {
+  const { data, s } = await settle('2027-09');
+  assert.equal(s.balance, 0, 'September still settled');
+  const ev = data.find((o) => o.refund_of === 'CLOSE-SALE');
+  assert.equal(ev.settle_month, '2027-10');
+  assert.equal(ev.net, -43.2);
+});
+// A sale only costed after its period was paid (e.g. Vtopmart) lands on the next payment, not the paid one
+await order('LATE-COST', '2027-09-05T19:00:00Z', 'Late Cost Vtopmart Organizer', 34.99, { fee: 5.19 });
+await check('a sale costed after its period was paid goes on the next payment', async () => {
+  await q("insert into order_overrides (order_id, cost_override) values ('LATE-COST', 20)");
+  const { data, s } = await settle('2027-09');
+  assert.equal(s.balance, 0, 'September still settled');
+  assert.equal(data.find((o) => o.order_id === 'LATE-COST').settle_month, '2027-10');
 });
 
 await check('Sheet months still equal the sheets after all of the above', async () => {
