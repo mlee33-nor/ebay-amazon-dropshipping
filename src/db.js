@@ -165,6 +165,21 @@ create table if not exists ebay_transactions (
   raw             jsonb
 );
 create index if not exists ebay_transactions_order_idx on ebay_transactions(order_id);
+-- Every record is stored, whatever its type, with or without an order (order_id null for account-level charges and
+-- payouts). refs = eBay's references as given ([{referenceId, referenceType}]: ORDER_ID, RETURN_ID, CASE_ID, ...);
+-- hold_id pairs a DISPUTE_HOLD-<id> debit with the DISPUTE_HOLD_REVERSE-<id>-<n> credit that releases it.
+alter table ebay_transactions add column if not exists refs jsonb default '[]'::jsonb;
+alter table ebay_transactions add column if not exists hold_id text;
+alter table ebay_transactions add column if not exists transaction_status text;
+alter table ebay_transactions add column if not exists payout_id text;
+alter table ebay_transactions add column if not exists memo text;
+create index if not exists ebay_transactions_type_idx on ebay_transactions(type, transaction_at);
+create index if not exists ebay_transactions_hold_idx on ebay_transactions(hold_id) where hold_id is not null;
+-- Records stored before these columns existed: fill them once from the raw record
+update ebay_transactions set refs = coalesce(raw->'references', '[]'::jsonb),
+  hold_id = substring(transaction_id from '^DISPUTE_HOLD(?:_REVERSE)?-([0-9]+)'),
+  transaction_status = raw->>'transactionStatus', payout_id = raw->>'payoutId', memo = raw->>'transactionMemo'
+  where transaction_status is null and raw ? 'transactionStatus';
 alter table ebay_orders add column if not exists fee_credit numeric(12,2) default 0;
 alter table order_overrides add column if not exists confirmed_separate boolean default false;
 
@@ -177,6 +192,9 @@ create table if not exists sync_log (
   orders      int default 0,
   returns     int default 0
 );
+-- status: ok | partial (a step failed or was skipped) | failed; steps: { orders, finances, returns }: { ok, status, at, message }
+alter table sync_log add column if not exists status text;
+alter table sync_log add column if not exists steps jsonb;
 create table if not exists ledger_entries (
   entry_key      text primary key,
   month          text not null,
