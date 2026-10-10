@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-reconcile-'));
 process.env.LOCAL_PG_DIR = dir;
-process.env.LOCAL_PG_PORT = '5448';
+process.env.LOCAL_PG_PORT = String(5448 + Number(process.env.TEST_PG_OFFSET || 0)); // TEST_PG_OFFSET lets parallel runs use their own ports
 delete process.env.DATABASE_URL;
 const { initDb, q, closeDb } = await import('../src/db.js');
 const { normalizeOrder, upsertOrder } = await import('../src/ebay.js');

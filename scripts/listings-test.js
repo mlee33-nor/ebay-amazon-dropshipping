@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-listings-'));
 process.env.LOCAL_PG_DIR = dir;
-process.env.LOCAL_PG_PORT = process.env.LISTINGS_TEST_PG_PORT || '5446';
+process.env.LOCAL_PG_PORT = process.env.LISTINGS_TEST_PG_PORT || String(5446 + Number(process.env.TEST_PG_OFFSET || 0));
 delete process.env.DATABASE_URL;
 process.env.DATABASE_URL = ''; // blank (not just deleted) so db.js's .env loader cannot put a real database back
 process.env.LISTINGS_SYNC_HOURS = '0'; // refresh listings on every eBay sync in this test (production waits a few hours)
