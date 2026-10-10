@@ -92,11 +92,13 @@ const CASES = [
   ['how much have we lost to returns', 'refunds', 'this month'],
   ['any cancellations this month', 'refunds', 'this month'],
   // operating costs
-  ['what are our operating costs', 'expenses', 'this month'],
-  ['how much do we spend on software', 'expenses', 'this month'],
-  ['what subscriptions do we pay for', 'expenses', 'this month'],
+  // (operating costs go on a payment, so with no period named they are the pay cycle running now)
+  ['what are our operating costs', 'expenses', 'this pay cycle'],
+  ['how much do we spend on software', 'expenses', 'this pay cycle'],
+  ['what subscriptions do we pay for', 'expenses', 'this pay cycle'],
   ['expenses in august', 'expenses', 'August 2026'],
-  ['how much are proxies costing us', 'expenses', 'this month'],
+  ['how much are proxies costing us', 'expenses', 'this pay cycle'],
+  ['operating costs for the august pay period', 'expenses', 'August pay cycle'],
   // products
   ['best selling product', 'top', 'all time'],
   ['whats our most profitable item', 'top', 'all time'],
@@ -134,6 +136,14 @@ const CASES = [
   ['show me the latest orders', 'recent', null],
   ['last 10 sales', 'recent', null],
   ['what did we sell on sep 14', 'recent', 'Sep 14'],
+  // date ranges are one period, never a comparison
+  ['profit since sep 27', 'profit', 'since Sep 27'],
+  ['profit from sep 1 to sep 14', 'profit', 'Sep 1–Sep 14'],
+  ['how many sales between 9/1 and 9/14', 'count', 'Sep 1–Sep 14'],
+  ['what sold from 9/10 through 9/12', 'recent', 'Sep 10–Sep 12'],
+  ['profit from july to august', 'profit', 'July 2026 to August 2026'],
+  ['profit for the september pay cycle', 'profit', 'September pay cycle'],
+  ['how many sales in the august pay period', 'count', 'August pay cycle'],
   ['what sold 9/12', 'recent', 'Sep 12'],
   // waiting for Amazon
   ['which sales are waiting for amazon', 'awaiting', null],
@@ -191,7 +201,12 @@ await must('is september better than august', /^\*\*No: September 2026( so far)?
 await must('last sale', /^\*\*Latest sale: /, '"last sale" is one sale');
 await must('worst products', /lost money/, 'worst products only lists products that lost money');
 await must('how many sales did we get today', / counted in profit, 1 awaiting the Amazon email[\s\S]*Zirconia[\s\S]*awaiting the Amazon email/, 'the new sale is counted as waiting');
-await must('did drew pay for august', /Paid in full/, 'August shows paid in full');
+await must('did drew pay for august', /^\*\*Yes, in full\./, 'August: Yes, in full');
+await must('did drew pay for july', /^\*\*Yes, in full\./, 'July: Yes, in full');
+await must('did drew pay me', /^\*\*(No|Not yet)\./, '"did drew pay me" with September unpaid is never Yes');
+await must('profit for the august pay period', /\$129\.49/, 'the August pay cycle (a calendar month before September 2026) is the sheet\'s $129.49');
+await must('how many fishing reel holders did we sell', /^\*\*1 sale of “Baitcasting Fishing Reel Holder/, 'plural product words find the product');
+await must('how many fishing lines did we sell', /^\*\*0 sales of “fishing line”/, '"fishing lines" never counts the fishing reel holder');
 await must('how much did ebay pay us in august', /eBay payouts/, 'eBay payouts, not the settlement');
 await must('how much money did we make in august', /\$129\.49/, 'August business profit equals the sheet');
 await must('did promotion pay off in august', /7 of 43 sales in August 2026 came through promoted ads \(16%\), costing \$9\.74 in ad fees/, 'August promotion: 7 of 43 sales, $9.74 fees (from the sheet)');
