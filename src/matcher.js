@@ -181,7 +181,11 @@ async function loadCandidates() {
   const ebay = ebRows.map((r) => ({ ...r, revenue: Number(r.revenue) || 0, titles: (r.titles || []).filter(Boolean) }));
   const rej = await q('select amazon_order_id, ebay_order_id from link_rejections');
   const rejections = new Set(rej.map((r) => `${r.amazon_order_id}|${r.ebay_order_id}`));
-  const counts = await q('select ebay_order_id, count(*)::int as n from order_links group by ebay_order_id');
+  // A link to a cancelled (or ignored) Amazon order doesn't fill the sale: its replacement order must still link
+  const counts = await q(`select k.ebay_order_id, count(*)::int as n from order_links k
+    where exists (select 1 from amazon_lines l where l.amazon_order_id = k.amazon_order_id
+                  and not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel')
+    group by k.ebay_order_id`);
   const linkCounts = new Map(counts.map((r) => [r.ebay_order_id, r.n]));
   return { amazon, ebay, rejections, linkCounts };
 }

@@ -309,6 +309,44 @@ await check('a refund after a payment was made (even inside its own period) goes
   assert.equal(ev.net, -34.56);
 });
 
+// SEALIGHT (Oct 2026): the first Amazon order is cancelled, a replacement is placed the next day. The cancelled
+// order must not make the one-unit sale look "full" so the replacement never links.
+await order('SEAL-1', '2027-07-06T00:39:00Z', 'SEALIGHT H10 9145 LED Fog Light Bulbs', 19, { fee: 3.01, name: 'Dominick DeRosa', city: 'Eatonton', st: 'GA' });
+await ingestMessage({ messageId: 'seal-a@test', subject: 'Ordered: 1 Automotive item', date: '2027-07-06T01:00:00Z',
+  text: 'Thanks for your order!\nDominick - EATONTON, GA\nOrder # 111-7777777-0000001\nGrand Total: $10.79\n' });
+await runMatcher();
+await ingestMessage({ messageId: 'seal-a-cxl@test', subject: 'Item cancelled successfully: "SEALIGHT H10..."', date: '2027-07-06T02:00:00Z',
+  text: 'We have cancelled the item you asked us to.\nOrder # 111-7777777-0000001\n' });
+await ingestMessage({ messageId: 'seal-b@test', subject: 'Ordered: 1 Automotive item', date: '2027-07-07T01:00:00Z',
+  text: 'Thanks for your order!\nDominick - EATONTON, GA\nOrder # 112-7777777-0000002\nGrand Total: $10.79\n' });
+await runMatcher();
+await check('a replacement Amazon order links after the first one was cancelled (SEALIGHT)', async () => {
+  const links = (await q("select amazon_order_id from order_links where ebay_order_id = 'SEAL-1'")).map((r) => r.amazon_order_id).sort();
+  assert.deepEqual(links, ['111-7777777-0000001', '112-7777777-0000002']);
+  const o = (await buildDataset()).find((x) => x.order_id === 'SEAL-1');
+  assert.equal(o.cost, 10.79);
+  assert.equal(o.counted, true);
+});
+
+// HHLPRO (Oct 2026): sheet-covered Sep sale. eBay refunds the buyer ($128.69 back, all fees returned) and the $4.27
+// ad fee; Amazon refunds Myles $104.79 of the $107.89 (email names the item). One line on the next payment.
+await order('HHL-1', '2027-08-03T19:00:00Z', 'HHLPRO UHF Wireless XLR Transmitter Receiver F20', 142.41, { fee: 13.72 });
+await q("insert into order_overrides (order_id, cost_override) values ('HHL-1', 107.89)");
+await q("insert into ebay_transactions (transaction_id, order_id, type, fee_type, booking_entry, amount, fee_amount, transaction_at) values ('HHL-AD', 'HHL-1', 'NON_SALE_CHARGE', 'AD_FEE', 'DEBIT', 4.27, 0, '2027-08-03T19:05:00Z'), ('HHL-AD-BACK', 'HHL-1', 'NON_SALE_CHARGE', 'AD_FEE', 'CREDIT', 4.27, 0, '2027-09-07T19:00:00Z')");
+await q("update ebay_orders set ad_fees = 0 where order_id = 'HHL-1'"); // what applyFinanceTotals stores: charges minus credits
+await tx('T14', 'HHL-1', 'REFUND', 128.69, 13.72, '2027-09-07T19:00:00Z');
+await q("insert into amazon_refunds (message_id, amazon_order_id, amount, received_at, title) values ('m-hhl', '114-6666666-0000001', 104.79, '2027-09-09T17:52:00Z', 'HHLPRO UHF Wireless XLR')");
+await check('HHLPRO: the sale keeps its ad fee; the refund line has the buyer refund, the ad fee back and Amazon\'s partial refund', async () => {
+  const data = await buildDataset();
+  const sale = data.find((x) => x.order_id === 'HHL-1');
+  assert.equal(sale.ad_fees, 4.27, 'the August sale still shows the ad fee it paid');
+  assert.equal(sale.net, 16.53);
+  const ev = data.find((x) => x.refund_of === 'HHL-1');
+  assert.equal(ev.settle_month, '2027-09');
+  assert.equal(ev.amazon_refund, 104.79, 'matched by the item name even though it is less than the cost');
+  assert.equal(ev.net, -19.63); // -128.69 to the buyer + 4.27 ad fee back + 104.79 from Amazon
+});
+
 await check('Sheet months still equal the sheets after all of the above', async () => {
   for (const [m, p, sends] of [['2026-07', -27.56, 217.63], ['2026-08', 129.49, 1304.76], ['2026-09', 104.88, 625.65]]) {
     const { s } = await settle(m);

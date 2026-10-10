@@ -17,7 +17,7 @@ const NOT_DROPSHIP_AFTER_DAYS = 10;
 // { sheets: false } builds from live eBay/Amazon data only, ignoring uploaded sheets (to check the live numbers
 // against a sheet kept by hand)
 export async function buildDataset({ sheets = true } = {}) {
-  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx, allAzIds, paidRows] = await Promise.all([
+  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx, adCreditTx, allAzIds, paidRows] = await Promise.all([
     q(`select order_id, created_at, buyer_username, ship_name, ship_city, ship_state, ship_zip, ship_country,
               fulfillment_status, payment_status, cancel_state, item_subtotal, shipping_charged, discount,
               tax_collected, revenue, ebay_fees, fee_credit, ad_fees, refund_total, tracking_numbers
@@ -32,6 +32,7 @@ export async function buildDataset({ sheets = true } = {}) {
     q('select amazon_order_id, amount, received_at, title from amazon_refunds'),
     q('select * from ledger_entries order by month, row_no'),
     q("select order_id, amount, fee_amount, transaction_at from ebay_transactions where type = 'REFUND'"),
+    q("select order_id, amount, transaction_at from ebay_transactions where type = 'NON_SALE_CHARGE' and fee_type = 'AD_FEE' and booking_entry = 'CREDIT'"),
     q('select distinct amazon_order_id from amazon_lines'),
     q('select month, paid, paid_at from settlements where paid is not null'),
   ]);
@@ -52,6 +53,7 @@ export async function buildDataset({ sheets = true } = {}) {
   const azBy = group(amazonLines, 'amazon_order_id');
   const azRefundsBy = group(azRefunds, 'amazon_order_id');
   const refundTxBy = group(refundTx, 'order_id');
+  const adCreditBy = group(adCreditTx, 'order_id'); // ad fees eBay gave back (e.g. when a sale is refunded)
   const ovBy = new Map(overrides.map((o) => [o.order_id, o]));
   const ledgerByEbay = new Map(ledger.filter((l) => l.ebay_order_id && !l.is_refund).map((l) => [l.ebay_order_id, l]));
   const returnOpenBy = new Map(); // eBay order id -> its open return (also shown on the order's sheet row)
@@ -92,10 +94,13 @@ export async function buildDataset({ sheets = true } = {}) {
       const t = new Date(o.created_at).getTime();
       if (!(t < at && at - t <= 120 * 86400_000)) return false;
       const cost = num(ovBy.get(o.order_id)?.cost_override) ?? num(ledgerByEbay.get(o.order_id)?.amazon_cost);
-      if (cost === null || Math.abs(cost - amount) > 0.005) return false;
-      if (!named.size) return true;
+      if (cost === null) return false;
+      // No item name in the email: the refund must equal the cost to the cent
+      if (!named.size) return Math.abs(cost - amount) <= 0.005;
+      // The email names the item: the name must fit, and the refund can be less than the cost (Amazon often keeps a
+      // little, e.g. HHLPRO: $107.89 paid, $104.79 back) but never more
       const own = words((linesBy.get(o.order_id) || [])[0]?.title || ledgerByEbay.get(o.order_id)?.title);
-      return [...named].filter((w) => own.has(w)).length >= Math.min(2, named.size);
+      return amount <= cost + 0.005 && [...named].filter((w) => own.has(w)).length >= Math.min(2, named.size);
     });
     if (fits.length === 1) {
       if (!orphanRefundsBy.has(fits[0].order_id)) orphanRefundsBy.set(fits[0].order_id, []);
@@ -172,7 +177,7 @@ export async function buildDataset({ sheets = true } = {}) {
     const hasTx = txs.length > 0;
     const byMonth = new Map(); // pay cycle -> { refund, credit, amazonRefund, last }
     const bump = (m, k, v, at) => {
-      if (!byMonth.has(m)) byMonth.set(m, { refund: 0, credit: 0, amazonRefund: 0, last: at });
+      if (!byMonth.has(m)) byMonth.set(m, { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, last: at });
       const e = byMonth.get(m);
       e[k] += v;
       if (at && (!e.last || new Date(at) > new Date(e.last))) e.last = at;
@@ -196,7 +201,10 @@ export async function buildDataset({ sheets = true } = {}) {
       const at = r.received_at || o.created_at;
       bump(refundCycleOf(at), 'amazonRefund', num(r.amount) || 0, iso(at));
     }
-    const same = byMonth.get(saleCycle) || { refund: 0, credit: 0, amazonRefund: 0 };
+    // An ad fee eBay gives back is money in on the payment for that day, like a refund (never a change to a paid one)
+    const adCredits = adCreditBy.get(o.order_id) || [];
+    for (const c of adCredits) { const at = c.transaction_at || o.created_at; bump(refundCycleOf(at), 'adCredit', num(c.amount) || 0, iso(at)); }
+    const same = byMonth.get(saleCycle) || { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0 };
     const totalTxRefund = txs.reduce((s, t) => s + (num(t.amount) || 0) + (num(t.fee_amount) || 0), 0); // the buyer's whole refund
     const lastRefundAt = txs.map((t) => t.transaction_at).filter(Boolean).map(iso).sort().at(-1) || rets.map((r) => r.created_at).filter(Boolean).sort().at(-1) || null;
     const totalRefund = hasTx ? totalTxRefund : num(o.refund_total) || 0;
@@ -233,7 +241,10 @@ export async function buildDataset({ sheets = true } = {}) {
     // fixed $0.40 per-order fee was kept (what eBay does on a full refund)
     if (!cancelled && refundedNoPurchase && !hasTx && num(ov.fee_override) === null) fees = Math.min(fees, 0.4);
     fees = Math.max(0, fees);
-    const adFees = cancelled ? 0 : num(o.ad_fees) || 0;
+    // ebay_orders.ad_fees is charges minus credits; the sale's row keeps the charges minus only the credits on its own
+    // payment (later credits are their own lines)
+    const adGross = (num(o.ad_fees) || 0) + adCredits.reduce((t, c) => t + (num(c.amount) || 0), 0);
+    const adFees = cancelled ? 0 : inSheet ? num(o.ad_fees) || 0 : r2(adGross - (same.adCredit || 0)); // sheet-covered rows: everything
     const emailRefundSame = r2(same.amazonRefund);
     const emailRefundAll = r2([...byMonth.values()].reduce((s, e) => s + e.amazonRefund, 0));
     const amazonRefund = num(ov.amazon_refund) ?? emailRefundSame;
@@ -352,11 +363,11 @@ export async function buildDataset({ sheets = true } = {}) {
       // the sheet doesn't have is booked, so the books don't depend on the sheet being complete.
       // A sheet's refund row covers that sale's refund whatever day eBay dated it, so it's never counted twice.
       if (inSheet && ((sheetMonths.has(m) && m < CYCLE_START) || refundRowByEbay.has(o.order_id))) continue;
-      if (!e.refund && !e.credit && !e.amazonRefund) continue;
+      if (!e.refund && !e.credit && !e.amazonRefund && !e.adCredit) continue;
       let target = m;
       while (paidCycles.has(target)) target = nextCycle(target);
-      const t = later.get(target) || { refund: 0, credit: 0, amazonRefund: 0, last: null };
-      t.refund += e.refund; t.credit += e.credit; t.amazonRefund += e.amazonRefund;
+      const t = later.get(target) || { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, last: null };
+      t.refund += e.refund; t.credit += e.credit; t.amazonRefund += e.amazonRefund; t.adCredit += e.adCredit;
       if (e.last && (!t.last || e.last > t.last)) t.last = e.last;
       later.set(target, t);
     }
@@ -378,11 +389,11 @@ export async function buildDataset({ sheets = true } = {}) {
         item_subtotal: 0, shipping_charged: 0, discount: 0, tax_collected: 0,
         revenue: 0,
         fees: r2(-e.credit), // eBay's fee credit comes back
-        raw_fees: 0, fee_credit: r2(e.credit), raw_refunds: r2(e.refund), ad_fees: 0,
+        raw_fees: 0, fee_credit: r2(e.credit), raw_refunds: r2(e.refund), ad_fees: r2(-e.adCredit), // an ad fee given back
         amazon_cost: 0, amazon_cost_unknown: false, cost: 0,
         refunds: r2(e.refund),
         amazon_refund: r2(azr), email_refund: r2(azr), extra_cost: 0,
-        net: r2(-e.refund + e.credit + azr),
+        net: r2(-e.refund + e.credit + azr + e.adCredit),
         margin: null, roi: null,
         has_cost: true, cost_source: 'refund', source: 'refund',
         ledger: null,
