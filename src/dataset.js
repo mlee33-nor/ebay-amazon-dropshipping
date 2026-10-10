@@ -11,13 +11,35 @@ const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
 const isoDate = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : d);
 
+// A row's money in the settlement's terms, in cents (what a closed payment records for each row it covered)
+export const rowCents = (r) => {
+  const c = (n) => Math.round((Number(n) || 0) * 100);
+  return { collected: c(r.revenue) - c(r.fees) - c(r.refunds), cogs: c(r.cost) - c(r.amazon_refund), ad: c(r.ad_fees), other: c(r.extra_cost) };
+};
+// A correction line: money moved between payments (never a sale)
+function adjustmentRow(id, month, d, title, base, hold) {
+  const v = (x) => Math.round(x) / 100;
+  const at = base?.created_at || `${month}-26T19:00:00.000Z`;
+  return {
+    order_id: id, adjustment: true, hold, settle_month: month, settle_target: month, created_at: at, business_month: month,
+    title, source: 'adjustment', status: 'adjustment', counted: true, has_cost: true, cost_source: 'adjustment',
+    items: [], units: 0, item_subtotal: 0, shipping_charged: 0, discount: 0, tax_collected: 0,
+    revenue: v(d.collected), fees: 0, raw_fees: 0, fee_credit: 0, refunds: 0, raw_refunds: 0, ad_fees: v(d.ad),
+    amazon_cost: v(d.cogs), amazon_cost_unknown: false, cost: v(d.cogs), amazon_refund: 0, email_refund: 0, extra_cost: v(d.other),
+    net: v(d.collected - d.cogs - d.ad - d.other), margin: null, roi: null, ledger: null, cancelled: false, in_sheet: false,
+    before_start: false, possible_sheet_duplicate: false, excluded: false, lag_days: null, amazon_orders: [], returns: [], tracking_numbers: [],
+    adjustment_of: base?.order_id || null,
+    overrides: { cost_override: null, extra_cost: null, amazon_refund: null, fee_override: null, refund_override: null, notes: '', excluded: false },
+  };
+}
+
 // Days after a sale with no Amazon order found before it counts as not a dropship sale
 const NOT_DROPSHIP_AFTER_DAYS = 10;
 
 // { sheets: false } builds from live eBay/Amazon data only, ignoring uploaded sheets (to check the live numbers
 // against a sheet kept by hand)
 export async function buildDataset({ sheets = true } = {}) {
-  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx, adCreditTx, allAzIds, paidRows, freezeRows] = await Promise.all([
+  const [orders, lines, returns, links, overrides, amazonLines, azRefunds, allLedger, refundTx, adCreditTx, allAzIds, paidRows, freezeRows, otherTx, holdTx, failedEmails, orderlessTx] = await Promise.all([
     q(`select order_id, created_at, buyer_username, ship_name, ship_city, ship_state, ship_zip, ship_country,
               fulfillment_status, payment_status, cancel_state, item_subtotal, shipping_charged, discount,
               tax_collected, revenue, ebay_fees, fee_credit, ad_fees, refund_total, tracking_numbers
@@ -35,7 +57,15 @@ export async function buildDataset({ sheets = true } = {}) {
     q("select order_id, amount, transaction_at from ebay_transactions where type = 'NON_SALE_CHARGE' and fee_type = 'AD_FEE' and booking_entry = 'CREDIT'"),
     q('select distinct amazon_order_id from amazon_lines'),
     q('select month, paid, paid_at from settlements where paid is not null'),
-    q('select month, row_keys from settlement_freeze'),
+    q('select month, row_keys, row_values, totals from settlement_freeze'),
+    // eBay money on an order other than the sale, refunds and ad fees: return shipping labels and other fees
+    q("select order_id, type, fee_type, booking_entry, amount, transaction_at from ebay_transactions where order_id is not null and (type = 'SHIPPING_LABEL' or (type = 'NON_SALE_CHARGE' and coalesce(fee_type, '') <> 'AD_FEE'))"),
+    // Return/case holds and their releases, to spot a hold that was never released (a lost case)
+    q("select order_id, type, booking_entry, amount, transaction_at, transaction_id from ebay_transactions where type in ('DISPUTE', 'CREDIT')"),
+    // Amazon emails that couldn't be read: a sale near one may still have its purchase in it
+    q('select received_at from amazon_emails where ok = false').catch(() => []),
+    // eBay charges and credits that belong to no order (store fees, adjustments): listed for review, not guessed into a sale
+    q('select type, fee_type, booking_entry, amount, transaction_at, transaction_id from ebay_transactions where order_id is null'),
   ]);
 
   const ledger = sheets ? allLedger : [];
@@ -55,6 +85,11 @@ export async function buildDataset({ sheets = true } = {}) {
   const azRefundsBy = group(azRefunds, 'amazon_order_id');
   const refundTxBy = group(refundTx, 'order_id');
   const adCreditBy = group(adCreditTx, 'order_id'); // ad fees eBay gave back (e.g. when a sale is refunded)
+  const otherBy = group(otherTx, 'order_id'); // return labels and other eBay charges on an order
+  // An Amazon email that couldn't be read, from the day before a sale to 12 days after: its purchase may be in it, so
+  // the sale waits for its cost instead of being written off as not a dropship sale
+  const failedAt = failedEmails.map((r) => new Date(r.received_at).getTime()).filter(Number.isFinite);
+  const unreadEmailNear = (at) => { const t = new Date(at).getTime(); return failedAt.some((x) => x >= t - 86400_000 && x <= t + 12 * 86400_000); };
   const ovBy = new Map(overrides.map((o) => [o.order_id, o]));
   const ledgerByEbay = new Map(ledger.filter((l) => l.ebay_order_id && !l.is_refund).map((l) => [l.ebay_order_id, l]));
   const returnOpenBy = new Map(); // eBay order id -> its open return (also shown on the order's sheet row)
@@ -184,7 +219,7 @@ export async function buildDataset({ sheets = true } = {}) {
     const hasTx = txs.length > 0;
     const byMonth = new Map(); // pay cycle -> { refund, credit, amazonRefund, last }
     const bump = (m, k, v, at) => {
-      if (!byMonth.has(m)) byMonth.set(m, { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, last: at });
+      if (!byMonth.has(m)) byMonth.set(m, { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, otherCharge: 0, last: at });
       const e = byMonth.get(m);
       e[k] += v;
       if (at && (!e.last || new Date(at) > new Date(e.last))) e.last = at;
@@ -199,9 +234,12 @@ export async function buildDataset({ sheets = true } = {}) {
     for (const a of amazonOrders) {
       // A cancelled purchase already costs $0: its refund email is the same money, not extra
       if (a.lines.length && a.lines.every((l) => /cancel/i.test(l.status || ''))) continue;
-      for (const r of azRefundsBy.get(a.amazon_order_id) || []) {
+      let left = a.lines.filter((l) => !l.ignored && !/cancel/i.test(l.status || '')).reduce((t, l) => t + (num(l.line_total) || 0) + (num(l.tax) || 0), 0) || Infinity;
+      for (const r of [...(azRefundsBy.get(a.amazon_order_id) || [])].sort((x, y) => new Date(x.received_at) - new Date(y.received_at))) {
         const at = r.received_at || o.created_at;
-        bump(refundCycleOf(at), 'amazonRefund', num(r.amount) || 0, iso(at));
+        const amt = Math.min(num(r.amount) || 0, Math.max(0, left)); // never more back than the order cost
+        left -= amt;
+        if (amt > 0) bump(refundCycleOf(at), 'amazonRefund', amt, iso(at));
       }
     }
     for (const r of orphanRefundsBy.get(o.order_id) || []) {
@@ -211,7 +249,9 @@ export async function buildDataset({ sheets = true } = {}) {
     // An ad fee eBay gives back is money in on the payment for that day, like a refund (never a change to a paid one)
     const adCredits = adCreditBy.get(o.order_id) || [];
     for (const c of adCredits) { const at = c.transaction_at || o.created_at; bump(refundCycleOf(at), 'adCredit', num(c.amount) || 0, iso(at)); }
-    const same = byMonth.get(saleCycle) || { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0 };
+    // Return labels and other eBay charges on the order: money Drew paid, booked on the payment for that day
+    for (const t of otherBy.get(o.order_id) || []) { const at = t.transaction_at || o.created_at; bump(refundCycleOf(at), 'otherCharge', (t.booking_entry === 'CREDIT' ? -1 : 1) * (num(t.amount) || 0), iso(at)); }
+    const same = byMonth.get(saleCycle) || { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, otherCharge: 0 };
     const totalTxRefund = txs.reduce((s, t) => s + (num(t.amount) || 0) + (num(t.fee_amount) || 0), 0); // the buyer's whole refund
     const lastRefundAt = txs.map((t) => t.transaction_at).filter(Boolean).map(iso).sort().at(-1) || rets.map((r) => r.created_at).filter(Boolean).sort().at(-1) || null;
     const totalRefund = hasTx ? totalTxRefund : num(o.refund_total) || 0;
@@ -241,9 +281,11 @@ export async function buildDataset({ sheets = true } = {}) {
     const refundOverride = num(ov.refund_override);
     // A counted sale shows the refunds in its own payment (later ones are their own lines). A sale the sheet covers
     // is never counted, so its row shows everything that happened to it, refunds booked elsewhere included.
-    const shown = inSheet ? [...byMonth.values()].reduce((t, e) => ({ refund: t.refund + e.refund, credit: t.credit + e.credit }), { refund: 0, credit: 0 }) : same;
+    const all = [...byMonth.values()].reduce((t, e) => ({ refund: t.refund + e.refund, credit: t.credit + e.credit, otherCharge: t.otherCharge + e.otherCharge }), { refund: 0, credit: 0, otherCharge: 0 });
+    const shown = inSheet ? all : same;
     const refunds = cancelled ? 0 : refundOverride ?? (hasTx ? r2(shown.refund) : num(o.refund_total) || 0);
-    let fees = cancelled ? 0 : num(ov.fee_override) ?? r2(rawFees - (hasTx && refundOverride === null ? shown.credit : 0));
+    // A typed refund override is the buyer's whole refund: eBay's fee credit on it still comes back
+    let fees = cancelled ? 0 : num(ov.fee_override) ?? r2(rawFees - (hasTx ? (refundOverride === null ? shown.credit : all.credit) : 0) + (shown.otherCharge || 0));
     // Without Finances records we can't see eBay's fee credit; for a refund with no purchase assume only the
     // fixed $0.40 per-order fee was kept (what eBay does on a full refund)
     if (!cancelled && refundedNoPurchase && !hasTx && num(ov.fee_override) === null) fees = Math.min(fees, 0.4);
@@ -272,7 +314,7 @@ export async function buildDataset({ sheets = true } = {}) {
     // email never reached the inbox (everything before Sep 22): it waits for its cost instead of dropping out.
     const amazonShipped = (o.tracking_numbers || []).some((t) => /^(AQUAA|TBA)/i.test(String(t)));
     const notDropship = !hasCost && !cancelled && !amazonOrders.length && !led && num(ov.cost_override) === null &&
-      pastMatchWindow && !possibleSheetDup && !couldHavePurchase() && !amazonShipped;
+      pastMatchWindow && !possibleSheetDup && !couldHavePurchase() && !amazonShipped && !unreadEmailNear(o.created_at);
 
     const firstAz = amazonOrders.map((a) => a.order_date).filter(Boolean).sort()[0];
     const lagDays = firstAz
@@ -360,14 +402,17 @@ export async function buildDataset({ sheets = true } = {}) {
 
     // ---- later-month refunds become their own rows in the month they happened. For a sale covered by a
     // sheet, refunds inside sheet months are already in the sheet; later ones (after the sheets end) count.
-    if (beforeStart || ov.excluded || refundOverride !== null || cancelled) continue;
+    // A cancelled sale with no purchase has nothing to settle. A cancelled sale whose purchase counts (and a sale with a
+    // typed refund) still gets later money that isn't the eBay refund itself: Amazon's refund, ad fees given back.
+    if (beforeStart || ov.excluded || (cancelled && !(hasCost && cost > 0))) continue;
+    const onlyNonEbay = cancelled || refundOverride !== null;
     if (!inSheet && !counted) continue; // the sale itself isn't in the books yet (e.g. awaiting cost)
     // A refund on a sale from an earlier payment goes on the payment for the day it happened, unless that payment has
     // already been made: then it goes on the next one not yet paid (a paid payment never changes). Refunds of the same
     // sale that land on the same payment (e.g. Amazon's refund and the buyer's) are one line.
     const later = new Map(); // payment month -> { refund, credit, amazonRefund, adCredit, offset, last }
     let offsetUsed = false;
-    for (const [m, e] of byMonth) {
+    for (let [m, e] of byMonth) {
       if (m === saleCycle && !inSheet) continue; // refunds in the sale's own pay cycle are on the order row
       if (m < saleCycle) continue;
       // A sheet month's sheet already shows its refunds (through August, and any refund row it has). A refund
@@ -378,11 +423,12 @@ export async function buildDataset({ sheets = true } = {}) {
       const refundRow = refundRowByEbay.get(o.order_id);
       const saleOnEarlierSheet = Boolean(refundRow && led && led.month < refundRow.month);
       if (inSheet && ((sheetMonths.has(m) && m < CYCLE_START) || (refundRow && !saleOnEarlierSheet))) continue;
-      if (!e.refund && !e.credit && !e.amazonRefund && !e.adCredit) continue;
+      if (onlyNonEbay) e = { ...e, refund: 0, credit: 0 }; // the eBay refund is already on the sale (or there was no sale)
+      if (!e.refund && !e.credit && !e.amazonRefund && !e.adCredit && !e.otherCharge) continue;
       let target = m;
       while (closedFor(target, `REFUND:${o.order_id}:${target}`)) target = nextCycle(target);
-      const t = later.get(target) || { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, offset: 0, last: null };
-      t.refund += e.refund; t.credit += e.credit; t.amazonRefund += e.amazonRefund; t.adCredit += e.adCredit;
+      const t = later.get(target) || { refund: 0, credit: 0, amazonRefund: 0, adCredit: 0, otherCharge: 0, offset: 0, last: null };
+      t.refund += e.refund; t.credit += e.credit; t.amazonRefund += e.amazonRefund; t.adCredit += e.adCredit; t.otherCharge += e.otherCharge;
       if (saleOnEarlierSheet && !offsetUsed) { t.offset -= (num(refundRow.sale_price) || 0) - (num(refundRow.amazon_cost) || 0); offsetUsed = true; }
       if (e.last && (!t.last || e.last > t.last)) t.last = e.last;
       later.set(target, t);
@@ -404,12 +450,12 @@ export async function buildDataset({ sheets = true } = {}) {
         units: 0,
         item_subtotal: 0, shipping_charged: 0, discount: 0, tax_collected: 0,
         revenue: 0,
-        fees: r2(-e.credit - e.offset), // eBay's fee credit comes back (and a sheet refund row's amount already booked)
+        fees: r2(-e.credit - e.offset + e.otherCharge), // eBay's fee credit back (and a sheet refund row's amount already booked); return labels / other charges
         raw_fees: 0, fee_credit: r2(e.credit), raw_refunds: r2(e.refund), ad_fees: r2(-e.adCredit), // an ad fee given back
         amazon_cost: 0, amazon_cost_unknown: false, cost: 0,
         refunds: r2(e.refund),
         amazon_refund: r2(azr), email_refund: r2(azr), extra_cost: 0,
-        net: r2(-e.refund + e.credit + azr + e.adCredit + e.offset),
+        net: r2(-e.refund + e.credit + azr + e.adCredit + e.offset - e.otherCharge),
         margin: null, roi: null,
         has_cost: true, cost_source: 'refund', source: 'refund',
         ledger: null,
@@ -493,6 +539,36 @@ export async function buildDataset({ sheets = true } = {}) {
     else if (r.counted) while (frozen.has(m)) m = nextCycle(m);
     r.settle_month = m;
   }
+  // A closed payment's amounts don't change either. If a row it covered changes later (an ad fee charged after the
+  // payment, an edited cost) or stops counting, the closed payment keeps what it was paid on (a "Held as paid" line)
+  // and the difference goes on the next open payment as an adjustment line.
+  const nextOpen = (m) => { let n = nextCycle(m); while (frozen.has(n)) n = nextCycle(n); return n; };
+  const byKey = new Map(out.map((r) => [r.order_id, r]));
+  const zero = { collected: 0, cogs: 0, ad: 0, other: 0 };
+  // oldest first, so an adjustment line that later lands on another closed payment is checked against it too
+  for (const fr of [...freezeRows].sort((a, b) => (a.month < b.month ? -1 : 1))) {
+    const vals = typeof fr.row_values === 'string' ? JSON.parse(fr.row_values) : fr.row_values;
+    if (!vals) continue;
+    for (const [key, was] of Object.entries(vals)) {
+      const r = byKey.get(key);
+      const now = r && r.counted && r.settle_month === fr.month ? rowCents(r) : zero;
+      const d = { collected: now.collected - was.collected, cogs: now.cogs - was.cogs, ad: now.ad - was.ad, other: now.other - was.other };
+      if (!d.collected && !d.cogs && !d.ad && !d.other) continue;
+      const title = r?.title || was.title || key;
+      const neg = { collected: -d.collected, cogs: -d.cogs, ad: -d.ad, other: -d.other };
+      const hold = adjustmentRow(`HOLD:${key}`, fr.month, neg, `Held as paid · ${title}`, r, true);
+      const adj = adjustmentRow(`ADJ:${key}:${fr.month}`, frozenMonthOf.get(`ADJ:${key}:${fr.month}`) || nextOpen(fr.month), d, `Change after the ${fr.month} payment · ${title}${!r || !r.counted ? ' (no longer counted)' : ''}`, r, false);
+      out.push(hold, adj);
+      byKey.set(hold.order_id, hold); byKey.set(adj.order_id, adj);
+    }
+  }
+
+  // eBay money with no order, and return/case holds never released after 30 days (a case that may have been lost)
+  out.unassignedCharges = orderlessTx.map((t) => ({ type: t.type, fee_type: t.fee_type, amount: (t.booking_entry === 'CREDIT' ? -1 : 1) * (num(t.amount) || 0), at: iso(t.transaction_at), id: t.transaction_id }));
+  const released = new Set(holdTx.filter((t) => t.type === 'CREDIT').map((t) => String(t.transaction_id || '').match(/^DISPUTE_HOLD_REVERSE-(\d+)/)?.[1]).filter(Boolean));
+  out.openHolds = holdTx.filter((t) => t.type === 'DISPUTE' && t.booking_entry === 'DEBIT')
+    .map((t) => ({ order_id: t.order_id, amount: num(t.amount), since: iso(t.transaction_at), id: String(t.transaction_id || '').match(/^DISPUTE_HOLD-(\d+)/)?.[1] }))
+    .filter((h) => !released.has(h.id) && Date.now() - new Date(h.since).getTime() > 30 * 86400_000 && !(refundTxBy.get(h.order_id) || []).length);
   out.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   out.unmatchedRefunds = unmatchedRefunds; // not serialized with the rows; /api/data sends it separately
   return out;
@@ -506,9 +582,28 @@ export async function buildBooks() {
     q('select month, frozen_at, totals from settlement_freeze order by month'),
   ]);
   const day = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : d);
+  const ex = expenses.map((e) => ({ ...e, amount: num(e.amount) }));
+  // A closed payment's operating costs don't change: a cost added or edited for it afterwards is held there as paid
+  // and moved to the next open payment
+  const closedMonths = new Set(closed.map((c) => c.month));
+  const next = (m) => { const [y, mo] = m.split('-').map(Number); return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`; };
+  const nextOpen = (m) => { let n = next(m); while (closedMonths.has(n)) n = next(n); return n; };
+  for (const c of closed) {
+    const t = typeof c.totals === 'string' ? JSON.parse(c.totals) : c.totals || {};
+    const was = { seller: num(t.opexSeller ?? t.opex) ?? null, amazon: num(t.opexAmazon) ?? 0 };
+    if (was.seller === null) continue;
+    for (const [payer, frozen] of [['seller', was.seller], ['amazon', was.amazon]]) {
+      const now = Math.round(ex.filter((e) => e.month === c.month && (payer === 'amazon' ? e.paid_by === 'amazon' : e.paid_by !== 'amazon')).reduce((t2, e) => t2 + Math.round((e.amount || 0) * 100), 0)) / 100;
+      const d = Math.round((now - frozen) * 100) / 100;
+      if (Math.abs(d) < 0.005) continue;
+      ex.push({ id: `hold-${c.month}-${payer}`, month: c.month, category: 'Held as paid (costs changed after this payment)', amount: -d, paid_by: payer, source: 'adjustment', note: null });
+      ex.push({ id: `adj-${c.month}-${payer}`, month: nextOpen(c.month), category: `Change to the ${c.month} costs after it was paid`, amount: d, paid_by: payer, source: 'adjustment', note: null });
+    }
+  }
+  const splitOf = new Map(closed.map((c) => { const t = typeof c.totals === 'string' ? JSON.parse(c.totals) : c.totals || {}; return [c.month, t.split ?? null]; }));
   return {
-    expenses: expenses.map((e) => ({ ...e, amount: num(e.amount) })),
-    settlements: settlements.map((s) => ({ ...s, paid: num(s.paid), paid_at: day(s.paid_at) })),
+    expenses: ex,
+    settlements: settlements.map((s) => ({ ...s, paid: num(s.paid), paid_at: day(s.paid_at), split: splitOf.get(s.month) ?? null })),
     payments: payments.map((p) => ({ ...p, amount: num(p.amount), paid_at: day(p.paid_at) })),
     closed: closed.map((c) => ({ month: c.month, frozen_at: c.frozen_at, totals: c.totals })),
   };

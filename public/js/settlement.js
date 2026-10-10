@@ -56,14 +56,17 @@ export function settleMonth({ month, orders, expenses, settlements = [], splitAm
   const opexAmazon = monthExpenses.filter((e) => e.paid_by === 'amazon').reduce((s, e) => s + cents(e.amount), 0);
   const orderProfit = collected - cogs - adFees - otherCosts;
   const businessProfit = orderProfit - opexSeller - opexAmazon;
-  const shareAmazon = Math.round((businessProfit * splitAmazon) / 100);
+  // A closed payment keeps the split it was paid under (changing the split in Settings only affects open payments)
+  const stSplit = settlements.find((x) => x.month === month)?.split;
+  const split = Number.isFinite(Number(stSplit)) && stSplit !== null && stSplit !== undefined ? Number(stSplit) : splitAmazon;
+  const shareAmazon = Math.round((businessProfit * split) / 100);
   const shareSeller = businessProfit - shareAmazon;
   const sellerSends = cogs + opexAmazon + shareAmazon;
   const st = settlements.find((s) => s.month === month);
   const paid = st?.paid === null || st?.paid === undefined ? null : cents(st.paid);
   return {
     month,
-    orders: rows.length,
+    orders: rows.filter((o) => !o.adjustment).length, // adjustment lines are corrections, not sales
     collected: dollars(collected),
     finalValueFees: dollars(finalValueFees),
     cogs: dollars(cogs),

@@ -236,6 +236,20 @@ create table if not exists settlement_freeze (
   totals    jsonb,
   source    text
 );
+-- Each covered row's money when the payment was made (cents): a later change to it (a late ad fee, an edited cost)
+-- becomes an adjustment on the next open payment instead of changing the paid one
+alter table settlement_freeze add column if not exists row_values jsonb;
+-- Every manual change to money (payments, costs, expenses, links, settings, uploads): who/when/what, before and after
+create table if not exists money_log (
+  id      serial primary key,
+  at      timestamptz not null default now(),
+  action  text not null,
+  subject text,
+  before  jsonb,
+  after   jsonb,
+  ip      text,
+  agent   text
+);
 
 alter table amazon_lines add column if not exists source text default 'csv';
 create table if not exists amazon_emails (
@@ -351,6 +365,7 @@ export async function initDb() {
       kind: 'postgres',
       query: (text, params) => pool.query(text, params),
       exec: (text) => pool.query(text),
+      client: () => pool.connect(),
       close: () => pool.end(),
     };
   } else if (process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production') {
@@ -375,6 +390,7 @@ export async function initDb() {
       kind: 'local-postgres',
       query: (text, params) => pool.query(text, params),
       exec: (text) => pool.query(text),
+      client: () => pool.connect(),
       close: async () => { await pool.end(); if (embedded) await embedded.stop(); },
     };
   }
@@ -397,6 +413,22 @@ export async function closeDb() {
 
 export function dbKind() {
   return impl?.kind;
+}
+
+// Run several statements as one: all of them happen or none do, and other readers never see a half-done state
+export async function withTransaction(fn) {
+  const client = await impl.client();
+  try {
+    await client.query('begin');
+    const out = await fn(async (text, params = []) => (await client.query(text, params)).rows);
+    await client.query('commit');
+    return out;
+  } catch (e) {
+    await client.query('rollback').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function q(text, params = []) {

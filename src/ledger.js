@@ -4,7 +4,7 @@
 // Until the eBay API has the real order, each row stands in as a sale; once eBay syncs, the row is
 // matched to its eBay order (title + price, same month) and supplies that order's Amazon cost.
 import { parse } from 'csv-parse/sync';
-import { q, one } from './db.js';
+import { q, one, withTransaction } from './db.js';
 import { parseMoney } from './amazon.js';
 import { businessMonth, prevMonth } from './time.js';
 
@@ -190,13 +190,15 @@ export function sheetTitleMatch(sheetTitle, ebayTitle) {
 }
 
 export async function matchLedger() {
-  // Automatic pairings are recomputed every run (cheap, and lets better evidence fix an earlier pick); manual links are kept
-  await q("update ledger_entries set ebay_order_id = null, match_method = null where match_method = 'auto'");
-  const entries = await q('select * from ledger_entries where ebay_order_id is null');
+  // Automatic pairings are recomputed every run (cheap, and lets better evidence fix an earlier pick); manual links are
+  // kept. The new pairing is worked out first and only the rows that change are written, in one transaction, so a
+  // page loading during a sync never sees the sheet rows half un-paired.
+  const all = await q('select * from ledger_entries');
+  const entries = all.filter((e) => e.match_method !== 'manual' || !e.ebay_order_id);
   if (!entries.length) return 0;
-  const taken = new Set((await q('select ebay_order_id from ledger_entries where ebay_order_id is not null and not is_refund')).map((r) => r.ebay_order_id));
+  const taken = new Set(all.filter((e) => e.match_method === 'manual' && e.ebay_order_id && !e.is_refund).map((r) => r.ebay_order_id));
   const orders = await q(
-    `select o.order_id, o.created_at, o.revenue, o.refund_total, o.cancel_state, string_agg(li.title, ' | ') as title
+    `select o.order_id, o.created_at, o.revenue, o.ebay_fees, o.ad_fees, o.refund_total, o.cancel_state, string_agg(li.title, ' | ') as title
      from ebay_orders o left join ebay_line_items li on li.order_id = o.order_id
      where o.order_id not like 'DEMO-%' group by o.order_id`
   );
@@ -229,20 +231,34 @@ export async function matchLedger() {
       if (!okRatio) continue;
       // A sale eBay says was (mostly) refunded belongs with a refund row, not a normal sale row
       const mostlyRefunded = Number(o.refund_total) >= 0.5 * Number(o.revenue) || /CANCEL/i.test(o.cancel_state || '');
-      pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 - (mostlyRefunded ? 60 : 0) - o._crossPenalty });
+      // The sheet's price is eBay's payout (after fees, sometimes after the ad fee too): an exact match settles ties
+      // between two sales of the same item
+      const payout = Number(o.revenue) - Number(o.ebay_fees || 0);
+      const exact = Math.abs(Number(e.sale_price) - payout) < 0.01 || Math.abs(Number(e.sale_price) - (payout - Number(o.ad_fees || 0))) < 0.01;
+      pairs.push({ e, o, score: sim * 100 - Math.abs(0.87 - ratio) * 50 - (mostlyRefunded ? 60 : 0) - o._crossPenalty + (exact ? 25 : 0) });
     }
   }
   pairs.sort((a, b) => b.score - a.score);
   const usedE = new Set();
   const usedRefund = new Set();
   let n = 0;
+  const next = new Map(); // entry_key -> eBay order id
   for (const p of pairs) {
     if (usedE.has(p.e.entry_key)) continue;
     if (p.e.is_refund ? usedRefund.has(p.o.order_id) : taken.has(p.o.order_id)) continue;
-    await q('update ledger_entries set ebay_order_id = $2, match_method = $3 where entry_key = $1', [p.e.entry_key, p.o.order_id, 'auto']);
+    next.set(p.e.entry_key, p.o.order_id);
     usedE.add(p.e.entry_key);
     if (p.e.is_refund) usedRefund.add(p.o.order_id); else taken.add(p.o.order_id);
     n++;
+  }
+  const changes = entries.filter((e) => (next.get(e.entry_key) || null) !== (e.ebay_order_id || null));
+  if (changes.length) {
+    await withTransaction(async (tq) => {
+      for (const e of changes) {
+        const id = next.get(e.entry_key) || null;
+        await tq('update ledger_entries set ebay_order_id = $2, match_method = $3 where entry_key = $1', [e.entry_key, id, id ? 'auto' : null]);
+      }
+    });
   }
   return n;
 }

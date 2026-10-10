@@ -3,11 +3,11 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initDb, dbKind, q, one, getSetting, setSetting } from './db.js';
+import { initDb, dbKind, q, one, getSetting, setSetting, withTransaction } from './db.js';
 import { syncEbay, ebayStatus, ebayConfigured, ebayCanConnect, ebayConsentUrl, ebayConnectWithCode, loadEbayConnection } from './ebay.js';
 import { importAmazonCsv } from './amazon.js';
 import { runMatcher, getSuggestions, candidatesForSale } from './matcher.js';
-import { buildDataset, buildBooks } from './dataset.js';
+import { buildDataset, buildBooks, rowCents } from './dataset.js';
 import { isLedgerCsv, importLedgerCsv, matchLedger, parseLedgerCsv } from './ledger.js';
 import { checkSheet } from './sheetcheck.js';
 import { businessDay } from './time.js';
@@ -84,6 +84,24 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Every manual change to money is logged: what, when, before and after, and from where
+async function logMoney(req, action, subject, before, after, run = q) {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+  await run('insert into money_log (action, subject, before, after, ip, agent) values ($1, $2, $3::jsonb, $4::jsonb, $5, $6)',
+    [action, subject == null ? null : String(subject), before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), ip.slice(0, 80), String(req.headers['user-agent'] || '').slice(0, 200)]);
+}
+// A money amount typed or pasted by a person: "$16.19", "1,234.50", "(12.50)" = -12.50. Blank = null; junk = NaN.
+const parseAmount = (v) => {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return v;
+  let t = String(v).trim();
+  if (!t) return null;
+  const neg = /^\(.*\)$/.test(t) || t.startsWith('-');
+  t = t.replace(/[()$,\s-]/g, '');
+  if (!/^\d*\.?\d+$/.test(t)) return NaN;
+  return (neg ? -1 : 1) * Number(t);
+};
+
 const wrap = (fn) => (req, res) =>
   fn(req, res).catch((e) => {
     console.error(e);
@@ -104,7 +122,7 @@ app.get('/api/data', wrap(async (_req, res) => {
     emailStatus(),
     buildBooks(),
   ]);
-  res.json({ orders, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
+  res.json({ orders, flags: { unassignedCharges: orders.unassignedCharges || [], openHolds: orders.openHolds || [] }, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
 }));
 
 async function runMatcherSuggestionsCount() {
@@ -154,6 +172,18 @@ app.post('/api/amazon/import', upload.array('files', 20), wrap(async (req, res) 
   res.json(results);
 }));
 
+// The change log: every manual change to money, newest first
+app.get('/api/log', wrap(async (req, res) => res.json(await q('select id, at, action, subject, before, after, ip from money_log order by id desc limit $1', [Math.min(1000, Number(req.query.limit) || 300)]))));
+// Everything in one file: the books can be restored or audited from it (keep one after each payment)
+app.get('/api/export/backup', wrap(async (_req, res) => {
+  const tables = ['ebay_orders', 'ebay_line_items', 'ebay_transactions', 'ebay_returns', 'amazon_lines', 'order_links', 'link_rejections', 'order_overrides', 'amazon_refunds', 'amazon_emails', 'ledger_entries', 'expenses', 'settlements', 'settlement_payments', 'settlement_freeze', 'money_log'];
+  const out = { exported_at: new Date().toISOString(), tables: {} };
+  for (const t of tables) out.tables[t] = await q(`select * from ${t}`).catch((e) => ({ error: e.message }));
+  out.settings = (await q('select key, value from settings')).filter((r) => !/oauth|token|secret|password|key/i.test(r.key));
+  res.setHeader('Content-Disposition', `attachment; filename="dropship-ledger-backup-${businessDay(new Date())}.json"`);
+  res.json(out);
+}));
+
 // Check a hand-kept sheet against the site without changing anything
 app.post('/api/sheets/check', upload.single('file'), wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -164,30 +194,55 @@ app.post('/api/sheets/check', upload.single('file'), wrap(async (req, res) => {
 // ---------- editor saves ----------
 const OVERRIDE_FIELDS = ['cost_override', 'extra_cost', 'amazon_refund', 'fee_override', 'refund_override', 'notes', 'excluded', 'confirmed_separate'];
 
+const MONEY_FIELDS = ['cost_override', 'extra_cost', 'amazon_refund', 'fee_override', 'refund_override'];
 app.post('/api/overrides', wrap(async (req, res) => {
   const changes = req.body?.changes || [];
+  // Check everything first: nothing is saved unless every change is valid
+  const clean = [];
   for (const c of changes) {
     const fields = Object.keys(c).filter((k) => OVERRIDE_FIELDS.includes(k));
     if (!c.order_id || !fields.length) continue;
-    const vals = fields.map((f) => (c[f] === '' ? null : c[f]));
-    await q(
-      `insert into order_overrides (order_id, ${fields.join(', ')}, updated_at)
-       values ($1, ${fields.map((_, i) => `$${i + 2}`).join(', ')}, now())
-       on conflict (order_id) do update set ${fields.map((f) => `${f} = excluded.${f}`).join(', ')}, updated_at = now()`,
-      [c.order_id, ...vals]
-    );
+    if (/^(REFUND|ADJ|HOLD):/.test(c.order_id)) return res.status(400).json({ error: 'Refund and adjustment lines are worked out from eBay and Amazon. Edit the sale itself instead.' });
+    const vals = [];
+    for (const k of fields) {
+      if (!MONEY_FIELDS.includes(k)) { vals.push(k === 'notes' ? (c[k] == null ? null : String(c[k]).slice(0, 1000)) : Boolean(c[k])); continue; }
+      const v = parseAmount(c[k]);
+      if (v !== null && !Number.isFinite(v)) return res.status(400).json({ error: `${k.replace(/_/g, ' ')} for ${c.order_id}: "${c[k]}" isn't an amount` });
+      if (v !== null && v < 0) return res.status(400).json({ error: `${k.replace(/_/g, ' ')} for ${c.order_id} can't be negative` });
+      vals.push(v === null ? null : Math.round(v * 100) / 100);
+    }
+    clean.push({ id: c.order_id, fields, vals });
   }
-  res.json({ ok: true, saved: changes.length });
+  await withTransaction(async (tq) => {
+    for (const c of clean) {
+      const before = (await tq('select * from order_overrides where order_id = $1', [c.id]))[0] || null;
+      await tq(
+        `insert into order_overrides (order_id, ${c.fields.join(', ')}, updated_at)
+         values ($1, ${c.fields.map((_, i) => `${i + 2}`).join(', ')}, now())
+         on conflict (order_id) do update set ${c.fields.map((f) => `${f} = excluded.${f}`).join(', ')}, updated_at = now()`,
+        [c.id, ...c.vals]
+      );
+      await logMoney(req, 'override', c.id, before, Object.fromEntries(c.fields.map((f, i) => [f, c.vals[i]])), tq);
+    }
+  });
+  res.json({ ok: true, saved: clean.length });
 }));
 
 app.post('/api/amazon/lines', wrap(async (req, res) => {
   const changes = req.body?.changes || [];
   for (const c of changes) {
-    if (!c.line_key) continue;
-    if ('cost_override' in c)
-      await q('update amazon_lines set cost_override = $2, updated_at = now() where line_key = $1', [c.line_key, c.cost_override === '' ? null : c.cost_override]);
-    if ('ignored' in c) await q('update amazon_lines set ignored = $2, updated_at = now() where line_key = $1', [c.line_key, Boolean(c.ignored)]);
+    const v = 'cost_override' in c ? parseAmount(c.cost_override) : null;
+    if (v !== null && (!Number.isFinite(v) || v < 0)) return res.status(400).json({ error: `Amazon cost "${c.cost_override}" isn't a valid amount` });
   }
+  await withTransaction(async (tq) => {
+    for (const c of changes) {
+      if (!c.line_key) continue;
+      const before = (await tq('select cost_override, ignored from amazon_lines where line_key = $1', [c.line_key]))[0] || null;
+      if ('cost_override' in c) await tq('update amazon_lines set cost_override = $2, updated_at = now() where line_key = $1', [c.line_key, parseAmount(c.cost_override)]);
+      if ('ignored' in c) await tq('update amazon_lines set ignored = $2, updated_at = now() where line_key = $1', [c.line_key, Boolean(c.ignored)]);
+      await logMoney(req, 'amazon line', c.line_key, before, { cost_override: 'cost_override' in c ? parseAmount(c.cost_override) : undefined, ignored: 'ignored' in c ? Boolean(c.ignored) : undefined }, tq);
+    }
+  });
   res.json({ ok: true });
 }));
 
@@ -199,6 +254,7 @@ app.post('/api/links', wrap(async (req, res) => {
     if (prev)
       await q('insert into link_rejections (amazon_order_id, ebay_order_id) values ($1,$2) on conflict do nothing', [amazon_order_id, prev.ebay_order_id]);
     await q('delete from order_links where amazon_order_id = $1', [amazon_order_id]);
+    await logMoney(req, 'unlink', amazon_order_id, prev, null);
     return res.json({ ok: true, unlinked: true });
   }
   const eb = await one('select order_id from ebay_orders where order_id = $1', [ebay_order_id]);
@@ -211,6 +267,7 @@ app.post('/api/links', wrap(async (req, res) => {
     [amazon_order_id, ebay_order_id]
   );
   await q('delete from link_rejections where amazon_order_id = $1 and ebay_order_id = $2', [amazon_order_id, ebay_order_id]);
+  await logMoney(req, 'link', amazon_order_id, null, { ebay_order_id });
   res.json({ ok: true });
 }));
 
@@ -218,12 +275,15 @@ app.post('/api/links/reject', wrap(async (req, res) => {
   const { amazon_order_id, ebay_order_id, ignore_amazon } = req.body || {};
   if (ignore_amazon) await q('update amazon_lines set ignored = true where amazon_order_id = $1', [amazon_order_id]);
   else await q('insert into link_rejections (amazon_order_id, ebay_order_id) values ($1,$2) on conflict do nothing', [amazon_order_id, ebay_order_id]);
+  await logMoney(req, ignore_amazon ? 'ignore amazon order' : 'reject match', amazon_order_id, null, { ebay_order_id });
   res.json({ ok: true });
 }));
 
 // ---------- settings / sync ----------
 app.post('/api/settings', wrap(async (req, res) => {
   const b = req.body || {};
+  const before = await getAllSettings();
+  const money = ['split_amazon', 'settlement_day', 'business_start', 'partner_amazon', 'partner_ebay'].filter((k) => k in b);
   if ('home_zips' in b) await setSetting('home_zips', (b.home_zips || []).map((z) => String(z).trim().slice(0, 5)).filter(Boolean));
   if ('monthly_goal' in b) await setSetting('monthly_goal', Number(b.monthly_goal) || 0);
   if ('partner_amazon' in b) await setSetting('partner_amazon', String(b.partner_amazon || 'Partner A').slice(0, 40));
@@ -231,6 +291,7 @@ app.post('/api/settings', wrap(async (req, res) => {
   if ('split_amazon' in b) await setSetting('split_amazon', Math.min(100, Math.max(0, Number(b.split_amazon) || 0)));
   if ('business_start' in b) await setSetting('business_start', /^\d{4}-\d{2}$/.test(b.business_start || '') ? b.business_start : null);
   if ('settlement_day' in b) await setSetting('settlement_day', Math.min(28, Math.max(1, Math.round(Number(b.settlement_day) || 26))));
+  if (money.length) { const after = await getAllSettings(); await logMoney(req, 'settings', money.join(','), Object.fromEntries(money.map((k) => [k, before[k]])), Object.fromEntries(money.map((k) => [k, after[k]]))); }
   await runMatcher();
   res.json({ ok: true, settings: await getAllSettings() });
 }));
@@ -285,20 +346,35 @@ app.get('/api/ebay/callback', wrap(async (req, res) => {
 
 // ---------- books: operating expenses, settlements, ledger links ----------
 app.post('/api/expenses', wrap(async (req, res) => {
-  for (const c of req.body?.changes || []) {
-    if (c._delete && c.id) { await q('delete from expenses where id = $1', [c.id]); continue; }
-    if (!/^\d{4}-\d{2}$/.test(c.month || '') || !String(c.category || '').trim()) continue;
-    // Money must be a positive amount, and adding a name that already exists that month never overwrites it
-    if (!(Number(c.amount) > 0)) return res.status(400).json({ error: `Amount for "${c.category}" must be more than $0` });
-    if (!c.id) {
-      const dup = await one('select id from expenses where month = $1 and lower(trim(category)) = lower(trim($2))', [c.month, c.category]);
-      if (dup) return res.status(409).json({ error: `"${c.category}" already exists in ${c.month}. Edit its amount instead.` });
-    }
-    const vals = [c.month, String(c.category).trim(), Number(c.amount) || 0, c.note || null, c.paid_by === 'amazon' ? 'amazon' : 'seller'];
-    if (c.id) await q('update expenses set month=$2, category=$3, amount=$4, note=$5, paid_by=$6, updated_at=now() where id=$1', [c.id, ...vals]);
-    else await q(`insert into expenses (month, category, amount, note, paid_by) values ($1,$2,$3,$4,$5)
-                  on conflict (month, category) do update set amount=excluded.amount, note=excluded.note, paid_by=excluded.paid_by, updated_at=now()`, vals);
+  const changes = req.body?.changes || [];
+  // Check every change first, then save them all together (or none)
+  for (const c of changes) {
+    if (c._delete) continue;
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(c.month || '') || !String(c.category || '').trim()) return res.status(400).json({ error: 'Each cost needs a month and a name' });
+    // A cost is a positive amount; a refund or credit on a cost (e.g. a subscription refunded) is a negative one
+    const a = parseAmount(c.amount);
+    if (a === null || !Number.isFinite(a) || Math.abs(a) < 0.005) return res.status(400).json({ error: `Amount for "${c.category}" must be a number other than $0 (negative for a credit)` });
   }
+  await withTransaction(async (tq) => {
+    for (const c of changes) {
+      if (c._delete && c.id) {
+        const before = (await tq('select * from expenses where id = $1', [c.id]))[0] || null;
+        await tq('delete from expenses where id = $1', [c.id]);
+        await logMoney(req, 'expense removed', before ? `${before.month} ${before.category}` : c.id, before, null, tq);
+        continue;
+      }
+      if (c._delete) continue;
+      if (!c.id) {
+        const dup = (await tq('select id from expenses where month = $1 and lower(trim(category)) = lower(trim($2))', [c.month, c.category]))[0];
+        if (dup) throw Object.assign(new Error(`"${c.category}" already exists in ${c.month}. Edit its amount instead.`), { status: 409 });
+      }
+      const vals = [c.month, String(c.category).trim(), Math.round(parseAmount(c.amount) * 100) / 100, c.note || null, c.paid_by === 'amazon' ? 'amazon' : 'seller'];
+      const before = c.id ? (await tq('select * from expenses where id = $1', [c.id]))[0] || null : null;
+      if (c.id) await tq('update expenses set month=$2, category=$3, amount=$4, note=$5, paid_by=$6, updated_at=now() where id=$1', [c.id, ...vals]);
+      else await tq('insert into expenses (month, category, amount, note, paid_by) values ($1,$2,$3,$4,$5)', vals);
+      await logMoney(req, c.id ? 'expense edited' : 'expense added', `${vals[0]} ${vals[1]}`, before, { month: vals[0], category: vals[1], amount: vals[2], paid_by: vals[4] }, tq);
+    }
+  });
   res.json({ ok: true, ...(await buildBooks()) });
 }));
 // Payments. Each payment is its own row (a correction is a negative amount); settlements.paid is their sum and
@@ -317,11 +393,13 @@ async function closePeriod(month) {
   if (await one('select 1 from settlement_freeze where month = $1', [month])) return;
   const [orders, books] = await Promise.all([buildDataset(), buildBooks()]);
   const split = Number((await getSetting('split_amazon')) ?? 50);
-  const keys = orders.filter((o) => o.counted && o.settle_month === month).map((o) => o.order_id).sort();
+  const rows = orders.filter((o) => o.counted && o.settle_month === month);
+  const keys = rows.map((o) => o.order_id).sort();
+  const values = Object.fromEntries(rows.map((o) => [o.order_id, { ...rowCents(o), title: String(o.title || '').slice(0, 120) }]));
   const s = settleMonth({ month, orders, expenses: books.expenses, settlements: books.settlements, splitAmazon: split });
-  const totals = { orders: s.orders, collected: s.collected, cogs: s.cogs, adFees: s.adFees, opex: s.opex, businessProfit: s.businessProfit, sellerSends: s.sellerSends, paid: s.paid };
-  await q('insert into settlement_freeze (month, row_keys, totals, source) values ($1, $2::jsonb, $3::jsonb, $4) on conflict (month) do nothing',
-    [month, JSON.stringify(keys), JSON.stringify(totals), 'first payment recorded']);
+  const totals = { orders: s.orders, collected: s.collected, cogs: s.cogs, adFees: s.adFees, opex: s.opex, opexSeller: s.opexSeller, opexAmazon: s.opexAmazon, split, dueDay: Number((await getSetting('settlement_day')) ?? 26), businessProfit: s.businessProfit, sellerSends: s.sellerSends, paid: s.paid };
+  await q('insert into settlement_freeze (month, row_keys, row_values, totals, source) values ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5) on conflict (month) do nothing',
+    [month, JSON.stringify(keys), JSON.stringify(values), JSON.stringify(totals), 'first payment recorded']);
 }
 app.post('/api/settlements/payments', wrap(async (req, res) => {
   const { month, amount, paid_at, note } = req.body || {};
@@ -331,6 +409,7 @@ app.post('/api/settlements/payments', wrap(async (req, res) => {
   const day = paid_at ? String(paid_at) : businessDay(new Date());
   if (!DAY_RE.test(day)) return res.status(400).json({ error: 'paid_at must be YYYY-MM-DD' });
   await q('insert into settlement_payments (month, amount, paid_at, note) values ($1, $2, $3, $4)', [month, amt, day, note ? String(note).slice(0, 500) : null]);
+  await logMoney(req, 'payment added', month, null, { amount: amt, paid_at: day, note: note || null });
   await syncPaid(month);
   await closePeriod(month);
   res.json({ ok: true, ...(await buildBooks()) });
@@ -345,14 +424,16 @@ app.post('/api/settlements/pay-remaining', wrap(async (req, res) => {
   const left = Math.round((s.sellerSends - (s.paid || 0)) * 100) / 100;
   if (Math.abs(left) < 0.01) return res.json({ ok: true, nothing: true, ...books });
   await q('insert into settlement_payments (month, amount, paid_at, note) values ($1, $2, $3, $4)', [month, left, businessDay(new Date()), note ? String(note).slice(0, 500) : 'remaining balance']);
+  await logMoney(req, 'payment added (remaining balance)', month, null, { amount: left, paid_at: businessDay(new Date()) });
   await syncPaid(month);
   await closePeriod(month);
   res.json({ ok: true, amount: left, ...(await buildBooks()) });
 }));
 app.delete('/api/settlements/payments/:id', wrap(async (req, res) => {
-  const row = await one('select month from settlement_payments where id = $1', [Number(req.params.id)]);
+  const row = await one('select * from settlement_payments where id = $1', [Number(req.params.id)]);
   if (!row) return res.status(404).json({ error: 'No such payment' });
   await q('delete from settlement_payments where id = $1', [Number(req.params.id)]);
+  await logMoney(req, 'payment removed', row.month, row, null);
   await syncPaid(row.month);
   res.json({ ok: true, ...(await buildBooks()) });
 }));
@@ -369,6 +450,7 @@ app.post('/api/ledger/link', wrap(async (req, res) => {
   if (ebay_order_id && !(await one('select 1 from ebay_orders where order_id = $1', [ebay_order_id])))
     return res.status(404).json({ error: `No eBay order ${ebay_order_id}` });
   await q('update ledger_entries set ebay_order_id = $2, match_method = $3 where entry_key = $1', [entry_key, ebay_order_id || null, ebay_order_id ? 'manual' : null]);
+  await logMoney(req, 'sheet row link', entry_key, null, { ebay_order_id: ebay_order_id || null });
   res.json({ ok: true });
 }));
 app.post('/api/email/sync', wrap(async (_req, res) => res.json(await syncEmail())));

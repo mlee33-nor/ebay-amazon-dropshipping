@@ -13,6 +13,25 @@ and the Settlement page produces the monthly "eBay partner sends Amazon partner"
 - A sale with **no linked Amazon purchase is never counted** (shown as "awaiting cost"), and an Amazon order that
   isn't linked to a sale is **never counted**, so personal purchases can't leak into profit.
 
+### Payments and pay periods
+
+- From September 2026 each payment covers the **27th of the previous month through the 26th** (Arizona time) and is due on
+  the 26th. July and August 2026 were calendar months.
+- Each transfer is recorded on the Settlements page as **its own payment** (Add a payment / Pay the remaining). A later
+  payment, like a missed sale paid separately, never overwrites the first; a mistake can be removed or corrected with a
+  negative amount.
+- **A payment closes its period.** The first payment records every line the period covered and its amounts, the
+  operating costs and the split. Nothing that happens afterwards changes a closed period: a late refund, a late ad fee,
+  a sale costed later, an edited cost or a cost added late goes on the **next open payment** as its own line
+  ("Refund ·", "Change after the … payment ·"), and the closed one keeps what was paid ("Held as paid").
+- eBay's REFUND records are net of the fees eBay gives back; return holds (DISPUTE_HOLD) are not losses until refunded
+  (a hold never released after 30 days is flagged); ad fees eBay gives back and return labels are booked on the payment
+  for the day they happen.
+- Hand-kept monthly sheets are a **check**, not an input, from October 2026: uploading one shows every line next to the
+  site with the reason for each difference, and never changes the books. A paid month is never rewritten.
+- Every manual change to money (payments, costs, overrides, links, settings) is logged (`GET /api/log`), and
+  `GET /api/export/backup` downloads everything as one JSON file. Download one after each payment.
+
 ## Where the data comes from
 
 | Source | How | When |
@@ -44,6 +63,8 @@ and a CSV row for an order replaces the email-derived row for the same order.
 ## Tests
 
 ```bash
+sh scripts/test-all.sh            # every suite below, in order (TEST_PG_OFFSET=100 to run beside another checkout)
+sh scripts/install-hooks.sh       # once per clone: git push refuses to push unless every suite passes (Railway deploys on push)
 npm test                          # parser, matcher, settlement vs the real sheets
 npm run test:e2e                  # mock eBay API -> real sync -> Amazon email -> match -> profit, then deletes itself
 node scripts/stress-test.js 7 worst       # 320 sales, 12 names x 8 cities, decoys, cancels, refunds; must be 0 wrong links
@@ -61,8 +82,10 @@ node scripts/stress-test.js 7 realistic
    Alternative: set `INBOUND_TOKEN` and POST emails to `/api/email/inbound` from Zapier/Make/Apps Script.
 4. **Railway**: New project → Deploy from this GitHub repo → Variables: everything from `.env.example`, plus
    `DASHBOARD_PASSWORD` and `SESSION_SECRET` (any long random string). Railway runs `scripts/start.sh` and health-checks `/api/health`.
-5. **Ask AI model (optional)**: any OpenAI-compatible API reads the questions the built-in reader can't place (only the
-   question text is sent). For FreeLLMAPI running on your own PC over Tailscale:
+5. **Ask AI model (optional)**: any OpenAI-compatible API reads every question and writes the answer from the
+   dashboard's own figures; a reply with any number that isn't in those figures is replaced by the dashboard's wording.
+   The question **and the figures behind the answer** are sent to the model (FreeLLMAPI passes them to whichever
+   provider it picks). For FreeLLMAPI running on your own PC over Tailscale:
    - On the PC: `tailscale serve --bg 31415` (tailnet-only HTTPS in front of FreeLLMAPI; not Funnel).
    - Tailscale admin → Settings → Keys → generate an auth key: **Ephemeral** on, Reusable on (so redeploys can rejoin).
    - Railway Variables: `TS_AUTHKEY` = that key, `AI_API_BASE` = `https://<pc-name>.<tailnet>.ts.net/v1`,
@@ -70,6 +93,7 @@ node scripts/stress-test.js 7 realistic
      `tailscale serve --bg --http=80 http://127.0.0.1:31415` and use `AI_API_BASE` = `http://<pc tailscale ip>/v1` with
      `AI_HOST` = `<pc-name>.<tailnet>.ts.net` (traffic inside the tailnet is already encrypted).
    The server joins the tailnet in userspace mode and only the Ask AI request goes through it. When the PC is off,
-   Ask AI keeps working with the built-in reader.
+   Ask AI keeps working with the built-in reader. To keep the server from reaching your other devices, tag its key
+   (e.g. `tag:dashboard`) and add a Tailscale access rule that lets `tag:dashboard` reach only your PC on port 80.
 
 Local: `npm install`, copy `.env.example` to `.env`, `npm run dev`. With no `DATABASE_URL` it runs an embedded Postgres in `./.localdb`.
