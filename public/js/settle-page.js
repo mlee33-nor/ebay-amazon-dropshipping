@@ -121,7 +121,11 @@ export function renderSettlement(el) {
   };
 
   // Sales on this payment; a refund line (a refund of an earlier sale) is money on it, not a sale
-  const onIt = d.orders.filter((o) => o.counted && rowMonth(o) === selected);
+  // The statement shows the period's own activity (what a sheet kept for the period shows); a correction for an earlier,
+  // already-paid period that rides on this payment is listed under it and added to the amount to send
+  const onIt = d.orders.filter((o) => o.counted && rowMonth(o) === selected && !o.correction_for);
+  const so = s.own ? { ...s, ...s.own } : s;
+  const fix = s.corrections;
   const soldN = onIt.filter(isSale).length;
   const soldText = soldN === onIt.length ? count(soldN) : `${count(soldN)} <span class="muted">+ ${count(onIt.length - soldN)} refund line${onIt.length - soldN === 1 ? '' : 's'}</span>`;
 
@@ -166,11 +170,11 @@ export function renderSettlement(el) {
         <div>
           <div class="settle-sec">${sec(1, 'Transactions')}
             ${line('Items sold', soldText)}
-            ${line(`eBay payouts (collected by ${esc(B)})`, money(s.collected, 2))}
-            ${line(`Amazon COGS (paid by ${esc(A)})`, `−${money(s.cogs, 2)}`)}
-            ${line('eBay ad fees', `−${money(s.adFees, 2)}`)}
-            ${s.otherCosts ? line('Other per-order costs', `−${money(s.otherCosts, 2)}`) : ''}
-            ${line('Net item profit', money(s.orderProfit, 2), { total: true, cls: s.orderProfit < 0 ? 'neg' : '' })}
+            ${line(`eBay payouts (collected by ${esc(B)})`, money(so.collected, 2))}
+            ${line(`Amazon COGS (paid by ${esc(A)})`, `−${money(so.cogs, 2)}`)}
+            ${line('eBay ad fees', `−${money(so.adFees, 2)}`)}
+            ${so.otherCosts ? line('Other per-order costs', `−${money(so.otherCosts, 2)}`) : ''}
+            ${line('Net item profit', money(so.orderProfit, 2), { total: true, cls: so.orderProfit < 0 ? 'neg' : '' })}
           </div>
           <div class="settle-sec">${sec(2, 'Operating costs')}
             ${s.expenses.length ? s.expenses.map((e) => line(`${esc(e.category)}${e.note ? ` <span class="muted" style="font-size:11.5px">${esc(e.note)}</span>` : ''}${e.paid_by === 'amazon' ? ` <span class="pill">${ICONS.wallet} ${esc(A)} paid</span>` : ''}`, money(e.amount, 2))).join('') : '<div class="muted" style="font-size:13px;padding:6px 0">None entered</div>'}
@@ -179,17 +183,21 @@ export function renderSettlement(el) {
         </div>
         <div>
           <div class="settle-sec">${sec(3, 'Monthly summary')}
-            ${line('Gross revenue (eBay payouts)', money(s.collected, 2))}
-            ${line('Amazon COGS', `−${money(s.cogs, 2)}`)}
-            ${line('eBay fees (ads)', `−${money(s.adFees, 2)}`)}
+            ${line('Gross revenue (eBay payouts)', money(so.collected, 2))}
+            ${line('Amazon COGS', `−${money(so.cogs, 2)}`)}
+            ${line('eBay fees (ads)', `−${money(so.adFees, 2)}`)}
             ${line('Operating expenses', `−${money(s.opex, 2)}`)}
-            ${line('Net business profit', money(s.businessProfit, 2), { total: true, cls: s.businessProfit < 0 ? 'neg' : 'pos' })}
+            ${line('Net business profit', money(so.businessProfit, 2), { total: true, cls: so.businessProfit < 0 ? 'neg' : 'pos' })}
           </div>
           <div class="settle-sec">${sec(4, 'Partner settlement')}
-            ${line(`${esc(A)}'s reimbursement (Amazon COGS${s.opexAmazon ? ' + expenses' : ''})`, money(s.cogs + s.opexAmazon, 2))}
-            ${line(`${esc(A)}'s ${split}% profit share`, money(s.shareAmazon, 2), { cls: s.shareAmazon < 0 ? 'neg' : '' })}
-            ${line(`${esc(B)}'s ${100 - split}% profit share`, money(s.shareSeller, 2), { cls: s.shareSeller < 0 ? 'neg' : '' })}
+            ${line(`${esc(A)}'s reimbursement (Amazon COGS${s.opexAmazon ? ' + expenses' : ''})`, money(so.cogs + s.opexAmazon, 2))}
+            ${line(`${esc(A)}'s ${split}% profit share`, money(so.shareAmazon, 2), { cls: so.shareAmazon < 0 ? 'neg' : '' })}
+            ${line(`${esc(B)}'s ${100 - split}% profit share`, money(so.shareSeller, 2), { cls: so.shareSeller < 0 ? 'neg' : '' })}
+            ${fix ? `${line(`${monthLabel(selected)} period on its own`, money(Math.abs(so.sellerSends), 2) + (so.sellerSends < 0 ? ' <span class="muted">(other way)</span>' : ''))}
+            ${fix.rows.map((x) => line(`Correction for the ${monthLabel(x.correction_for)} payment, which missed it: ${esc(String(x.title || '').replace(/^Refund · /, '').slice(0, 45))} <span class="muted" style="font-size:11.5px">(profit ${money(x.net, 2)}${x.cogs ? `, Amazon cost ${money(x.cogs, 2)}` : ''})</span>`, '')).join('')}
+            ${line('Corrections on this payment', `${fix.sellerSends < 0 ? '−' : '+'}${money(Math.abs(fix.sellerSends), 2)}`, { cls: fix.sellerSends < 0 ? 'neg' : '' })}` : ''}
             ${line(`${ICONS.arrow.replace('<svg', '<svg style="width:14px;height:14px;color:var(--accent)"')} ${sendsLine}`, money(v.amount, 2), { total: true })}
+            ${(() => { const later = d.orders.filter((o) => o.counted && o.correction_for === selected); return later.length ? `<div class="muted" style="font-size:12.5px;margin-top:8px">Found after this payment was made: ${later.map((o) => `${esc(String(o.title || '').replace(/^Refund · /, '').slice(0, 45))} (profit ${money(o.net, 2)})`).join(', ')}. This payment stays as paid; the correction is on the ${[...new Set(later.map((o) => monthLabel(rowMonth(o))))].join(' and ')} payment.</div>` : ''; })()}
           </div>
         </div>
       </div>

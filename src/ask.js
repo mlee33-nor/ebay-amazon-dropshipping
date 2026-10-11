@@ -227,7 +227,9 @@ async function load() {
 const counted = (ctx) => ctx.orders.filter((o) => o.counted);
 function inPeriod(o, p) {
   if (!p || p.all) return true;
-  if (p.cycle) return o.settle_month === p.cycle; // a pay cycle is exactly the rows its payment settles
+  // a pay cycle is its own activity: the rows its payment settles, less corrections for an earlier paid period
+  // (o.correction_for), which the payment answer lists on their own (the dashboard's pay-period view does the same)
+  if (p.cycle) return o.settle_month === p.cycle && !o.correction_for;
   // Whole months use the server's business month, so sheet rows with approximate dates land exactly
   if (p.month && !p.sinceMonth) return o.business_month === p.month && businessDay(o.created_at) <= p.to;
   const d = businessDay(o.created_at);
@@ -285,6 +287,8 @@ function opexIn(ctx, p, keep = () => true) {
   }
   return total;
 }
+// What a payment's corrections are, by name and the payment that missed them
+const correctionNames = (x) => x.corrections.rows.map((r) => `${String(r.title || '').replace(/^Refund · /, '')}, ${monthName(r.correction_for).split(' ')[0]}`).join('; ');
 const settle = (ctx, month) => settleMonth({ month, orders: ctx.orders, expenses: ctx.books.expenses, settlements: ctx.books.settlements, splitAmazon: ctx.s.split });
 // A later refund line counts toward its product, not as a product of its own: it takes the title of the sale it
 // refunds (refund_of), or its own title without "Refund · " when that sale isn't in the books
@@ -685,7 +689,8 @@ function answerMetric(ctx, it) {
       if (sm) {
         const st = settle(ctx, sm);
         const r = settlePeriodRange(sm, ctx.s.dueDay);
-        b.push(`${monthName(sm).split(' ')[0]} payment (sales ${dayLabel(r.from)}–${dayLabel(r.to)}): ${p.cycle ? '' : `${$(cents(st.businessProfit))} business profit; `}it comes to ${$(cents(st.sellerSends))} for ${ctx.s.B} to send ${ctx.s.A}.`);
+        const own = st.own || st;
+        b.push(`${monthName(sm).split(' ')[0]} payment (sales ${dayLabel(r.from)}–${dayLabel(r.to)}): ${p.cycle ? '' : `${$(cents(own.businessProfit))} business profit; `}it comes to ${$(cents(st.sellerSends))} for ${ctx.s.B} to send ${ctx.s.A}${st.corrections ? `, including ${$(cents(st.corrections.sellerSends))} of corrections for an earlier payment that missed them (${correctionNames(st)})` : ''}.`);
       }
       if (it.defaulted) { const all = stats(rowsFor(ctx, allTime(ctx))); b.push(`All time: ${$(all.net - opexIn(ctx, allTime(ctx)))} business profit from ${plural(all.n, 'sale')}.`); }
       return { text: `**Net business profit ${periodTitle(ctx, p)}: ${$(s.net - oc)}.**${waitNote}`, bullets: b, chips: [`Why are we ${s.net >= 0 ? 'up' : 'down'} ${p.label}?`, `Top products ${p.label}`, `How many sales ${p.label}?`] };
@@ -893,15 +898,18 @@ function answerSettlement(ctx, it) {
       : cents(x.sellerSends) <= 0 ? standing(x).line
       : daysTo(x.month) > 0 ? `Not due yet: ${whenDue(x.month)}, and sales until then still add to it.`
       : `Not paid yet, ${whenDue(x.month)}.`;
-    const share = cents(x.shareAmazon);
+    const own = x.own || x;
+    const share = cents(own.shareAmazon);
+    const fix = x.corrections ? cents(x.corrections.sellerSends) : 0;
     const st = standing(x);
     return {
       // "Did Drew pay for September?" answers that question first
       text: paidQ ? `**${st.lead}.** ${payName(x.month)}: ${B} sends ${A} ${$(cents(x.sellerSends))}. ${st.line}` : `**${payName(x.month)}: ${B} sends ${A} ${$(cents(x.sellerSends))}.** ${state}`,
       bullets: [
-        `Amazon cost ${A} paid: ${$(cents(x.cogs))}`,
-        `${A}'s ${ctx.s.split}% share of the ${$(cents(x.businessProfit))} business profit: ${$(share)}`,
-        `${$(cents(x.cogs))} ${share < 0 ? '−' : '+'} ${$(Math.abs(share))} = ${$(cents(x.sellerSends))}`,
+        `Amazon cost ${A} paid: ${$(cents(own.cogs))}`,
+        `${A}'s ${ctx.s.split}% share of the ${$(cents(own.businessProfit))} business profit: ${$(share)}`,
+        x.corrections ? `Corrections for an earlier payment that missed them (${correctionNames(x)}): ${fix < 0 ? '−' : '+'}${$(Math.abs(fix))}` : null,
+        `${$(cents(own.cogs))} ${share < 0 ? '−' : '+'} ${$(Math.abs(share))}${x.corrections ? ` ${fix < 0 ? '−' : '+'} ${$(Math.abs(fix))}` : ''} = ${$(cents(x.sellerSends))}`,
         paidQ && unpaid(st) ? RECORD : null,
       ].filter(Boolean),
       chips: [`What does ${B} owe?`, `Profit ${monthName(x.month).split(' ')[0]}`],

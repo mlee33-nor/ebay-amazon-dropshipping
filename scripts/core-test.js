@@ -171,6 +171,30 @@ await check('two sheet rows for the same item pair with the sale whose payout th
   assert.deepEqual(again, rows);
 });
 
+// ---- a refund dated inside a paid period that its payment missed (Mozi Wash): money on the next payment, but a
+// correction for the paid period, not the next period's own activity
+await order('MISSED-REF', '2027-04-05T19:00:00Z', 'Missed Refund Mug', 30, { fee: 4.08 });
+await q("insert into order_overrides (order_id, cost_override) values ('MISSED-REF', 18)");
+const apr = await pay('2027-04', null, '2027-04-26');
+await tx('R-MISSED', 'MISSED-REF', 'REFUND', 25.92, 4.08, '2027-04-20T19:00:00Z'); // synced after April was paid
+await order('MAY-SALE', '2027-05-10T19:00:00Z', 'May Sale Bowl', 50, { fee: 6.8 });
+await q("insert into order_overrides (order_id, cost_override) values ('MAY-SALE', 30)");
+await check('a refund dated in paid April lands on May as a correction for April; May shows its own profit apart', async () => {
+  const { data, s } = await settle('2027-05');
+  // the sale was on April, so the refund changes April's row: held as paid there, the difference on May
+  const fix = data.find((o) => o.order_id === 'ADJ:MISSED-REF:2027-04');
+  assert.ok(fix, 'adjustment line on May');
+  assert.equal(fix.settle_month, '2027-05');
+  assert.equal(fix.correction_for, '2027-04');
+  assert.equal(data.find((o) => o.order_id === 'MAY-SALE').correction_for, undefined);
+  assert.deepEqual(s.corrections.rows.map((x) => x.order_id), [fix.order_id], 'only the April correction is set apart');
+  assert.equal(Math.round(s.own.businessProfit * 100), Math.round((s.businessProfit - fix.net) * 100), 'May on its own leaves the correction out');
+  assert.equal(s.corrections.profit, fix.net);
+  assert.equal(Math.round((s.own.sellerSends + s.corrections.sellerSends) * 100), Math.round(s.sellerSends * 100), 'own + corrections = the payment');
+  const { s: a } = await settle('2027-04');
+  assert.equal(a.sellerSends, apr.sellerSends, 'April stays as paid');
+});
+
 await closeDb();
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(failed ? '\nCORE: FAILED' : '\nCORE: ALL CHECKS PASSED');

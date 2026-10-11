@@ -39,6 +39,27 @@ const rowMonth = (o) => o.settle_month || o.business_month || monthKey(o.created
 
 export function settleMonth({ month, orders, expenses, settlements = [], splitAmazon = 50 }) {
   const rows = orders.filter((o) => o.counted && rowMonth(o) === month);
+  const out = settleRows({ month, rows, expenses, settlements, splitAmazon });
+  // Corrections for an earlier, already-paid period (o.correction_for; see dataset.js) are money on this payment but
+  // not this period's own activity. `own` is the period alone (what a sheet kept for this period shows); the
+  // corrections are the rest, worked out as the difference so own + corrections is exactly the payment.
+  const fixes = rows.filter((o) => o.correction_for);
+  if (fixes.length) {
+    const own = settleRows({ month, rows: rows.filter((o) => !o.correction_for), expenses, settlements, splitAmazon });
+    const diff = (k) => Math.round((out[k] - own[k]) * 100) / 100;
+    out.own = { orders: own.orders, collected: own.collected, cogs: own.cogs, adFees: own.adFees, otherCosts: own.otherCosts, orderProfit: own.orderProfit, businessProfit: own.businessProfit, shareAmazon: own.shareAmazon, shareSeller: own.shareSeller, sellerSends: own.sellerSends };
+    out.corrections = {
+      rows: fixes.map((o) => ({ order_id: o.order_id, title: o.title, correction_for: o.correction_for, net: o.net, cogs: Math.round((cents(o.cost) - cents(o.amazon_refund))) / 100 })),
+      cogs: diff('cogs'), profit: diff('businessProfit'), shareAmazon: diff('shareAmazon'), sellerSends: diff('sellerSends'),
+    };
+  } else {
+    out.own = null;
+    out.corrections = null;
+  }
+  return out;
+}
+
+function settleRows({ month, rows, expenses, settlements, splitAmazon }) {
   let collected = 0; // what the eBay partner actually received: revenue - eBay final value fees - buyer refunds
   let cogs = 0; // what the Amazon partner paid Amazon, net of Amazon refunds
   let adFees = 0;

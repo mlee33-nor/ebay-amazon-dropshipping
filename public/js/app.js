@@ -1,5 +1,5 @@
 import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, fmtTime, ago, api, toast, downloadCsv, ICONS, DAY, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel, azDay, azHour, azWeekday, azStart, addDays, daysBetween } from './util.js';
-import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor, isSale, saleIdOf, rowMonth } from './metrics.js';
+import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor, isSale, saleIdOf, rowMonth, periodMonth } from './metrics.js';
 import { ORDER_EXPORT } from './report-math.js';
 import { ebayStepIssues, ebayIssueText, emailFailures, emailFailureText } from './health.js';
 import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer, crosshair, areaFade } from './charts.js';
@@ -594,7 +594,10 @@ function overview(el) {
   const oxPrev = r.start ? opexFor(previousRange(r), expenses, { dueDay: dueDayOf() }) : { total: 0 };
   // A payment picked in the range bar shows that payment's own numbers, to the cent of the Settlement page
   const rangeSettle = r.month ? settleMonth({ month: r.month, orders: state.data.orders, expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) }) : null;
-  const biz = rangeSettle ? rangeSettle.businessProfit : s.net - ox.total;
+  // The period's own numbers (what a sheet kept for the period shows); corrections for an earlier paid period that
+  // ride on this payment are shown under the headline, not in it
+  const rangeOwn = rangeSettle?.own ? { ...rangeSettle, ...rangeSettle.own } : rangeSettle;
+  const biz = rangeOwn ? rangeOwn.businessProfit : s.net - ox.total;
   const bizPrev = p.net - oxPrev.total;
   // Monthly-sheet rows are eBay payouts after fees, and their refund rows carry eBay's refund fee, not a buyer refund
   const split = refundSplit(all.filter((o) => o.counted));
@@ -609,10 +612,11 @@ function overview(el) {
   const curMonth = currentPeriod();
   const curRange = settlePeriodRange(curMonth, dueDayOf());
   const thisSettle = settleMonth({ month: curMonth, orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) });
-  const ms = summarize(state.data.orders.filter((o) => rowMonth(o) === curMonth));
+  const cur = thisSettle.own ? { ...thisSettle, ...thisSettle.own } : thisSettle; // the period's own numbers
+  const ms = summarize(state.data.orders.filter((o) => periodMonth(o) === curMonth));
   const periodDays = daysBetween(curRange.from, curRange.to) + 1;
   const dayOfPeriod = Math.min(periodDays, Math.max(0, daysBetween(curRange.from, azDay()) + azHour(Date.now()) / 24));
-  const projected = dayOfPeriod > 0.5 ? (thisSettle.orderProfit / dayOfPeriod) * periodDays : null;
+  const projected = dayOfPeriod > 0.5 ? (cur.orderProfit / dayOfPeriod) * periodDays : null;
   const goal = Number(state.data.settings.monthly_goal) || 0;
 
   const top = byProduct(all, state.data.orders).filter((x) => x.countedRows > 0).sort((a, b) => b.net - a.net).slice(0, 8);
@@ -702,10 +706,12 @@ function overview(el) {
       </div>
       <div class="hero-value num ${biz < 0 ? 'neg' : ''}" id="hero-value">${money(biz, 2)}</div>
       <div class="hero-meta">
-        <span>Item profit <b>${money(rangeSettle ? rangeSettle.orderProfit : s.net, 2)}</b></span>
+        <span>Item profit <b>${money(rangeOwn ? rangeOwn.orderProfit : s.net, 2)}</b></span>
         <span>− operating costs <b>${money(rangeSettle ? rangeSettle.opex : ox.total, 2)}</b></span>
         <span><b>${count(s.countedOrders)}</b> costed of <b>${count(s.orders)}</b> sales</span>
       </div>
+      ${rangeSettle?.corrections ? `<div class="muted" style="font-size:12.5px;margin-top:6px">Not in this profit: ${money(rangeSettle.corrections.profit, 2)} for the ${rangeSettle.corrections.rows.map((x) => monthLabel(x.correction_for, 'long')).filter((v, i, a) => a.indexOf(v) === i).join(' and ')} payment, which missed it (${rangeSettle.corrections.rows.map((x) => esc(String(x.title || '').replace(/^Refund · /, '').slice(0, 40))).join(', ')}). It is settled on this payment: <a href="#/settlement">Settlement</a>.</div>` : ''}
+      ${(() => { const later = r.month ? state.data.orders.filter((o) => o.counted && o.correction_for === r.month) : []; if (!later.length) return ''; const tot = later.reduce((t, o) => t + (Number(o.net) || 0), 0); return `<div class="muted" style="font-size:12.5px;margin-top:6px">Found after this payment was made: ${money(tot, 2)} (${later.map((o) => esc(String(o.title || '').replace(/^Refund · /, '').slice(0, 40))).join(', ')}). This payment stays as paid; the correction is on the ${[...new Set(later.map((o) => monthLabel(rowMonth(o), 'long')))].join(' and ')} payment.</div>`; })()}
       <div class="scrub-at" id="hero-at" aria-live="polite">Drag across the chart to see the running profit</div>
       <div class="spark scrub" id="hero-spark" title=""></div>
       <div class="hero-stats">
@@ -751,12 +757,12 @@ function overview(el) {
 
   <div class="grid g-12 mt">
     ${card('This pay period', `${monthLabel(curMonth, 'long')} payment · ${fmtDate(curRange.from)} – ${fmtDate(curRange.to)}`, `
-      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0" ${countable(thisSettle.orderProfit, (v) => money(v, 0))}>${money(thisSettle.orderProfit, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
-      <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, thisSettle.orderProfit / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
-      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (thisSettle.orderProfit / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
-      <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${thisSettle.businessProfit < 0 ? 'neg' : ''}">${money(thisSettle.businessProfit, 2)}</span></div>
+      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0" ${countable(cur.orderProfit, (v) => money(v, 0))}>${money(cur.orderProfit, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
+      <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, cur.orderProfit / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
+      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (cur.orderProfit / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
+      <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${cur.businessProfit < 0 ? 'neg' : ''}">${money(cur.businessProfit, 2)}</span></div>
       <div class="stat-row"><span class="k">Projected for the period</span><span class="v">${projected !== null ? money(projected, 0) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfPeriod > 0.5 ? money(thisSettle.orderProfit / dayOfPeriod) : '—'}</span></div>
+      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfPeriod > 0.5 ? money(cur.orderProfit / dayOfPeriod) : '—'}</span></div>
       <div class="stat-row"><span class="k">Sales this period</span><span class="v">${count(ms.orders)}</span></div>
       <div class="stat-row"><span class="k">All-time item profit</span><span class="v">${money(allTime.net, 0)}</span></div>`, { cls: 'c-4' })}
     ${card('Needs attention', 'Click an item to jump there', `<div class="alert-list">

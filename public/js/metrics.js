@@ -5,6 +5,11 @@ import { settlePeriodOf, settlePeriodRange, monthKey } from './settlement.js';
 
 // Which payment a row is on: the server decides it (settle_month); older data falls back to the month
 export const rowMonth = (o) => o.settle_month || o.business_month || monthKey(o.created_at);
+// The pay period whose own activity a row is: its payment, except a correction for an earlier, already-paid period
+// (o.correction_for), which is money on a later payment but neither period's own activity (null). A pay period picked
+// in the range bar shows its own rows, so its numbers match a sheet kept for that period; the Overview and the
+// Settlement page show the corrections separately. Date ranges (last 7 days, ...) still include every row by its date.
+export const periodMonth = (o) => (o.correction_for ? null : rowMonth(o));
 // A refund line ("Refund · …", a refund booked on a later payment) or a monthly-sheet refund row is money, not a
 // sale: it keeps its money in every total but is never counted as an order, a unit, a buyer or a product of its own
 // Refund lines and adjustment lines (money moved between payments after one was paid) are never sales
@@ -54,7 +59,7 @@ export function previousRange(r) {
 }
 
 export const inRange = (orders, r) =>
-  !r ? [] : r.month ? orders.filter((o) => rowMonth(o) === r.month) : orders.filter((o) => {
+  !r ? [] : r.month ? orders.filter((o) => periodMonth(o) === r.month) : orders.filter((o) => {
     const t = new Date(o.created_at).getTime();
     return (!r.start || t >= r.start.getTime()) && t <= r.end.getTime();
   });

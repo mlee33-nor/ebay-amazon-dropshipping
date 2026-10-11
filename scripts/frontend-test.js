@@ -431,17 +431,18 @@ await check('after October is paid: costing Graphique isn\'t refused (it goes on
 });
 await q("insert into order_overrides (order_id, cost_override) values ('17-15263-09121', 12.5)");
 const carried = await load();
-await check('a row carried onto a later payment (Graphique, sold Oct 9, costed after October was paid) is in that payment\'s chart', () => {
+await check('a sale carried onto a later payment (Graphique, sold Oct 9, costed after October was paid) is a correction for October: paid on November, not November’s own numbers', () => {
   const g = carried.orders.find((o) => o.order_id === '17-15263-09121');
-  assert.deepEqual([g.counted, g.settle_month, U.azDay(g.created_at)], [true, '2026-11', '2026-10-09']);
+  assert.deepEqual([g.counted, g.settle_month, g.correction_for, U.azDay(g.created_at)], [true, '2026-11', '2026-10', '2026-10-09']);
   const r = M.rangeFor('month', null, '2026-11', { now: az('2026-11-10T12:00:00') });
   const rows = M.inRange(carried.orders, r);
-  assert.ok(rows.includes(g));
+  assert.ok(!rows.includes(g), 'not in November’s own view');
   const bs = M.buckets(r, rows, 'day');
   assert.equal(bs.reduce((t, b) => t + cents(b.net), 0), cents(M.summarize(rows).net), 'the buckets add up to the hero');
-  const without = M.buckets(r, rows.filter((o) => o !== g), 'day');
-  assert.equal(cents(bs[0].net) - cents(without[0].net), cents(g.net), 'in the first bucket of the period');
-  assert.equal(cents(M.summarize(rows).net), cents(settle(carried, '2026-11').orderProfit), 'and to the payment');
+  const nov = settle(carried, '2026-11');
+  assert.equal(cents(M.summarize(rows).net), cents((nov.own || nov).orderProfit), 'November’s own view is its payment less the correction');
+  assert.deepEqual(nov.corrections.rows.map((x) => x.order_id), [g.order_id]);
+  assert.equal(cents(nov.corrections.profit), cents(g.net), 'the correction is the sale’s profit');
   assert.equal(settle(carried, '2026-10').sellerSends, octSends, 'October is unchanged');
 });
 
@@ -507,6 +508,20 @@ await check('adjustment lines are not sales, products, tax lines or editable', (
   assert.equal(E.isReadOnlyRow(adj), true);
   assert.equal(E.isReadOnlyRow({ order_id: 'HOLD:x' }), true);
   assert.equal(M.STATUS_META.adjustment.label, 'Payment adjustment');
+});
+
+// A correction for an earlier paid period (Mozi Wash) is money on the later payment but not that period's own numbers
+await check('a pay period shows its own profit; a correction for an earlier paid period is set apart and still paid', () => {
+  const mk = (id, extra) => ({ order_id: id, source: 'ebay', counted: true, title: id, items: [], returns: [], amazon_orders: [], tracking_numbers: [], settle_month: '2026-10', business_month: '2026-10', created_at: '2026-10-05T19:00:00Z', revenue: 0, fees: 0, refunds: 0, cost: 0, amazon_refund: 0, ad_fees: 0, extra_cost: 0, net: 0, ...extra });
+  const sale = mk('S1', { revenue: 100, fees: 10, cost: 50, net: 40 });
+  const mozi = mk('REFUND:M:2026-10', { source: 'refund', refund_of: 'M', correction_for: '2026-09', business_month: '2026-09', created_at: '2026-09-11T05:22:00Z', refunds: 55.58, net: -55.58 });
+  const s = settleMonth({ month: '2026-10', orders: [sale, mozi], expenses: [{ month: '2026-10', amount: 20, paid_by: 'seller' }], splitAmazon: 50 });
+  assert.deepEqual([s.own.businessProfit, s.own.sellerSends], [20, 60]);
+  assert.deepEqual([s.corrections.profit, s.corrections.sellerSends], [-55.58, -27.79]);
+  assert.deepEqual([s.businessProfit, s.sellerSends], [-35.58, 32.21]);
+  const r = { month: '2026-10', start: new Date('2026-09-27T07:00:00Z'), end: new Date('2026-10-27T06:59:59Z') };
+  assert.deepEqual(M.inRange([sale, mozi], r).map((o) => o.order_id), ['S1'], 'the pay-period view is the period alone');
+  assert.deepEqual(M.inRange([sale, mozi], { start: new Date('2026-09-01T07:00:00Z'), end: new Date('2026-10-27T06:59:59Z') }).length, 2, 'a date range has both');
 });
 
 await closeDb();

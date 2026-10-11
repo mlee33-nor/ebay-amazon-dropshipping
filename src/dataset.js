@@ -558,9 +558,20 @@ export async function buildDataset({ sheets = true } = {}) {
       const neg = { collected: -d.collected, cogs: -d.cogs, ad: -d.ad, other: -d.other };
       const hold = adjustmentRow(`HOLD:${key}`, fr.month, neg, `Held as paid · ${title}`, r, true);
       const adj = adjustmentRow(`ADJ:${key}:${fr.month}`, frozenMonthOf.get(`ADJ:${key}:${fr.month}`) || nextOpen(fr.month), d, `Change after the ${fr.month} payment · ${title}${!r || !r.counted ? ' (no longer counted)' : ''}`, r, false);
+      adj.correction_for = fr.month;
       out.push(hold, adj);
       byKey.set(hold.order_id, hold); byKey.set(adj.order_id, adj);
     }
+  }
+
+  // A row that is on a later payment only because its own pay period was already paid (a refund dated in a paid
+  // period that its payment missed, a sale costed after its payment) is a correction for that period: it is money on
+  // this payment, but not this period's own activity. Pages show it apart, so a period's own numbers match a sheet
+  // kept for that period. (A refund line is dated by its latest refund.)
+  for (const r of out) {
+    if (!r.counted || r.adjustment) continue;
+    const own = r.approx_date ? r.business_month : settlePeriodOf(businessDay(r.created_at), dueDay);
+    if (own && r.settle_month && own < r.settle_month) r.correction_for = own;
   }
 
   // eBay money with no order, and return/case holds never released after 30 days (a case that may have been lost)
