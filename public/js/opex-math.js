@@ -36,3 +36,25 @@ export function costProblem({ month, amount, note, paidBy }, paid) {
   if (paid.has(month)) return 'paid';
   return null;
 }
+
+// A cost on a payment that has been made can't be changed, deleted or moved, and no cost can be moved or added onto
+// one: the payment would no longer match what was sent. Returns the paid month that blocks it, or null. `was` is the
+// saved cost (null for a new one), `now` what it would become (null when it is deleted).
+export function closedCostMonth({ was = null, now = null }, paid) {
+  if (was && paid.has(was.month)) return was.month;
+  if (now && paid.has(now.month)) return now.month;
+  return null;
+}
+
+// "Copy last month" onto the payment `into` (the next open one): the costs of the payment before it whose names aren't
+// on `into` yet. Names are matched the way a person reads them (trimmed, case-insensitive, spaces collapsed).
+const normName = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+export function copyPlan(expenses, into) {
+  const last = shiftMonth(into, -1);
+  const lastList = expenses.filter((e) => e.month === last);
+  const have = new Set(expenses.filter((e) => e.month === into).map((e) => normName(e.category)));
+  const toCopy = [];
+  for (const e of lastList) if (!have.has(normName(e.category))) { toCopy.push(e); have.add(normName(e.category)); }
+  const skipped = lastList.filter((e) => !toCopy.includes(e));
+  return { into, last, lastList, toCopy, skipped, total: Math.round(toCopy.reduce((s, e) => s + Math.round(e.amount * 100), 0)) / 100 };
+}

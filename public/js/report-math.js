@@ -31,17 +31,19 @@ export function statementFor({ orders, books, settings }, month) {
 // ---------------------------------------------------------------- taxes
 // Gross sales for a counted line. eBay orders carry the buyer-paid price (excluding sales tax, which eBay collects and
 // remits). Monthly-sheet rows only record the payout, so their gross comes from the matched eBay order when there is
-// one. A refund line (or a sheet refund row) sold nothing: its gross is 0, its fees are the fee credit eBay gave back
-// (negative) and its refund is the buyer's refund, so the refund is taken off once and the credit is not lost.
+// one. A refund line sold nothing: its gross is 0, its fees are the fee credit eBay gave back (negative) and its refund
+// is the buyer's refund, so the refund is taken off once and the credit is not lost. A monthly-sheet refund row is
+// eBay's refund fee (40 cents), not money returned to a buyer: gross 0, that fee as an eBay fee, no refund.
 // Every line keeps gross - fees - refunds = payout.
+export const isSheetRefundFee = (o) => o.source === 'ledger' && Boolean(o.ledger?.is_refund || o.ledger?.sale_price < 0);
 export function taxLine(o, ebayById) {
   const l = lineOf(o);
   let gross = null;
   let fees = null;
-  const refunds = cents(o.refunds);
+  let refunds = cents(o.refunds);
   if (o.source === 'refund') { gross = 0; fees = cents(o.fees); }
   else if (o.source === 'ebay') gross = cents(o.revenue);
-  else if (o.ledger?.is_refund || o.ledger?.sale_price < 0) gross = 0;
+  else if (isSheetRefundFee(o)) { gross = 0; refunds = 0; }
   else if (o.ebay_order_id && ebayById.has(o.ebay_order_id)) gross = cents(ebayById.get(o.ebay_order_id).revenue);
   if (fees === null && gross !== null) fees = gross - refunds - l.payout;
   return { ...l, gross, fees, refunds, month: o.business_month, sale: isSale(o) };
@@ -82,3 +84,9 @@ export const ORDER_EXPORT = [
   { title: 'Extra cost', get: ifCounted((o) => o.extra_cost) }, { title: 'Net profit', get: ifCounted((o) => o.net) }, { title: 'Status', get: (o) => o.status },
   { title: 'Amazon orders', get: (o) => (o.amazon_orders || []).map((a) => a.amazon_order_id).join(' ') }, { title: 'Notes', get: (o) => o.overrides?.notes || '' },
 ];
+
+// ---------------------------------------------------------------- payments
+// What is left to pay on a payment, signed exactly as the server works it out for "Pay the remaining" and as
+// settlement_payments.amount is stored: sellerSends - paid. Positive: the eBay partner still owes the Amazon partner;
+// negative: a month where the Amazon partner pays the eBay partner (stored as negative payments), or an overpayment.
+export const remainingFor = (s) => Math.round((cents(s.sellerSends) - cents(s.paid || 0))) / 100;

@@ -2,7 +2,8 @@
 import { $, $$, esc, money, count, fmtDate, api, toast, downloadCsv, ICONS, countUp, settlementDueDate, settlementDueDay, dueStatus, monthLabel as mLabel, settleView, azDay } from './util.js';
 import { settleMonth, allMonths, settlePeriodRange } from './settlement.js';
 import { state, loadData, renderPage } from './app.js';
-import { paymentWarnings, warningsText } from './health.js';
+import { paymentWarnings, warningsText, paymentDateProblem } from './health.js';
+import { remainingFor } from './report-math.js';
 import { rowMonth, isSale } from './metrics.js';
 import { mount, colors, tooltipBase, axisBase, ttRow, ttHead, shadowPointer } from './charts.js';
 
@@ -217,7 +218,8 @@ export function renderSettlement(el) {
     // a negative entry the other way is a correction
     const amount = v.reverse ? -raw : raw;
     const paidAt = String(f.get('paid_at') || '');
-    if (paidAt > azDay()) { toast('The payment date can’t be in the future (Arizona time)', 'bad'); return; }
+    const dateProblem = paymentDateProblem(paidAt);
+    if (dateProblem) { toast(dateProblem === 'future' ? 'The payment date can’t be in the future (Arizona time)' : 'Enter the date the payment was sent', 'bad'); return; }
     if (!confirmComplete(`${money(raw, 2)}`)) return;
     try {
       await api('/api/settlements/payments', { method: 'POST', body: { month: selected, amount, paid_at: paidAt, note: f.get('note') } });
@@ -227,13 +229,14 @@ export function renderSettlement(el) {
   $('#pay-full')?.addEventListener('click', async () => {
     if (!confirmComplete('the remaining amount')) return;
     try {
-      // The server works out what's left from fresh numbers; `expected` is what this page showed, so a server that
-      // checks it can refuse when the page was out of date
-      const expected = Math.abs(v.paid === null ? v.amount : v.outstanding);
+      // The server works out what's left from fresh numbers; `expected` is what this page showed, signed the way the
+      // server signs it (sellerSends - paid: negative when the Amazon partner pays), so a server that checks it can
+      // refuse when the page was out of date
+      const expected = remainingFor(s);
       const r = await api('/api/settlements/pay-remaining', { method: 'POST', body: { month: selected, note: $('#pay-form [name=note]').value || undefined, expected } });
       const shown = Math.round(expected * 100);
-      const got = Math.round(Math.abs(Number(r.amount) || 0) * 100);
-      await done(r.nothing ? 'Nothing left to pay' : `Recorded ${money(Math.abs(r.amount), 2)}${got !== shown ? ` (the latest numbers, not the ${money(expected, 2)} this page showed)` : ''}`);
+      const got = Math.round((Number(r.amount) || 0) * 100);
+      await done(r.nothing ? 'Nothing left to pay' : `Recorded ${money(Math.abs(r.amount), 2)}${got !== shown ? ` (the latest numbers, not the ${money(Math.abs(expected), 2)} this page showed)` : ''}`);
     } catch (err) { toast(err.message, 'bad'); }
   });
   $$('.pay-del', el).forEach((b) => b.addEventListener('click', async () => {

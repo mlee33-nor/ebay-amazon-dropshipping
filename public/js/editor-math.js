@@ -2,6 +2,9 @@
 // rows can be edited, and the live net shown while edits are staged. The live net starts from the server's own numbers
 // for the row (fees after eBay's fee credit, refunds and Amazon refunds on this payment, ad fees) and changes only what
 // is staged, so with nothing staged it is exactly the net the server counts.
+import { settleMonth } from './settlement.js';
+import { rowMonth } from './metrics.js';
+import { paidMonthsOf, shiftMonth } from './opex-math.js';
 
 const blank = (v) => v === '' || v === null || v === undefined;
 const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -114,4 +117,55 @@ export function recompute(d) {
     : d.excluded ? 'excluded' : !hasCost ? (d.amazon_ids ? 'awaiting_cost' : 'awaiting_email') : d.return_open && !(refunds > 0) ? 'return_open'
     : refunds > 0 || d.total_refund > 0 || d.has_returns ? 'returned' : d.net < 0 ? 'loss' : 'profitable';
   return d;
+}
+
+// The fields settleMonth() adds up, for an Editor row after recompute()
+function settleFields(d) {
+  const has = (v) => v !== null && v !== undefined && v !== '' && !Number.isNaN(v);
+  return {
+    counted: Boolean(d.live_counted), revenue: d.cancelled ? 0 : d.revenue, fees: d.base_fees, refunds: d.base_refunds,
+    cost: has(d.cost_override) ? Number(d.cost_override) : d.amazon_cost, amazon_refund: has(d.amazon_refund) ? Number(d.amazon_refund) : d.nat_amazon_refund,
+    ad_fees: d.ad_fees, extra_cost: has(d.extra_cost) ? Number(d.extra_cost) : 0,
+  };
+}
+
+// Payments already made that a batch of staged Editor edits would change. A payment that has been made is closed: the
+// rows it covered stay on it with their money, so an override on one of them would quietly change what was already
+// sent. A row that only starts counting now (a cost typed for a sale that was waiting) goes on the next open payment,
+// the way the server books it, so it never blocks. `staged` maps order_id -> { field: value } (normVal'd).
+// Returns [{ month, before, after, rows }]: what the payer sends for that payment now and after the edits.
+export function paidPaymentChanges({ orders, books = {}, staged, splitAmazon = 50 }) {
+  const paid = paidMonthsOf(books);
+  if (!paid.size || !staged?.size) return [];
+  const closed = new Set([...(books.closed || []).map((c) => c.month)]);
+  const byId = new Map(orders.map((o) => [o.order_id, o]));
+  const base = new Map();
+  const edited = new Map();
+  const touched = new Map(); // paid month -> order ids
+  for (const [id, ch] of staged) {
+    const o = byId.get(id);
+    if (!o || isReadOnlyRow(o)) continue;
+    const was = recompute(editorRow(o));
+    const now = recompute({ ...editorRow(o), ...ch });
+    const m0 = rowMonth(o);
+    let m1 = m0;
+    if (!was.live_counted && now.live_counted) while (closed.has(m1)) m1 = shiftMonth(m1, 1);
+    base.set(id, { ...settleFields(was), order_id: id, settle_month: m0 });
+    edited.set(id, { ...settleFields(now), order_id: id, settle_month: m1 });
+    for (const m of [m0, m1]) if (paid.has(m)) touched.set(m, [...new Set([...(touched.get(m) || []), id])]);
+  }
+  // Every row as the server has it, with the staged rows swapped in before and after (whole lists, so the profit
+  // share is rounded exactly as settleMonth() rounds it)
+  const withRows = (swap) => orders.map((o) => swap.get(o.order_id) || o);
+  const baseList = withRows(base);
+  const editedList = withRows(edited);
+  const out = [];
+  for (const [month, rows] of touched) {
+    const sends = (list) => settleMonth({ month, orders: list, expenses: books.expenses || [], splitAmazon }).sellerSends;
+    const delta = Math.round((sends(editedList) - sends(baseList)) * 100);
+    if (delta === 0) continue;
+    const before = settleMonth({ month, orders, expenses: books.expenses || [], settlements: books.settlements || [], splitAmazon }).sellerSends;
+    out.push({ month, before, after: Math.round(before * 100 + delta) / 100, rows });
+  }
+  return out.sort((a, b) => (a.month < b.month ? -1 : 1));
 }

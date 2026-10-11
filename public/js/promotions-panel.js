@@ -1,6 +1,6 @@
 // Products → Promotional: how much of the store is on eBay Promoted Listings, at what ad rate and cost, and whether
 // promoted listings actually get seen and bought more than the rest.
-import { esc, money, count, ago, api, toast, ICONS, monthLabel, fmtDate } from './util.js';
+import { esc, money, count, ago, api, toast, ICONS, monthLabel, fmtDate, azMonth } from './util.js';
 import { promoMonths } from './promo-months.js';
 import { state } from './app.js';
 
@@ -24,7 +24,7 @@ function compareRow(label, a, b, fmt, help) {
 function monthsCard() {
   const months = promoMonths(state.data?.orders || []).reverse();
   if (!months.length) return '';
-  const cur = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  const cur = azMonth(); // this calendar month in Arizona, whatever the viewer's own clock says
   const verdict = (m) => {
     if (!m.adSales) return '<span class="muted">No promoted sales</span>';
     if (m.breakEven === null) return `<span class="pill bad">${ICONS.alert} Lost money</span>`;

@@ -4,7 +4,7 @@
 // through the 26th (Arizona time), so on the 27th-31st new costs go on next month's payment.
 import { $, $$, esc, money, api, toast, ICONS, azDay, fmtDate } from './util.js';
 import { settlePeriodOf, settlePeriodRange, CYCLE_START } from './settlement.js';
-import { shiftMonth, parseAmount, paidMonthsOf, nextOpenMonth, costProblem } from './opex-math.js';
+import { shiftMonth, parseAmount, paidMonthsOf, nextOpenMonth, costProblem, closedCostMonth, copyPlan } from './opex-math.js';
 import { state, loadData, renderPage } from './app.js';
 
 const monthLabel = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 15)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
@@ -17,22 +17,17 @@ export function renderOpex(el) {
   const B = d.settings.partner_ebay;
   const dueDay = d.settings.settlement_day ?? 26;
   const expenses = d.books.expenses;
-  // The payment being built now (Arizona day), and the one before it
-  const thisMonth = settlePeriodOf(azDay(), dueDay);
-  const last = shiftMonth(thisMonth, -1);
   // A payment that has been made is closed: new costs go on the next open one
   const paidMonths = paidMonthsOf(d.books);
   const nextOpen = (m) => nextOpenMonth(m, paidMonths);
+  // The payment new costs go on: the one being built now (Arizona day), or the next open one when it was paid early.
+  // "Copy last month" copies the payment before it, and skips names already on it.
+  const thisMonth = nextOpen(settlePeriodOf(azDay(), dueDay));
+  const { last, lastList, toCopy, skipped, total: copyTotal } = copyPlan(expenses, thisMonth);
   const period = (m) => { if (m < CYCLE_START) return ''; const r = settlePeriodRange(m, dueDay); return `${fmtDate(r.from)} – ${fmtDate(r.to)}`; };
   const months = [...new Set([thisMonth, ...expenses.map((e) => e.month)])].sort().reverse();
   const total = (m) => expenses.filter((e) => e.month === m).reduce((s, e) => s + e.amount, 0);
-  const lastList = expenses.filter((e) => e.month === last);
   const thisList = expenses.filter((e) => e.month === thisMonth);
-  // "Copy last month" only copies names not already entered for this payment, so the button says exactly that
-  const thisNames = new Set(thisList.map((e) => norm(e.category)));
-  const toCopy = lastList.filter((e) => !thisNames.has(norm(e.category)));
-  const skipped = lastList.filter((e) => thisNames.has(norm(e.category)));
-  const copyTotal = toCopy.reduce((s, e) => s + e.amount, 0);
   const lastName = monthLabel(last).split(' ')[0];
   const categories = [...new Set(expenses.map((e) => e.category))].sort();
   const monthOptions = (sel) => {
@@ -44,7 +39,9 @@ export function renderOpex(el) {
   const copyBtn = !lastList.length ? ''
     : toCopy.length ? `<button class="btn" id="ox-copy" title="${esc(`Adds ${toCopy.map((e) => e.category).join(', ')}${skipped.length ? `; skips ${skipped.map((e) => e.category).join(', ')} (already here)` : ''}`)}">${ICONS.undo.replace('<svg', '<svg style="transform:scaleX(-1)"')} Copy ${toCopy.length} ${toCopy.length === 1 ? 'cost' : 'costs'} from ${lastName} (${money(copyTotal, 2)})</button>`
     : `<span class="muted" style="font-size:12px">All of ${lastName}'s costs are already here</span>`;
-  const formMonth = nextOpen(thisMonth);
+  const formMonth = thisMonth;
+  // A cost on a paid payment is shown but can't be changed or deleted
+  const locked = (e) => paidMonths.has(e.month);
 
   el.innerHTML = `
   <div class="grid g-12">
@@ -84,8 +81,8 @@ export function renderOpex(el) {
             <td class="ox-what">${esc(e.category)}${e.source === 'sheet' ? ` <span class="pill">${ICONS.sheet} from sheet</span>` : ''}${e.amount < 0 ? ' <span class="pill info">credit</span>' : ''}<div class="ox-sub muted">${payer(e.paid_by)}${e.note ? ` · ${esc(e.note)}` : ''}</div></td>
             <td class="ox-payer">${payer(e.paid_by)}</td>
             <td class="ox-note muted">${esc(e.note || '')}</td>
-            <td class="r ox-amt-cell"><input class="input num ox-amt" type="text" inputmode="decimal" value="${e.amount}" aria-label="Amount for ${esc(e.category)}" /></td>
-            <td class="r ox-del-cell"><button class="btn sm ghost danger ox-del" title="Delete" aria-label="Delete ${esc(e.category)}">${ICONS.trash}</button></td>
+            <td class="r ox-amt-cell">${locked(e) ? `<span class="num" title="The ${esc(monthLabel(e.month))} payment has been made, so its costs can’t change">${money(e.amount, 2)}</span>` : `<input class="input num ox-amt" type="text" inputmode="decimal" value="${e.amount}" aria-label="Amount for ${esc(e.category)}" />`}</td>
+            <td class="r ox-del-cell">${locked(e) ? '' : `<button class="btn sm ghost danger ox-del" title="Delete" aria-label="Delete ${esc(e.category)}">${ICONS.trash}</button>`}</td>
           </tr>`).join('')}</tbody></table>` : `<div class="empty" style="padding:22px 16px"><div class="ic" style="width:36px;height:36px;border-radius:10px;margin-bottom:8px">${ICONS.wallet.replace('<svg', '<svg style="width:16px;height:16px"')}</div><div class="t" style="font-size:13.5px">Nothing for this payment yet</div>Add a cost above, or copy last month's recurring costs.</div>`}</div></div>`;
     }).join('')}
   </div>`;
@@ -144,7 +141,7 @@ export function renderOpex(el) {
 
   $('#ox-copy')?.addEventListener('click', () => {
     if (!toCopy.length) return toast(`Everything from ${lastName} is already here`);
-    const into = nextOpen(thisMonth);
+    const into = thisMonth;
     const lines = toCopy.map((e) => `  • ${e.category}: ${money(e.amount, 2)}`).join('\n');
     const skip = skipped.length ? `\n\nSkipped (already on the ${monthLabel(thisMonth)} payment): ${skipped.map((e) => e.category).join(', ')}` : '';
     const msg = `Copy ${toCopy.length} ${toCopy.length === 1 ? 'cost' : 'costs'} from the ${monthLabel(last)} payment onto the ${monthLabel(into)} payment?\n\n${lines}\n\nTotal: ${money(copyTotal, 2)}${skip}\n\nOne-off costs can be deleted afterwards.`;
@@ -162,6 +159,8 @@ export function renderOpex(el) {
       inp.setAttribute('aria-invalid', 'true');
       setTimeout(() => inp.removeAttribute('aria-invalid'), 2500);
     };
+    // A payment that has been made never changes: a correction goes on the next open payment
+    if (closedCostMonth({ was: e }, paidMonths)) return refuse(`the ${monthLabel(e.month)} payment has been made, so it can’t change. Put a correction (a cost, or a credit with a note) on the ${monthLabel(nextOpen(e.month))} payment`);
     if (amount === null) return refuse('enter an amount (to remove a cost, use the × button)');
     if (amount < 0 && !e.note) return refuse('a credit (negative amount) needs a note. Add it as a new cost with a note instead');
     if (amount === e.amount) { inp.value = e.amount; return; }
@@ -170,6 +169,7 @@ export function renderOpex(el) {
   $$('.ox-del', el).forEach((b) => b.addEventListener('click', () => {
     const id = Number(b.closest('tr').dataset.id);
     const e = expenses.find((x) => x.id === id);
+    if (closedCostMonth({ was: e }, paidMonths)) return toast(`${e.category}: the ${monthLabel(e.month)} payment has been made, so it can’t change. Put a credit with a note on the ${monthLabel(nextOpen(e.month))} payment instead`, 'bad');
     if (!confirm(`Delete "${e.category}" (${money(e.amount, 2)}) from the ${monthLabel(e.month)} payment?`)) return;
     save([{ id, _delete: true }], `Deleted ${e.category}`);
   }));

@@ -11,8 +11,18 @@ const HOUR = 3600_000;
 const STEP_LABEL = { orders: 'Orders', finances: 'Finances (fees, ad fees, refunds)', returns: 'Returns' };
 const ms = (iso) => { const t = Date.parse(iso); return Number.isFinite(t) ? t : null; };
 
+// How long a step can go without a good run before it is called behind: the server's own `stale_after_minutes` for
+// the step, else six of its runs (`interval_minutes`), never less than SYNC_STALE_HOURS
+export const staleAfterMs = (s) => {
+  const after = Number(s?.stale_after_minutes);
+  if (after > 0) return after * 60_000;
+  const every = Number(s?.interval_minutes);
+  return Math.max(SYNC_STALE_HOURS * HOUR, every > 0 ? every * 6 * 60_000 : 0);
+};
+
 // The eBay sync steps that failed, were skipped or haven't run lately. `ebay.steps` is
-// { orders, finances, returns }, each { ok, at, message } (ok may also be 'skipped', or a `status` string).
+// { orders, finances, returns }, each { ok, at, message } (ok may also be 'skipped', or a `status` string), and may
+// say how often the step runs (interval_minutes / stale_after_minutes). While a sync is running nothing is "behind".
 export function ebayStepIssues(ebay, now = Date.now()) {
   const steps = ebay?.steps;
   if (!ebay?.configured || !steps || typeof steps !== 'object') return [];
@@ -24,9 +34,9 @@ export function ebayStepIssues(ebay, now = Date.now()) {
     const message = String(s.message || s.reason || s.error || '').slice(0, 200);
     if (status === 'failed' || status === 'error' || status === 'partial') out.push({ step, label: STEP_LABEL[step], problem: 'failed', message, at: s.at || null });
     else if (status === 'skipped') out.push({ step, label: STEP_LABEL[step], problem: 'skipped', message, at: s.at || null });
-    else {
+    else if (!syncInProgress(ebay)) {
       const last = ms(s.last_ok_at || s.lastOk || s.at);
-      if (last !== null && now - last > SYNC_STALE_HOURS * HOUR) out.push({ step, label: STEP_LABEL[step], problem: 'stale', message, at: new Date(last).toISOString() });
+      if (last !== null && now - last > staleAfterMs(s)) out.push({ step, label: STEP_LABEL[step], problem: 'stale', message, at: new Date(last).toISOString() });
     }
   }
   return out;
@@ -104,4 +114,13 @@ export function paymentWarnings({ month, orders, ebay, email, now = Date.now(), 
 // The warnings as plain text for a confirm() box
 export function warningsText(list, max = 4) {
   return list.map((w) => `• ${w.title}${w.items.length ? `\n${w.items.slice(0, max).map((i) => `    - ${i}`).join('\n')}${w.items.length > max ? `\n    - and ${w.items.length - max} more` : ''}` : ''}`).join('\n\n');
+}
+
+// Why a payment date can't be recorded, or null: a date is needed, as YYYY-MM-DD, and never after today in Arizona
+export function paymentDateProblem(paidAt, now = Date.now()) {
+  const d = String(paidAt || '');
+  if (!d) return 'missing';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || Number.isNaN(Date.parse(`${d}T12:00:00Z`))) return 'format';
+  if (d > azDay(now)) return 'future';
+  return null;
 }

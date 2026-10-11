@@ -1,7 +1,7 @@
 // Regression tests for the dashboard's own math (public/js): statements, the tax panel and order exports; the Editor's
 // live net and cell parsing; refund lines in analytics; Arizona-time dates and due labels; the pay-period Overview;
-// operating-cost defaults and credits; sync banners and the Settle page's check before a payment. The dataset is built
-// by the real server code on a throwaway database seeded with real cases from the October 2026 audit, then handed to
+// operating-cost defaults and credits; sync banners and the Settle page's check before a payment; a payment that has
+// been made never changing (its costs, Editor overrides, Pay the remaining). The dataset is built by the real server code on a throwaway database seeded with real cases from the October 2026 audit, then handed to
 // the same pure modules the pages use. Runs in Manila time on purpose, so anything that reads the viewer's own clock
 // instead of Arizona's shows up.
 process.env.TZ = 'Asia/Manila';
@@ -138,8 +138,17 @@ await check('tax panel: refunds are taken off once and the fee credits are kept 
   const h = rows.find((r) => r.o.refund_of === '08-15199-12018');
   assert.deepEqual([h.gross, h.fees, h.refunds, h.payout], [0, -1372, 14241, -12869], 'a refund line: no gross, the fee credit, the buyer refund');
   assert.ok(!rows.some((r) => r.gross === null && r.o.source !== 'ledger'), 'only monthly-sheet sales can be payout-only');
-  assert.ok(rows.filter((r) => r.o.ledger?.is_refund).every((r) => r.gross === 0 && r.fees === 0), 'a sheet refund row is a refund, not a payout-only sale');
+  const sheetRefunds = rows.filter((r) => r.o.ledger?.is_refund);
+  assert.equal(sheetRefunds.length, 4, 'the September sheet has four refund rows (Mozi Wash, Leg Straps, Vitaliq, Areliaa)');
+  assert.ok(sheetRefunds.every((r) => r.gross === 0 && r.fees === 40 && r.refunds === 0 && r.payout === -40), 'a sheet refund row is eBay\'s 40-cent refund fee, not a buyer refund');
   assert.equal(T.sales, rows.filter((r) => r.o.source !== 'refund' && !r.o.ledger?.is_refund).length, 'refund lines are not sales');
+  // Fixed numbers: buyers got back HHLPRO 142.41 + Govee 64.99 + SEALIGHT 19.00 (refunded inside its own period) and
+  // nothing else; the HHLPRO and Govee fee credits (13.72 + 9.25) come off the eBay fees, the sheet refund fees go on
+  assert.equal(T.refunds, 14241 + 6499 + 1900, 'refunds to buyers: 226.40, with no sheet refund fees in it');
+  const credits = rows.filter((r) => r.o.source === 'refund').reduce((t, r) => t + r.fees, 0);
+  assert.equal(credits, -1372 - 925, 'the HHLPRO and Govee fee credits are kept as negative fees');
+  // eBay fees 26.59: the counted sales' fees, less those two credits (22.97), plus the four sheet refund fees (1.60)
+  assert.deepEqual([T.fees, T.payout], [2659, 269070]);
 });
 await check('order export: money only on counted rows, so adding up a column gives the books (no sheet/eBay copies)', () => {
   const col = (t) => RM.ORDER_EXPORT.find((c) => c.title === t).get;
@@ -330,6 +339,112 @@ await check('a sale less than 48 hours old with no ad fee yet is flagged; one wi
   assert.match(ad.items[0], /FRESH-1/);
 });
 
+await check('a step is not "behind" while a sync is running, and a step that runs less often is judged by its own interval', () => {
+  const now = az('2026-10-10T12:00:00');
+  const old = { ok: true, at: '2026-10-10T08:00:00Z' }; // 11 hours before
+  assert.equal(H.ebayStepIssues({ configured: true, running: true, steps: { finances: old } }, now).length, 0, 'sync running');
+  assert.equal(H.ebayStepIssues({ configured: true, last: { finished_at: null }, steps: { finances: old } }, now).length, 0, 'sync log row not finished');
+  assert.equal(H.ebayStepIssues({ configured: true, steps: { returns: { ...old, interval_minutes: 360 } } }, now).length, 0, 'returns every 6 hours: 11 hours is fine');
+  assert.equal(H.ebayStepIssues({ configured: true, steps: { returns: { ...old, stale_after_minutes: 600 } } }, now)[0]?.problem, 'stale', '11 hours is past a 10-hour limit');
+  assert.equal(H.staleAfterMs({}), 3 * 3600_000);
+  // A failure still shows during a sync
+  assert.equal(H.ebayStepIssues({ configured: true, running: true, steps: { finances: { ok: false, message: 'HTTP 500' } } }, now)[0]?.problem, 'failed');
+});
+
+console.log('Payments that have been made never change (review of the audit fixes)');
+const paid = OX.paidMonthsOf(data.books);
+await check('"Pay the remaining" sends what is left signed like the server (sellerSends - paid), so a month where Myles pays Drew isn\'t refused', () => {
+  const sep = settle(data, '2026-09');
+  assert.equal(RM.remainingFor(sep), Math.round((sep.sellerSends - 704.4) * 100) / 100);
+  assert.equal(RM.remainingFor({ sellerSends: 719.55, paid: 704.4 }), 15.15);
+  assert.equal(RM.remainingFor({ sellerSends: -50, paid: null }), -50, 'reverse month, nothing paid: -50, not 50');
+  assert.equal(RM.remainingFor({ sellerSends: -50, paid: -20 }), -30, 'reverse month, part paid (stored negative)');
+  assert.equal(RM.remainingFor({ sellerSends: 240.87, paid: 250 }), -9.13, 'overpaid');
+});
+await check('a payment dated after today in Arizona is refused, even when it is already tomorrow for the viewer', () => {
+  const now = az('2026-10-26T20:00:00'); // Oct 27 in Manila
+  assert.equal(H.paymentDateProblem('2026-10-27', now), 'future');
+  assert.equal(H.paymentDateProblem('2026-10-26', now), null);
+  assert.equal(H.paymentDateProblem('', now), 'missing');
+  assert.equal(H.paymentDateProblem('10/26/2026', now), 'format');
+});
+await check('a cost on the paid September payment can\'t be edited, deleted or moved, and nothing can be added or moved onto it', () => {
+  assert.ok(paid.has('2026-09') && !paid.has('2026-10'));
+  const sepCost = { id: 1, month: '2026-09', category: 'eBay Sub Cost Total', amount: 16.19 };
+  assert.equal(OX.closedCostMonth({ was: sepCost, now: { ...sepCost, amount: 20 } }, paid), '2026-09', 'amount edit');
+  assert.equal(OX.closedCostMonth({ was: sepCost, now: { ...sepCost, amount: -16.19 } }, paid), '2026-09', 'turned into a credit');
+  assert.equal(OX.closedCostMonth({ was: sepCost, now: null }, paid), '2026-09', 'delete');
+  assert.equal(OX.closedCostMonth({ was: sepCost, now: { ...sepCost, month: '2026-10' } }, paid), '2026-09', 'moved off September');
+  assert.equal(OX.closedCostMonth({ was: { ...sepCost, month: '2026-10' }, now: sepCost }, paid), '2026-09', 'moved onto September');
+  assert.equal(OX.closedCostMonth({ now: sepCost }, paid), '2026-09', 'new row on September');
+  assert.equal(OX.closedCostMonth({ was: { ...sepCost, month: '2026-10' }, now: { ...sepCost, month: '2026-10', amount: 20 } }, paid), null, 'October is open');
+  // The real books: September's costs are on a paid payment, so each is locked
+  const sepCosts = data.books.expenses.filter((e) => e.month === '2026-09');
+  assert.ok(sepCosts.length > 0 && sepCosts.every((e) => OX.closedCostMonth({ was: e }, paid) === '2026-09'));
+});
+await check('Copy last month, when October was paid early: copies October onto November and skips names already on November', () => {
+  const ex = [
+    { month: '2026-09', category: 'Old', amount: 1, paid_by: 'seller' },
+    { month: '2026-10', category: 'Proxies', amount: 9.5, paid_by: 'seller' },
+    { month: '2026-10', category: 'eBay Sub Cost Total', amount: 16.19, paid_by: 'seller' },
+    { month: '2026-11', category: ' proxies ', amount: 9.5, paid_by: 'seller' },
+  ];
+  const into = OX.nextOpenMonth('2026-10', new Set(['2026-10']));
+  const plan = OX.copyPlan(ex, into);
+  assert.deepEqual([plan.into, plan.last], ['2026-11', '2026-10']);
+  assert.deepEqual(plan.toCopy.map((e) => e.category), ['eBay Sub Cost Total']);
+  assert.deepEqual(plan.skipped.map((e) => e.category), ['Proxies']);
+  assert.equal(plan.total, 16.19);
+});
+await check('an Editor edit that would change the paid September payment is refused, with the before and after amounts', () => {
+  const staged = (id, ch) => new Map([[id, ch]]);
+  const sepRow = data.orders.find((o) => o.source === 'ledger' && o.counted && M.rowMonth(o) === '2026-09' && !o.ledger?.is_refund);
+  const sendsSep = settle(data, '2026-09').sellerSends;
+  const hit = E.paidPaymentChanges({ orders: data.orders, books: data.books, staged: staged(sepRow.order_id, { cost_override: Math.round((sepRow.cost + 10) * 100) / 100 }), splitAmazon: 50 });
+  assert.equal(hit.length, 1);
+  assert.equal(hit[0].month, '2026-09');
+  assert.equal(hit[0].before, sendsSep);
+  assert.equal(cents(hit[0].after) - cents(hit[0].before), 500, '$10 more cost: Myles is reimbursed $10 and his half of the profit is $5 less');
+  assert.deepEqual(hit[0].rows, [sepRow.order_id]);
+  assert.equal(E.paidPaymentChanges({ orders: data.orders, books: data.books, staged: staged(sepRow.order_id, { excluded: true }), splitAmazon: 50 })[0]?.month, '2026-09', 'excluding a row it covered');
+  assert.deepEqual(E.paidPaymentChanges({ orders: data.orders, books: data.books, staged: staged(sepRow.order_id, { notes: 'checked' }), splitAmazon: 50 }), [], 'a note changes no money');
+  assert.deepEqual(E.paidPaymentChanges({ orders: data.orders, books: data.books, staged: staged('21-15205-89610', { cost_override: 30 }), splitAmazon: 50 }), [], 'October is still open');
+});
+
+// ---- October is paid early (Oct 20): it closes with the rows it covered. Graphique, still waiting for its cost, is not one.
+const octKeys = data.orders.filter((o) => o.counted && o.settle_month === '2026-10').map((o) => o.order_id).sort();
+const octSends = settle(data, '2026-10').sellerSends;
+await q("insert into settlement_payments (month, amount, paid_at, note) values ('2026-10', $1, '2026-10-20', 'paid early')", [octSends]);
+await q("insert into settlement_freeze (month, row_keys, totals, source) values ('2026-10', $1::jsonb, '{}'::jsonb, 'test')", [JSON.stringify(octKeys)]);
+const paidOct = await load();
+await check('after October is paid: costing Graphique isn\'t refused (it goes on November); excluding VIVAGLORY (on October) is', () => {
+  assert.ok(OX.paidMonthsOf(paidOct.books).has('2026-10'));
+  const g = paidOct.orders.find((o) => o.order_id === '17-15263-09121');
+  assert.equal(g.counted, false);
+  assert.deepEqual(E.paidPaymentChanges({ orders: paidOct.orders, books: paidOct.books, staged: new Map([[g.order_id, { cost_override: 12.5 }]]), splitAmazon: 50 }), []);
+  const v = paidOct.orders.find((o) => o.order_id === '21-15205-89610');
+  const hit = E.paidPaymentChanges({ orders: paidOct.orders, books: paidOct.books, staged: new Map([[v.order_id, { excluded: true }]]), splitAmazon: 50 });
+  assert.equal(hit[0]?.month, '2026-10');
+  assert.equal(hit[0].before, octSends);
+  // Its $26.12 cost is no longer reimbursed and its $12.22 profit leaves the split: Drew sends $26.12 + $6.11 less
+  assert.equal(cents(hit[0].before) - cents(hit[0].after), cents(v.cost) + Math.round(cents(v.net) / 2));
+});
+await q("insert into order_overrides (order_id, cost_override) values ('17-15263-09121', 12.5)");
+const carried = await load();
+await check('a row carried onto a later payment (Graphique, sold Oct 9, costed after October was paid) is in that payment\'s chart', () => {
+  const g = carried.orders.find((o) => o.order_id === '17-15263-09121');
+  assert.deepEqual([g.counted, g.settle_month, U.azDay(g.created_at)], [true, '2026-11', '2026-10-09']);
+  const r = M.rangeFor('month', null, '2026-11', { now: az('2026-11-10T12:00:00') });
+  const rows = M.inRange(carried.orders, r);
+  assert.ok(rows.includes(g));
+  const bs = M.buckets(r, rows, 'day');
+  assert.equal(bs.reduce((t, b) => t + cents(b.net), 0), cents(M.summarize(rows).net), 'the buckets add up to the hero');
+  const without = M.buckets(r, rows.filter((o) => o !== g), 'day');
+  assert.equal(cents(bs[0].net) - cents(without[0].net), cents(g.net), 'in the first bucket of the period');
+  assert.equal(cents(M.summarize(rows).net), cents(settle(carried, '2026-11').orderProfit), 'and to the payment');
+  assert.equal(settle(carried, '2026-10').sellerSends, octSends, 'October is unchanged');
+});
+
 // ---- The production snapshot the audit was run on (Oct 10 2026, /api/data's orders and books). It holds buyer data, so
 // it is never in the repo: point DD_SNAPSHOT at the file to check the audit's own numbers against the pages' math.
 const snapPath = process.env.DD_SNAPSHOT;
@@ -344,10 +459,12 @@ if (snapPath && fs.existsSync(snapPath)) {
     assert.deepEqual([oct.lines.length, oct.tot.net, oct.matches], [20, 19388, true]);
     assert.deepEqual([cents(sep.s.sellerSends), cents(oct.s.sellerSends)], [71955, 24087]);
   });
-  await check('tax 2026: gross - fees - refunds + payout-only = eBay payouts 3,317.77; eBay fees 553.03', () => {
+  await check('tax 2026: gross - fees - refunds + payout-only = eBay payouts 3,317.77; buyer refunds 207.40; eBay fees 554.63 (553.03 + 1.60 sheet refund fees)', () => {
     const T = RM.taxTotals(RM.taxRows(snap.orders, '2026'));
     assert.equal(T.payout, 331777);
-    assert.equal(T.fees, 55303);
+    // Buyers got back HHLPRO 142.41 + Govee 64.99; the four sheet refund rows are 40-cent eBay fees, not refunds
+    assert.equal(T.refunds, 20740);
+    assert.equal(T.fees, 55303 + 160);
     assert.equal(T.gross - T.fees - T.refunds + T.noGrossPayout, T.payout);
   });
   await check('Sep Orders CSV: Net over counted rows is 283.94', () => {
@@ -367,6 +484,13 @@ if (snapPath && fs.existsSync(snapPath)) {
     for (const o of snap.orders) if (o.has_cost && !o.excluded) assert.equal(E.recompute(E.editorRow(o)).net, o.net, o.order_id);
     const rl = E.recompute(E.editorRow(snap.orders.find((o) => o.order_id === 'REFUND:08-15199-12018:2026-10')));
     assert.deepEqual([rl.net, rl.read_only, rl.view_status], [-19.63, true, 'returned']);
+  });
+  await check('September (704.40 paid) can not be changed: a $10 cost edit on one of its rows is refused (719.55 -> 724.55), and so is any edit of its costs', () => {
+    const r = snap.orders.find((o) => o.counted && o.source === 'ledger' && M.rowMonth(o) === '2026-09' && !o.ledger?.is_refund);
+    const hit = E.paidPaymentChanges({ orders: snap.orders, books: snap.books, staged: new Map([[r.order_id, { cost_override: Math.round((r.cost + 10) * 100) / 100 }]]), splitAmazon: 50 });
+    assert.deepEqual(hit.map((h) => [h.month, h.before, h.after]), [['2026-09', 719.55, 724.55]]);
+    const paidSnap = OX.paidMonthsOf(snap.books);
+    for (const e of snap.books.expenses.filter((x) => x.month === '2026-09')) assert.equal(OX.closedCostMonth({ was: e, now: null }, paidSnap), '2026-09', e.category);
   });
 } else console.log('(production snapshot checks skipped: set DD_SNAPSHOT to the audit\'s dataset.json to run them)');
 

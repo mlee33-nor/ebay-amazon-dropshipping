@@ -2,8 +2,8 @@
 // plus a match-review queue. Edits are staged locally (highlighted) until Save.
 import { $, $$, esc, money, pct, fmtDate, api, toast, downloadCsv, ICONS, monthLabel } from './util.js';
 import { state, loadData, renderPage, trackTable, openOrder, ORDER_EXPORT, statusPill, skeletonRows } from './app.js';
-import { normVal, moneyError, editorRow, recompute, isReadOnlyRow } from './editor-math.js';
-import { defaultCostMonth } from './opex-math.js';
+import { normVal, moneyError, editorRow, recompute, isReadOnlyRow, paidPaymentChanges } from './editor-math.js';
+import { defaultCostMonth, paidMonthsOf, nextOpenMonth, closedCostMonth } from './opex-math.js';
 
 let tab = 'ebay';
 const dirty = new Map(); // key -> {field: value}
@@ -200,6 +200,17 @@ function ebaySheet(focusOrder) {
     // Refund lines are never sent: the server has nothing to apply an override to there
     const changes = [...dirty.entries()].filter(([order_id]) => !isReadOnlyRow({ order_id })).map(([order_id, ch]) => ({ order_id, ...ch }));
     if (!changes.length) { dirty.clear(); markDirty(0); return; }
+    // A payment that has been made never changes. An edit that would change one (a cost, fee or refund on a row it
+    // covered, or excluding one) is refused; the correction goes on the next open payment as a cost or a credit.
+    const books = state.data.books;
+    const hit = paidPaymentChanges({ orders: state.data.orders, books, staged: new Map(changes.map(({ order_id, ...ch }) => [order_id, ch])), splitAmazon: Number(state.data.settings.split_amazon ?? 50) });
+    if (hit.length) {
+      const paid = paidMonthsOf(books);
+      const names = (ids) => ids.map((id) => { const o = state.data.orders.find((x) => x.order_id === id); return o?.source === 'ledger' ? `${String(o.title || '').slice(0, 30)} (monthly sheet)` : id; }).join(', ');
+      // A message box, not a toast: it has to stay up long enough to read
+      alert(`Nothing saved.\n\n${hit.map((h) => `The ${monthLabel(h.month, 'long')} payment has been made. It is for ${money(h.before, 2)}; these edits would change it to ${money(h.after, 2)}: ${names(h.rows)}.\n\nA payment that has been made never changes. Undo these edits and put the correction on the ${monthLabel(nextOpenMonth(h.month, paid), 'long')} payment instead, as a cost or a credit with a note (Costs page).`).join('\n\n')}`);
+      return;
+    }
     $('#ed-save').disabled = true;
     try {
       await api('/api/overrides', { method: 'POST', body: { changes } });
@@ -359,8 +370,17 @@ function expensesSheet() {
   const rows = state.data.books.expenses.map((x) => ({ ...x }));
   const payer = { seller: `${B} (eBay partner)`, amazon: `${A} (Amazon partner)` };
   const EX_FIELDS = ['month', 'category', 'amount', 'paid_by', 'note'];
-  const snap = (d) => ({ month: normVal('month', d.month), category: normVal('category', d.category), amount: normVal('amount', d.amount), paid_by: normVal('paid_by', d.paid_by || 'seller'), note: normVal('note', d.note) });
+  // Who paid decides who is paid back, so a new row has no default: it must be chosen. A saved cost with none is the
+  // eBay partner's, as the server and the settlement read it.
+  const payerOf = (d) => d.paid_by || (d.id ? 'seller' : '');
+  const snap = (d) => ({ month: normVal('month', d.month), category: normVal('category', d.category), amount: normVal('amount', d.amount), paid_by: normVal('paid_by', payerOf(d)), note: normVal('note', d.note) });
   const origEx = new Map(rows.map((r) => [r.id, snap(r)]));
+  // A payment that has been made never changes: its costs are shown read-only, and nothing can be moved onto it
+  const paid = paidMonthsOf(state.data.books);
+  const nextOpen = (m) => nextOpenMonth(m, paid);
+  const locked = (d) => Boolean(d.id) && paid.has(origEx.get(d.id)?.month);
+  const canEdit = (c) => !locked(c.getRow().getData());
+  const paidMsg = (m) => `the ${monthLabel(m, 'long')} payment has been made, so it can’t change. Put a correction (a cost, or a credit with a note) on the ${monthLabel(nextOpen(m), 'long')} payment`;
   const t = trackTable(new Tabulator('#ed-body', {
     data: rows,
     index: 'id',
@@ -373,19 +393,25 @@ function expensesSheet() {
     clipboardPasteParser: 'range',
     clipboardPasteAction: 'range',
     initialSort: [{ column: 'month', dir: 'desc' }],
-    rowFormatter: (row) => { const d = row.getData(); const ch = dirty.get(d.id ? `id:${d.id}` : d._tmp); for (const f of EX_FIELDS) row.getCell(f)?.getElement().classList.toggle('cell-dirty', Boolean(ch?.[`__${f}`])); },
+    rowFormatter: (row) => { const d = row.getData(); const ch = dirty.get(d.id ? `id:${d.id}` : d._tmp); for (const f of EX_FIELDS) row.getCell(f)?.getElement().classList.toggle('cell-dirty', Boolean(ch?.[`__${f}`])); row.getElement().classList.toggle('row-ro', locked(d)); },
     groupBy: 'month',
     groupHeader: (value, n, data) => `${/^\d{4}-\d{2}$/.test(value || '') ? esc(monthLabel(value)) : esc(value)} <span class="muted" style="margin-left:8px">${n} items · ${money(data.reduce((s, r) => s + (Number(r.amount) || 0), 0), 2)}</span>`,
     placeholder: 'No operating expenses yet',
     columns: [
-      { title: 'Month', field: 'month', width: 110, editor: 'input', editorParams: { mask: '9999-99' }, cssClass: 'cell-edit' },
-      { title: 'Category', field: 'category', minWidth: 200, widthGrow: 2, editor: 'input', cssClass: 'cell-edit' },
-      { title: 'Amount', field: 'amount', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
-      { title: 'Paid by', field: 'paid_by', width: 200, editor: 'list', editorParams: { values: payer }, formatter: (c) => esc(payer[c.getValue()] || payer.seller), cssClass: 'cell-edit' },
-      { title: 'Note', field: 'note', minWidth: 180, widthGrow: 2, editor: 'input', cssClass: 'cell-edit' },
-      { title: 'Source', field: 'source', width: 110, cssClass: 'cell-ro', formatter: (c) => (c.getValue() === 'sheet' ? `<span class="pill">${ICONS.sheet} sheet</span>` : `<span class="pill info">${ICONS.editor} manual</span>`) },
-      { title: '', field: '_del', width: 60, hozAlign: 'center', headerSort: false, cssClass: 'cell-ro', formatter: () => `<button class="btn sm ghost danger" title="Delete" aria-label="Delete row">${ICONS.trash}</button>`,
-        cellClick: (_e, cell) => { const d = cell.getRow().getData(); if (d.id) dirty.set(`del:${d.id}`, { id: d.id, _delete: true }); cell.getRow().delete(); markDirty(dirty.size); } },
+      { title: 'Month', field: 'month', width: 110, editor: 'input', editorParams: { mask: '9999-99' }, cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Category', field: 'category', minWidth: 200, widthGrow: 2, editor: 'input', cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Amount', field: 'amount', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Paid by', field: 'paid_by', width: 200, editor: 'list', editorParams: { values: payer }, formatter: (c) => (payer[payerOf(c.getRow().getData())] ? esc(payer[payerOf(c.getRow().getData())]) : '<span class="neg">Choose who paid</span>'), cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Note', field: 'note', minWidth: 180, widthGrow: 2, editor: 'input', cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Source', field: 'source', width: 150, cssClass: 'cell-ro', formatter: (c) => `${c.getValue() === 'sheet' ? `<span class="pill">${ICONS.sheet} sheet</span>` : `<span class="pill info">${ICONS.editor} manual</span>`}${locked(c.getRow().getData()) ? ` <span class="pill good" title="This payment has been made, so its costs can’t change">${ICONS.check} paid</span>` : ''}` },
+      { title: '', field: '_del', width: 60, hozAlign: 'center', headerSort: false, cssClass: 'cell-ro', formatter: (c) => (locked(c.getRow().getData()) ? '' : `<button class="btn sm ghost danger" title="Delete" aria-label="Delete row">${ICONS.trash}</button>`),
+        cellClick: (_e, cell) => {
+          const d = cell.getRow().getData();
+          if (locked(d)) { toast(`${d.category}: ${paidMsg(origEx.get(d.id).month)}`, 'bad'); return; }
+          if (d.id) dirty.set(`del:${d.id}`, { id: d.id, _delete: true });
+          cell.getRow().delete();
+          markDirty(dirty.size);
+        } },
     ],
   }));
   let tmp = 0;
@@ -397,23 +423,38 @@ function expensesSheet() {
     const was = d.id ? origEx.get(d.id) : null;
     const changed = was ? EX_FIELDS.filter((f) => now[f] !== was[f]) : EX_FIELDS;
     if (was && !changed.length) dirty.delete(key);
-    else dirty.set(key, { id: d.id, month: d.month, category: d.category, amount: d.amount, note: d.note, paid_by: d.paid_by || 'seller', ...Object.fromEntries(changed.map((f) => [`__${f}`, true])) });
+    else dirty.set(key, { id: d.id, month: d.month, category: d.category, amount: d.amount, note: d.note, paid_by: payerOf(d), ...Object.fromEntries(changed.map((f) => [`__${f}`, true])) });
     for (const f of EX_FIELDS) row.getCell(f)?.getElement().classList.toggle('cell-dirty', Boolean(dirty.get(key)?.[`__${f}`]));
     markDirty(dirty.size);
   };
-  t.on('cellEdited', (cell) => syncEx(cell.getRow()));
+  t.on('cellEdited', (cell) => {
+    const row = cell.getRow();
+    const d = row.getData();
+    // A paste that reaches a paid payment's cost is put back; a cost can't be moved onto a paid payment either
+    if (locked(d)) {
+      const o = origEx.get(d.id);
+      row.update({ month: o.month, category: o.category, amount: o.amount, paid_by: o.paid_by, note: o.note });
+      toast(`${o.category}: ${paidMsg(o.month)}`, 'bad');
+      return;
+    }
+    if (cell.getField() === 'month' && paid.has(String(d.month || ''))) {
+      toast(`${d.category || 'This cost'}: ${paidMsg(d.month)}`, 'bad');
+      row.update({ month: cell.getOldValue() });
+    }
+    syncEx(row);
+  });
   const onHistory = (undo) => (type, component) => {
     const d = component.getData?.() || {};
     if (type === 'cellEdit') syncEx(component.getRow());
     else if (type === 'rowDelete' && d.id) { if (undo) dirty.delete(`del:${d.id}`); else dirty.set(`del:${d.id}`, { id: d.id, _delete: true }); markDirty(dirty.size); }
-    else if (type === 'rowAdd' && d._tmp) { if (undo) dirty.delete(d._tmp); else dirty.set(d._tmp, { month: d.month, category: d.category, amount: d.amount, paid_by: d.paid_by || 'seller', note: d.note }); markDirty(dirty.size); }
+    else if (type === 'rowAdd' && d._tmp) { if (undo) dirty.delete(d._tmp); else dirty.set(d._tmp, { month: d.month, category: d.category, amount: d.amount, paid_by: d.paid_by || '', note: d.note }); markDirty(dirty.size); }
   };
   t.on('historyUndo', onHistory(true));
   t.on('historyRedo', onHistory(false));
   $('#ex-add').onclick = async () => {
     const _tmp = `new:${++tmp}`;
-    const row = await t.addRow({ _tmp, month: thisMonth, category: '', amount: 0, paid_by: 'seller', note: '', source: 'manual' }, true);
-    dirty.set(_tmp, { month: thisMonth, category: '', amount: 0, paid_by: 'seller' });
+    const row = await t.addRow({ _tmp, month: thisMonth, category: '', amount: 0, paid_by: '', note: '', source: 'manual' }, true);
+    dirty.set(_tmp, { month: thisMonth, category: '', amount: 0, paid_by: '' });
     markDirty(dirty.size);
     row.getCell('category').edit();
   };
@@ -428,9 +469,14 @@ function expensesSheet() {
     const bad = [];
     const changes = [];
     for (const c of all) {
+      // Nothing on a payment that has been made changes: not its costs, and nothing moved or added onto it
+      const was = c.id ? origEx.get(c.id) : null;
+      const closed = closedCostMonth({ was, now: c._delete ? null : c }, paid);
+      if (closed) { bad.push(`${c.category || was?.category || 'a row'}: ${paidMsg(closed)}`); continue; }
       if (c._delete) { changes.push(c); continue; }
       const amount = normVal('amount', c.amount);
       if (!c.category || !/^\d{4}-\d{2}$/.test(c.month || '')) bad.push(`${c.category || 'a row'}: needs a month (YYYY-MM) and a name`);
+      else if (c.paid_by !== 'seller' && c.paid_by !== 'amazon') bad.push(`${c.category}: choose who paid it (${B} or ${A}); it decides who is paid back`);
       else if (amount === null || Number.isNaN(amount) || amount === 0) bad.push(`${c.category}: “${c.amount ?? ''}” isn’t an amount`);
       else if (amount < 0 && !String(c.note || '').trim()) bad.push(`${c.category}: a credit (negative amount) needs a note saying what it is`);
       else changes.push({ ...c, amount });

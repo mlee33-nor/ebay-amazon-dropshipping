@@ -3,7 +3,7 @@
 // statement lists exactly the lines that payment is made of and shows whether they add up to it to the cent.
 import { $, esc, money, count, fmtDate, toast, downloadCsv, ICONS, settlementDueDate, dueStatus, monthLabel, settleView, azDay } from './util.js';
 import { allMonths, settlePeriodRange, CYCLE_START } from './settlement.js';
-import { statementFor as statementOf, taxRows, taxTotals } from './report-math.js';
+import { statementFor as statementOf, taxRows, taxTotals, isSheetRefundFee } from './report-math.js';
 import { state } from './app.js';
 
 const d2 = (c) => c / 100;
@@ -153,7 +153,7 @@ function renderTax(box, years) {
     box.querySelector('#tax-year').onchange = (e) => { pickedYear = e.target.value; draw(); };
     box.querySelector('#tax-sales').onclick = () => downloadCsv(`sales-${pickedYear}.csv`, rows, [
       { title: 'Date', get: (r) => azDay(r.o.created_at) }, { title: 'Month', get: (r) => r.month },
-      { title: 'Source', get: (r) => (r.o.source === 'refund' ? 'refund of an earlier sale' : r.o.source === 'ledger' ? (r.o.ledger?.is_refund ? 'monthly sheet refund' : 'monthly sheet') : 'eBay') },
+      { title: 'Source', get: (r) => (r.o.source === 'refund' ? 'refund of an earlier sale' : r.o.source === 'ledger' ? (isSheetRefundFee(r.o) ? 'eBay refund fee (monthly sheet)' : 'monthly sheet') : 'eBay') },
       { title: 'eBay order', get: (r) => (r.o.source === 'ebay' ? r.o.order_id : r.o.source === 'refund' ? r.o.refund_of : r.o.ebay_order_id || '') }, { title: 'Item', get: (r) => r.o.title },
       { title: 'Gross sale', get: (r) => (r.gross === null ? '' : d2(r.gross)) }, { title: 'eBay fees', get: (r) => (r.fees === null ? '' : d2(r.fees)) }, { title: 'Refunds', get: (r) => d2(r.refunds) },
       { title: 'eBay payout', get: (r) => d2(r.payout) }, { title: 'Ad fees', get: (r) => d2(r.ads) }, { title: 'Amazon cost', get: (r) => d2(r.cogs) }, { title: 'Other costs', get: (r) => d2(r.other) }, { title: 'Profit', get: (r) => d2(r.net) },

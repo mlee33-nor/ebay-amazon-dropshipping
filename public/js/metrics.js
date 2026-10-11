@@ -140,7 +140,10 @@ export function buckets(r, orders, gran) {
   }
   const map = new Map(keys.map((k) => [k, []]));
   for (const o of orders) {
-    const k = bucketKey(o.created_at, gran);
+    // A payment can carry a row from before its period (a sale costed after its own payment was made, a refund after
+    // an early payment): it is on this payment, so it goes in the first bucket rather than falling off the chart
+    const t = Date.parse(o.created_at);
+    const k = bucketKey(r.month && r.start ? Math.min(Math.max(t, r.start.getTime()), r.end.getTime()) : o.created_at, gran);
     if (map.has(k)) map.get(k).push(o);
   }
   return keys.map((k) => ({ key: k, orders: map.get(k), ...summarize(map.get(k)) }));
