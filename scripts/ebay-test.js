@@ -5,11 +5,37 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import assert from 'node:assert/strict';
+
+// A crash (port taken, database won't start, ...) must read as a failure: test-all.sh reads only the last line
+const crashed = (e) => { console.log(e?.stack || String(e)); console.log('\nEBAY SYNC: FAILED (crashed)'); process.exit(1); };
+process.on('uncaughtException', crashed);
+process.on('unhandledRejection', crashed);
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-ebay-'));
 process.env.LOCAL_PG_DIR = dir;
-process.env.LOCAL_PG_PORT = String(5600 + Number(process.env.TEST_PG_300 || 0)); // TEST_PG_300 lets parallel runs use their own ports
+// 5600 + TEST_PG_OFFSET (what test-all.sh sets; TEST_PG_300 also works) lets parallel runs use their own ports. If
+// something already answers on that port (another checkout's database), a free port is used instead: src/db.js would
+// otherwise connect to whatever database is there.
+const portTaken = (port) => new Promise((resolve) => {
+  const sock = net.connect({ port, host: '127.0.0.1' });
+  sock.setTimeout(1000, () => { sock.destroy(); resolve(true); });
+  sock.once('connect', () => { sock.destroy(); resolve(true); });
+  sock.once('error', () => resolve(false));
+});
+const freePort = () => new Promise((resolve, reject) => {
+  const srv = net.createServer();
+  srv.once('error', reject);
+  srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+});
+let pgPort = 5600 + (Number(process.env.TEST_PG_OFFSET || 0) || Number(process.env.TEST_PG_300 || 0));
+if (await portTaken(pgPort)) {
+  const was = pgPort;
+  pgPort = await freePort();
+  console.log(`  (port ${was} is in use; test database on ${pgPort})`);
+}
+process.env.LOCAL_PG_PORT = String(pgPort);
 delete process.env.DATABASE_URL;
 
 const DAY = 86400_000;
@@ -22,7 +48,7 @@ const mock = {
   finances: [], financesStatus: null,
   returns: [], returnsStatus: null,
   byId: {}, byIdStatus: {},
-  noFinancesScope: false,
+  noFinancesScope: false, tokenStatus: null,
 };
 const hits = [];
 const server = http.createServer((req, res) => {
@@ -34,6 +60,7 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
+      if (mock.tokenStatus) return send({ error: 'temporarily_unavailable' }, mock.tokenStatus);
       const scope = new URLSearchParams(body).get('scope') || '';
       if (mock.noFinancesScope && scope.includes('sell.finances')) return send({ error: 'invalid_scope', error_description: 'mock: not granted' }, 400);
       send({ access_token: 'mock-access', expires_in: 7200 });
@@ -64,7 +91,7 @@ Object.assign(process.env, {
 });
 
 const { initDb, q, one, closeDb, getSetting, setSetting } = await import('../src/db.js');
-const { syncEbay, ebayStatus, loadEbayConnection, normalizeTransaction } = await import('../src/ebay.js');
+const { syncEbay, ebayStatus, loadEbayConnection, normalizeTransaction, ensureEbaySchema, upsertReturn } = await import('../src/ebay.js');
 const { syncFailed } = await import('../public/js/util.js');
 await initDb();
 
@@ -72,24 +99,47 @@ let failed = false;
 const check = async (label, fn) => { try { await fn(); console.log(`  PASS  ${label}`); } catch (e) { failed = true; console.log(`  FAIL  ${label}\n        ${e.message}`); } };
 
 // ================= 0. records stored before the new columns get them filled from their raw record =================
+// The columns don't exist yet (src/db.js never adds them): records as the old code stored them
 const legacyRaw = { buyer: { username: 'obidiah11' }, amount: { value: '26.59', currency: 'USD' }, orderId: '03-15158-63035', payoutId: '7746686178',
   references: [{ referenceId: '5328902493', referenceType: 'RETURN_ID' }], bookingEntry: 'CREDIT', transactionId: 'DISPUTE_HOLD_REVERSE-6755036627-6640371936',
   transactionDate: '2026-09-17T21:56:06.171Z', transactionType: 'CREDIT', transactionStatus: 'PAYOUT' };
-await q(`insert into ebay_transactions (transaction_id, order_id, type, booking_entry, amount, transaction_at, raw, refs, hold_id, transaction_status, payout_id)
-         values ($1, '03-15158-63035', 'CREDIT', 'CREDIT', 26.59, '2026-09-17T21:56:06.171Z', $2::jsonb, '[]'::jsonb, null, null, null)`,
+const legacy = (id, raw) => q(`insert into ebay_transactions (transaction_id, order_id, type, booking_entry, amount, transaction_at, raw)
+  values ($1, '03-15158-63035', 'DISPUTE', 'DEBIT', 26.59, '2026-09-17T21:56:06.171Z', $2::jsonb)`, [id, raw === null ? null : JSON.stringify(raw)]);
+await q(`insert into ebay_transactions (transaction_id, order_id, type, booking_entry, amount, transaction_at, raw)
+         values ($1, '03-15158-63035', 'CREDIT', 'CREDIT', 26.59, '2026-09-17T21:56:06.171Z', $2::jsonb)`,
   [legacyRaw.transactionId, JSON.stringify(legacyRaw)]);
-await closeDb();
-await initDb(); // a restart runs the schema again
-await check('a restart fills refs, hold_id, status and payout on records stored before those columns', async () => {
+// A hold whose raw has references but no transactionStatus, and one with no raw at all
+const { transactionStatus: _s, payoutId: _p, ...noStatusRaw } = { ...legacyRaw, transactionId: 'DISPUTE_HOLD-6755036627', bookingEntry: 'DEBIT', transactionType: 'DISPUTE' };
+await legacy('DISPUTE_HOLD-6755036627', noStatusRaw);
+await legacy('DISPUTE_HOLD-6728705848', null);
+await ensureEbaySchema(); // what loadEbayConnection / the first sync do at startup
+await check('startup adds the columns and fills refs, hold_id, status and payout on records stored before them', async () => {
   const row = await one('select refs, hold_id, transaction_status, payout_id from ebay_transactions where transaction_id = $1', [legacyRaw.transactionId]);
   assert.deepEqual(row.refs, legacyRaw.references);
   assert.equal(row.hold_id, '6755036627');
   assert.equal(row.transaction_status, 'PAYOUT');
   assert.equal(row.payout_id, '7746686178');
 });
+await check('a raw with no transactionStatus still gets refs and hold_id; a record with no raw still gets hold_id', async () => {
+  const a = await one("select refs, hold_id, transaction_status from ebay_transactions where transaction_id = 'DISPUTE_HOLD-6755036627'");
+  assert.deepEqual(a.refs, legacyRaw.references);
+  assert.equal(a.hold_id, '6755036627');
+  assert.equal(a.transaction_status, null);
+  const b = await one("select refs, hold_id from ebay_transactions where transaction_id = 'DISPUTE_HOLD-6728705848'");
+  assert.equal(b.hold_id, '6728705848');
+  assert.deepEqual(b.refs, []);
+});
+await legacy('DISPUTE_HOLD-6799999999', noStatusRaw);
+await closeDb();
+await initDb();
+await ensureEbaySchema(true); // a restart runs it again
+await check('a restart runs the fill again (safe to repeat)', async () => {
+  assert.equal((await one("select hold_id from ebay_transactions where transaction_id = 'DISPUTE_HOLD-6799999999'")).hold_id, '6799999999');
+  assert.equal((await one('select hold_id from ebay_transactions where transaction_id = $1', [legacyRaw.transactionId])).hold_id, '6755036627');
+});
 await q('delete from ebay_transactions');
 await setSetting('listings_last_sync', { at: iso(now + 365 * DAY) }); // listing analytics are not under test
-const reset = () => Object.assign(mock, { ordersStatus: null, financesStatus: null, returnsStatus: null, byIdStatus: {}, noFinancesScope: false });
+const reset = () => Object.assign(mock, { ordersStatus: null, financesStatus: null, returnsStatus: null, byIdStatus: {}, noFinancesScope: false, tokenStatus: null });
 const sync = async () => { hits.length = 0; return syncEbay(); };
 
 const ebayOrder = (orderId, at, price, fee) => ({
@@ -230,20 +280,87 @@ await q(`insert into ebay_returns (return_id, order_id, state, status, created_a
 mock.byIdStatus['5323444687'] = 500;
 const lastReturnSync = await getSetting('ebay_last_return_sync');
 r = await sync();
-await check('a failed recheck of an open return fails the returns step (partial), keeps the return open', async () => {
+await check('a failed recheck (500) of an open return fails the returns step (partial), keeps the return open', async () => {
   assert.equal(r.ok, false);
   assert.equal(r.status, 'partial');
   assert.equal(r.steps.returns.status, 'failed');
   assert.match(r.steps.returns.message, /5323444687/);
-  assert.equal((await one("select state from ebay_returns where return_id = '5323444687'")).state, 'RETURN_REQUESTED');
-  assert.equal(await getSetting('ebay_last_return_sync'), lastReturnSync, 'last good returns sync not moved');
+  const row = await one("select state, recheck_error, recheck_failed_at from ebay_returns where return_id = '5323444687'");
+  assert.equal(row.state, 'RETURN_REQUESTED');
+  assert.match(row.recheck_error, /500/);
+  assert.ok(row.recheck_failed_at);
+  // The search itself worked: its window moves on (the recheck goes by stored state, not by the window)
+  assert.notEqual(await getSetting('ebay_last_return_sync'), lastReturnSync, 'search window moved on');
+  assert.equal((await ebayStatus()).last.returns, 1, "the search's return is still counted");
 });
 reset();
 mock.byId['5323444687'] = ret('5323444687', HELD, now - 45 * DAY, 'CLOSED');
 r = await sync();
-await check('next sync rechecks it again and closes it', async () => {
+await check('next sync rechecks it again and closes it, clearing the error', async () => {
   assert.equal(r.ok, true, r.log.join(' | '));
-  assert.equal((await one("select state from ebay_returns where return_id = '5323444687'")).state, 'CLOSED');
+  const row = await one("select state, recheck_error, recheck_failed_at from ebay_returns where return_id = '5323444687'");
+  assert.equal(row.state, 'CLOSED');
+  assert.equal(row.recheck_error, null);
+  assert.equal(row.recheck_failed_at, null);
+});
+// A return eBay no longer serves (404 every time): a warning on an ok sync, never a red sync for good
+await q(`insert into ebay_returns (return_id, order_id, state, status, created_at, refund_amount) values ('5311111111', $1, 'RETURN_REQUESTED', 'RETURN_REQUESTED', $2, 31.50)`, [HELD, iso(now - 50 * DAY)]);
+const beforeGone = await getSetting('ebay_last_return_sync');
+r = await sync();
+await check('an open return that answers 404: sync ok with a warning, return left as stored, window still moves', async () => {
+  assert.ok(hits.includes('/post-order/v2/return/5311111111'));
+  assert.equal(r.ok, true, r.log.join(' | '));
+  assert.equal(r.status, 'ok');
+  assert.equal(r.steps.returns.status, 'ok');
+  assert.match(r.steps.returns.warnings.join(' '), /5311111111 not found on eBay \(404\); left as RETURN_REQUESTED/);
+  assert.ok(r.log.some((l) => /returns: WARNING return 5311111111/.test(l)));
+  assert.notEqual(await getSetting('ebay_last_return_sync'), beforeGone);
+  const row = await one("select state, refund_amount, recheck_error from ebay_returns where return_id = '5311111111'");
+  assert.equal(row.state, 'RETURN_REQUESTED');
+  assert.equal(Number(row.refund_amount), 31.5);
+  assert.match(row.recheck_error, /404/);
+  const st = await ebayStatus();
+  assert.equal(st.status, 'ok');
+  assert.equal(syncFailed(st), false, 'no red banner');
+  assert.deepEqual(st.warnings, []);
+  assert.ok(st.notes.some((n) => /5311111111 not found/.test(n)), st.notes.join(' / '));
+});
+r = await sync();
+await check('...and stays ok on every later sync', async () => {
+  assert.equal(r.status, 'ok', r.log.join(' | '));
+});
+// A temporary error (503) that has lasted 4 days: a warning too; one under 3 days still fails (the 500 case above)
+await q(`insert into ebay_returns (return_id, order_id, state, status, created_at, recheck_failed_at, recheck_error) values ('5312222222', $1, 'ITEM_SHIPPED', 'ITEM_SHIPPED', $2, $3, 'eBay kept failing (503)')`,
+  [HELD, iso(now - 55 * DAY), iso(now - 4 * DAY)]);
+mock.byIdStatus['5312222222'] = 503;
+r = await sync();
+await check('a recheck failing with 503 for 4 days becomes a warning, not a failed step', async () => {
+  assert.equal(r.status, 'ok', r.log.join(' | '));
+  assert.match(r.steps.returns.warnings.join(' '), /5312222222 could not be rechecked for 4 days/);
+  assert.equal(new Date((await one("select recheck_failed_at from ebay_returns where return_id = '5312222222'")).recheck_failed_at).getTime(),
+    new Date(iso(now - 4 * DAY)).getTime(), 'first failure time kept');
+});
+reset();
+// When they come back: one closes; the other comes back without any refund amount, which keeps the stored one
+mock.byId['5312222222'] = ret('5312222222', HELD, now - 55 * DAY, 'CLOSED');
+mock.byId['5311111111'] = { ...ret('5311111111', HELD, now - 50 * DAY, 'ITEM_SHIPPED'), buyerTotalRefund: undefined };
+r = await sync();
+await check('a recheck answer with no refund amount keeps the stored amount (never 0) and clears the error', async () => {
+  assert.equal(r.ok, true, r.log.join(' | '));
+  assert.equal(r.steps.returns.warnings, undefined);
+  const row = await one("select state, refund_amount, recheck_error from ebay_returns where return_id = '5311111111'");
+  assert.equal(row.state, 'ITEM_SHIPPED');
+  assert.equal(Number(row.refund_amount), 31.5);
+  assert.equal(row.recheck_error, null);
+  assert.equal((await one("select state from ebay_returns where return_id = '5312222222'")).state, 'CLOSED');
+  assert.deepEqual((await ebayStatus()).notes, []);
+});
+mock.byId['5311111111'] = ret('5311111111', HELD, now - 50 * DAY, 'CLOSED');
+r = await sync();
+await check('a new return with no refund amount is stored as unknown (null), not 0', async () => {
+  await upsertReturn({ ...ret('5313333333', HELD, now - DAY, 'RETURN_REQUESTED'), buyerTotalRefund: undefined });
+  assert.equal((await one("select refund_amount from ebay_returns where return_id = '5313333333'")).refund_amount, null);
+  await q("delete from ebay_returns where return_id = '5313333333'");
 });
 
 // ================= 3. failures are reported, never logged as a successful sync =================
@@ -320,6 +437,24 @@ await check('Finances skipped for a missing scope: sync not ok (partial), reason
 reset();
 await loadEbayConnection();
 
+// ================= 5b. eBay's sign-in down: a failed token refresh is a failure, not a missing scope =================
+mock.tokenStatus = 503;
+await loadEbayConnection(); // a restart: no token cached yet
+r = await sync();
+await check('token refresh failing: orders and Finances failed with the real error, no "Reconnect eBay"', async () => {
+  assert.equal(r.status, 'failed');
+  assert.equal(r.steps.orders.status, 'failed');
+  assert.equal(r.steps.finances.status, 'failed', JSON.stringify(r.steps.finances));
+  assert.match(r.steps.finances.message, /token refresh failed: 503/);
+  assert.doesNotMatch(r.steps.finances.message, /Reconnect/);
+  const st = await ebayStatus();
+  assert.equal(st.needsReconnect, false, 'a 503 from eBay sign-in is not an expired connection');
+});
+reset();
+await loadEbayConnection();
+r = await sync();
+await check('sign-in back: ok again', async () => assert.equal(r.status, 'ok', r.log.join(' | ')));
+
 // ================= 6. orders down while Finances works; the records still reach the order later =================
 const LATE = '07-15210-55555';
 mock.orders.push(ebayOrder(LATE, iso(now - DAY), 34.99, 5.0));
@@ -361,6 +496,44 @@ await check('a sync_log row without steps reads as ok with unknown steps (no cra
 await check('a run in progress reads as running', async () => {
   await q('insert into sync_log (started_at) values (now())');
   assert.equal((await ebayStatus()).status, 'running');
+});
+
+// ================= 8. records without a transactionId: same record after payout, and identical twins =================
+const ADS = '08-15199-12018';
+mock.orders.push(ebayOrder(ADS, iso(now - DAY), 52.99, 7.2));
+const adFee = { transactionType: 'NON_SALE_CHARGE', feeType: 'AD_FEE', bookingEntry: 'DEBIT', amount: money(4.27),
+  references: [{ referenceId: ADS, referenceType: 'ORDER_ID' }], transactionDate: iso(now - DAY), transactionStatus: 'FUNDS_PROCESSING' };
+mock.finances.push(adFee);
+r = await sync();
+await check('an ad fee with no transactionId is stored once: ad fees 4.27', async () => {
+  assert.equal(r.ok, true, r.log.join(' | '));
+  assert.equal((await one("select count(*)::int n from ebay_transactions where order_id = $1 and fee_type = 'AD_FEE'", [ADS])).n, 1);
+  assert.equal(Number((await one('select ad_fees from ebay_orders where order_id = $1', [ADS])).ad_fees), 4.27);
+});
+// Paid out: eBay adds payoutId, changes the status and memo; the 7-day look-back reads it again
+Object.assign(adFee, { transactionStatus: 'PAYOUT', payoutId: '7760000001', transactionMemo: 'Promoted Listings fee' });
+r = await sync();
+await check('the same ad fee after payout (payoutId, status, memo added) is the same record: one row, ad fees 4.27 not 8.54', async () => {
+  assert.equal(r.ok, true, r.log.join(' | '));
+  const rows = await q("select transaction_id, payout_id, transaction_status from ebay_transactions where order_id = $1 and fee_type = 'AD_FEE'", [ADS]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].payout_id, '7760000001', 'updated in place');
+  assert.equal(rows[0].transaction_status, 'PAYOUT');
+  assert.equal(Number((await one('select ad_fees from ebay_orders where order_id = $1', [ADS])).ad_fees), 4.27);
+});
+// Two separate insertion fees with exactly the same contents: both kept, and still two after a re-sync
+const twinAt = iso(now - 5 * 3600_000);
+const twin = () => ({ transactionType: 'NON_SALE_CHARGE', feeType: 'INSERTION_FEE', bookingEntry: 'DEBIT', amount: money(0.35), transactionDate: twinAt });
+mock.finances.push(twin(), twin());
+r = await sync();
+await check('two identical records with no id are both kept (#2), and a re-sync stores neither again', async () => {
+  const twins = () => q("select transaction_id from ebay_transactions where fee_type = 'INSERTION_FEE' and transaction_at = $1 order by transaction_id", [twinAt]);
+  const first = (await twins()).map((x) => x.transaction_id);
+  assert.equal(first.length, 2);
+  assert.match(first[1], /^NOID-[0-9a-f]+#2$/);
+  assert.ok(r.log.some((l) => /1 record with no id identical to another/.test(l)), r.log.join(' | '));
+  await sync();
+  assert.deepEqual((await twins()).map((x) => x.transaction_id), first);
 });
 
 await closeDb();

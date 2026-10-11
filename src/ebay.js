@@ -49,10 +49,51 @@ const SCOPE_SETS = [
 
 let tokenCache = { token: null, exp: 0, scopes: null };
 
+// Columns the eBay sync adds to the tables src/db.js creates. Run once per process (startup and before the first sync);
+// every statement is safe to run again. Pass true to run it again (a test standing in for a restart).
+//   ebay_transactions: every record is stored, whatever its type, with or without an order (order_id null for
+//     account-level charges and payouts). refs = eBay's references as given ([{referenceId, referenceType}]: ORDER_ID,
+//     RETURN_ID, CASE_ID, ...); hold_id pairs a DISPUTE_HOLD-<id> debit with the DISPUTE_HOLD_REVERSE-<id>-<n> credit
+//     that releases it; transaction_status, payout_id, memo are eBay's transactionStatus, payoutId, transactionMemo.
+//   ebay_returns: recheck_error / recheck_failed_at = why and since when an open return couldn't be fetched by id.
+//   sync_log: status = ok | partial (a step failed or was skipped) | failed; steps = { orders, finances, returns }:
+//     { ok, status, at, message, warnings }.
+let schemaReady = null;
+export function ensureEbaySchema(again = false) {
+  if (!schemaReady || again) {
+    schemaReady = (async () => {
+      for (const sql of [
+        `alter table ebay_transactions add column if not exists refs jsonb default '[]'::jsonb`,
+        'alter table ebay_transactions add column if not exists hold_id text',
+        'alter table ebay_transactions add column if not exists transaction_status text',
+        'alter table ebay_transactions add column if not exists payout_id text',
+        'alter table ebay_transactions add column if not exists memo text',
+        'create index if not exists ebay_transactions_type_idx on ebay_transactions(type, transaction_at)',
+        'create index if not exists ebay_transactions_hold_idx on ebay_transactions(hold_id) where hold_id is not null',
+        'alter table ebay_returns add column if not exists recheck_error text',
+        'alter table ebay_returns add column if not exists recheck_failed_at timestamptz',
+        'alter table sync_log add column if not exists status text',
+        'alter table sync_log add column if not exists steps jsonb',
+        // Records stored before these columns existed: each one filled on its own, so a record missing one field
+        // (or with no raw at all) still gets the others. hold_id needs only the id.
+        `update ebay_transactions set hold_id = substring(transaction_id from '^DISPUTE_HOLD(?:_REVERSE)?-([0-9]+)')
+           where hold_id is null and transaction_id ~ '^DISPUTE_HOLD(_REVERSE)?-[0-9]'`,
+        `update ebay_transactions set refs = raw->'references'
+           where coalesce(refs, '[]'::jsonb) = '[]'::jsonb and jsonb_typeof(raw->'references') = 'array' and raw->'references' <> '[]'::jsonb`,
+        `update ebay_transactions set transaction_status = raw->>'transactionStatus' where transaction_status is null and raw ? 'transactionStatus'`,
+        `update ebay_transactions set payout_id = raw->>'payoutId' where payout_id is null and raw ? 'payoutId'`,
+        `update ebay_transactions set memo = raw->>'transactionMemo' where memo is null and raw ? 'transactionMemo'`,
+      ]) await q(sql);
+    })().catch((e) => { schemaReady = null; throw e; });
+  }
+  return schemaReady;
+}
+
 // The refresh token comes from the in-app "Connect eBay" flow (stored in settings) and falls back to
 // EBAY_REFRESH_TOKEN. eBay refresh tokens last ~18 months; the dashboard warns before they expire.
 let connection = null; // { refresh_token, refresh_expires_at, connected_at, scopes }
 export async function loadEbayConnection() {
+  await ensureEbaySchema();
   connection = await getSetting('ebay_oauth');
   tokenCache = { token: null, exp: 0, scopes: null };
   return connection;
@@ -331,17 +372,30 @@ const inBooks = (r) => r.type === 'SALE' || r.type === 'REFUND' || (r.type === '
 //               (the CREDIT that releases it), so a hold and its release pair up
 //   transaction_status, payout_id, memo   eBay's transactionStatus, payoutId and transactionMemo
 // A record eBay sends without a transactionId gets a stable id made from its contents (NOID-...), so re-syncing the
-// same window never stores it twice.
-export function normalizeTransaction(t) {
+// same window never stores it twice. Only fields that never change go into it: payoutId, transactionStatus and the memo
+// are filled in or changed when the record is paid out, and the 7-day look-back re-reads it after that, so hashing them
+// would store the same record twice (an ad fee counted double). Two records with exactly the same contents are told
+// apart by `seen` (one Map per sync): the second one gets #2, the third #3, in the order eBay lists them.
+function noIdKey(t, orderId, refs) {
+  const refKey = refs.map((r) => [r.referenceType, r.referenceId]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return crypto.createHash('sha1').update(JSON.stringify([t.transactionType, t.transactionDate, t.bookingEntry, t.amount?.value,
+    t.amount?.currency, t.feeType, orderId, refKey])).digest('hex').slice(0, 24);
+}
+export function normalizeTransaction(t, seen = null) {
   const refs = (t.references || []).map((r) => ({ referenceId: r.referenceId != null ? String(r.referenceId) : null, referenceType: r.referenceType || null }));
   const orderId = t.orderId || refs.find((r) => r.referenceType === 'ORDER_ID')?.referenceId || null;
   // Fee on a SALE is what eBay charged; on a REFUND it is the fee eBay credits back (per order line)
   const lineFees = (t.orderLineItems || []).reduce((s, li) => s + (li.marketplaceFees || []).reduce((x, f) => x + money(f.amount), 0), 0);
   const fee = money(t.totalFeeAmount) || lineFees;
-  const id = t.transactionId
-    ? String(t.transactionId)
-    : `NOID-${crypto.createHash('sha1').update(JSON.stringify([t.transactionType, t.transactionDate, t.bookingEntry, t.amount?.value,
-      t.feeType, orderId, refs, t.payoutId, t.transactionMemo])).digest('hex').slice(0, 24)}`;
+  let id;
+  let repeat = 0;
+  if (t.transactionId) id = String(t.transactionId);
+  else {
+    const key = noIdKey(t, orderId, refs);
+    repeat = seen ? (seen.get(key) || 0) + 1 : 1;
+    if (seen) seen.set(key, repeat);
+    id = repeat > 1 ? `NOID-${key}#${repeat}` : `NOID-${key}`;
+  }
   return {
     transaction_id: id,
     order_id: orderId,
@@ -356,11 +410,13 @@ export function normalizeTransaction(t) {
     transaction_status: t.transactionStatus || null,
     payout_id: t.payoutId || null,
     memo: t.transactionMemo || null,
+    repeat, // > 1: the n-th record with exactly the same contents in this sync (no transactionId)
     raw: t,
   };
 }
 
 export async function upsertTransaction(r) {
+  await ensureEbaySchema();
   const vals = [r.order_id, r.type, r.fee_type, r.booking_entry, r.amount, r.fee_amount, r.transaction_at, JSON.stringify(r.raw || {}),
     JSON.stringify(r.refs || []), r.hold_id, r.transaction_status, r.payout_id, r.memo];
   const sql = `insert into ebay_transactions (transaction_id, order_id, type, fee_type, booking_entry, amount, fee_amount, transaction_at, raw,
@@ -382,6 +438,9 @@ export async function upsertTransaction(r) {
 }
 
 async function syncFinances(log) {
+  // Get (or refresh) the token first: the scopes are only known once a token was granted. A refresh that fails (eBay's
+  // sign-in down, network) then fails this step with the real error instead of reading as a missing scope.
+  await getAccessToken();
   if (!tokenCache.scopes?.some((s) => s.includes('sell.finances'))) {
     const why = 'token lacks sell.finances scope; using order-level fees, no ad fees or refund dates. Reconnect eBay';
     log.push(`finances: skipped (${why})`);
@@ -399,13 +458,16 @@ async function syncFinances(log) {
   let orderless = 0;
   const notInBooks = new Map(); // "TYPE" or "NON_SALE_CHARGE/FEE_TYPE" -> count, for the sync log
   const unknown = new Set();
+  const seen = new Map(); // records without a transactionId: how many with the same contents so far
+  let twins = 0;
   let offset = 0;
   while (true) {
     const filter = `transactionDate:[${from.toISOString()}..${startedAt}]`;
     const url = `${APIZ}/sell/finances/v1/transaction?filter=${encodeURIComponent(filter)}&limit=1000&offset=${offset}`;
     const page = await ebayGet(url);
     for (const t of page.transactions || []) {
-      const r = normalizeTransaction(t);
+      const r = normalizeTransaction(t, seen);
+      if (r.repeat > 1) twins++;
       await upsertTransaction(r);
       if (r.order_id) touched.add(r.order_id);
       else orderless++;
@@ -425,6 +487,7 @@ async function syncFinances(log) {
   if (orderless) msg += `, ${orderless} with no order`;
   if (notInBooks.size) msg += ` (stored, not yet in the books: ${[...notInBooks].map(([k, n]) => `${k} ${n}`).join(', ')})`;
   if (unknown.size) msg += ` · WARNING unknown Finances type ${[...unknown].join(', ')}`;
+  if (twins) msg += ` · ${twins} ${twins === 1 ? 'record' : 'records'} with no id identical to another (each kept, numbered #2, #3, ...)`;
   log.push(msg);
   return { stored, orders: touched.size, orderless };
 }
@@ -476,13 +539,22 @@ async function syncReturns(log) {
     if (members.length < 200 || pageNo * 200 >= total) break;
     pageNo++;
   }
+  // The search worked, so the window moves on now. The recheck below picks returns by their stored state, not by this
+  // window, so a recheck problem never needs the window held back (holding it back made it grow on every sync).
+  await setSetting('ebay_last_return_sync', startedAt);
   // 2. Every stored return that isn't CLOSED yet, fetched by id however old it is. The search only looks back 30 days
   // from the last sync, so a case still open on day 30 would otherwise stay "Return open" forever.
+  //   - eBay answers 403/404/410 (it no longer serves that return): a warning, not a failure. The return stays as
+  //     stored, the error is kept on it (recheck_error, recheck_failed_at) and it's tried again next sync.
+  //   - Anything else (429, 5xx, network) fails the step, until that return has failed for RECHECK_WARN_DAYS: then it's
+  //     a warning too, so one bad return can't keep every sync 'partial' for good.
   const open = await q(
-    `select return_id from ebay_returns where coalesce(state, '') !~* 'CLOSED' and return_id not like 'DEMO-%' order by created_at`);
+    `select return_id, state, recheck_failed_at from ebay_returns
+     where coalesce(state, '') !~* 'CLOSED' and return_id not like 'DEMO-%' order by created_at`);
   let refreshed = 0;
   const failed = [];
-  for (const { return_id } of open) {
+  const warnings = [];
+  for (const { return_id, state, recheck_failed_at } of open) {
     if (seen.has(return_id)) continue;
     try {
       const body = await ebayGet(`${API}/post-order/v2/return/${encodeURIComponent(return_id)}`, { iaf: true });
@@ -491,26 +563,47 @@ async function syncReturns(log) {
       await upsertReturn(r);
       refreshed++;
     } catch (e) {
-      failed.push(`${return_id}: ${e.message}`);
+      await q('update ebay_returns set recheck_error = $2, recheck_failed_at = coalesce(recheck_failed_at, now()) where return_id = $1',
+        [return_id, e.message.slice(0, 300)]);
+      const gone = [403, 404, 410].includes(e.status);
+      const days = recheck_failed_at ? (Date.now() - new Date(recheck_failed_at).getTime()) / 86400_000 : 0;
+      if (gone) warnings.push(`return ${return_id} not found on eBay (${e.status}); left as ${state || 'open'}`);
+      else if (days >= RECHECK_WARN_DAYS) warnings.push(`return ${return_id} could not be rechecked for ${Math.floor(days)} days (${e.message.slice(0, 120)}); left as ${state || 'open'}`);
+      else failed.push(`${return_id}: ${e.message}`);
     }
   }
   log.push(`returns: ${n} in the last window, ${refreshed} open ${refreshed === 1 ? 'return' : 'returns'} rechecked`);
-  if (failed.length) throw new Error(`could not recheck ${failed.length} open ${failed.length === 1 ? 'return' : 'returns'} (${failed.join('; ').slice(0, 300)})`);
-  await setSetting('ebay_last_return_sync', startedAt);
-  return n;
+  for (const w of warnings) log.push(`returns: WARNING ${w}`);
+  if (failed.length) {
+    const err = new Error(`could not recheck ${failed.length} open ${failed.length === 1 ? 'return' : 'returns'} (${failed.join('; ').slice(0, 300)})`);
+    err.count = n; // the search's returns were stored all the same
+    err.warnings = warnings;
+    throw err;
+  }
+  return { count: n, warnings };
 }
+// How long a return's recheck may keep failing with a temporary error (429, 5xx, network) before it stops failing the
+// returns step and becomes a warning
+const RECHECK_WARN_DAYS = Number(process.env.EBAY_RECHECK_WARN_DAYS || 3);
 
 // A return as stored, from a search member or getReturn's summary (same fields). A refresh that leaves out the state
-// keeps the one already stored rather than reopening the return.
+// keeps the one already stored rather than reopening the return; one that leaves out the refund amount keeps the stored
+// amount (null, never 0, when eBay never gave one: the books then use the sale's revenue for the open-return flag).
+// Fetching it at all clears any earlier recheck error.
 export async function upsertReturn(r) {
-  const refund = money(r.buyerTotalRefund?.actualRefundAmount) || money(r.buyerTotalRefund?.estimatedRefundAmount);
+  await ensureEbaySchema();
+  const b = r.buyerTotalRefund || {};
+  const refund = b.actualRefundAmount?.value !== undefined || b.estimatedRefundAmount?.value !== undefined
+    ? money(b.actualRefundAmount) || money(b.estimatedRefundAmount)
+    : null;
   await q(
     `insert into ebay_returns (return_id, order_id, item_id, state, status, reason, return_type, created_at, refund_amount, raw, synced_at)
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb, now())
      on conflict (return_id) do update set state = coalesce(excluded.state, ebay_returns.state),
        status = coalesce(excluded.status, ebay_returns.status), return_type = coalesce(excluded.return_type, ebay_returns.return_type),
        order_id = coalesce(ebay_returns.order_id, excluded.order_id),
-       refund_amount = excluded.refund_amount, raw = excluded.raw, synced_at = now()`,
+       refund_amount = coalesce(excluded.refund_amount, ebay_returns.refund_amount), raw = excluded.raw, synced_at = now(),
+       recheck_error = null, recheck_failed_at = null`,
     [
       String(r.returnId), r.orderId || null, r.creationInfo?.item?.itemId || null, r.state || null,
       r.status || null, r.creationInfo?.reason || r.creationInfo?.reasonType || null, r.currentType || null,
@@ -523,11 +616,13 @@ let running = null;
 
 export async function syncEbay() {
   if (running) return running;
-  running = (async () => {
+  const run = (async () => {
+    await ensureEbaySchema();
     const [{ id }] = await q('insert into sync_log (started_at) values (now()) returning id');
     const log = [];
     // Each money step is run on its own: one failing never stops the others, but it is recorded and makes the sync
-    // not ok (status 'partial', or 'failed' when the orders themselves didn't come in)
+    // not ok (status 'partial', or 'failed' when the orders themselves didn't come in). A step can also come back ok
+    // with warnings (a return eBay no longer serves): kept on the step, they don't make the sync not ok.
     const steps = {};
     const step = async (name, fn) => {
       const at = new Date().toISOString();
@@ -536,11 +631,13 @@ export async function syncEbay() {
         steps[name] = r?.skipped
           ? { ok: false, status: 'skipped', at, message: r.skipped }
           : { ok: true, status: 'ok', at, message: null };
+        if (r?.warnings?.length) steps[name].warnings = r.warnings;
         return r;
       } catch (e) {
         steps[name] = { ok: false, status: 'failed', at, message: e.message };
+        if (e.warnings?.length) steps[name].warnings = e.warnings;
         log.push(`${name}: FAILED (${e.message})`);
-        return null;
+        return e.count !== undefined ? { count: e.count } : null; // what the step did store before it failed
       }
     };
     const save = async (status, orders, returns) => {
@@ -553,7 +650,7 @@ export async function syncEbay() {
       const orders = (await step('orders', () => syncOrders(log))) || 0;
       await syncTracking(log).catch((e) => log.push(`tracking: ${e.message}`));
       await step('finances', () => syncFinances(log));
-      const returns = (await step('returns', () => syncReturns(log))) || 0;
+      const returns = (await step('returns', () => syncReturns(log)))?.count || 0;
       const m = await runMatcher();
       log.push(`matcher: ${m.linked} new links`);
       log.push(`ledger: ${await matchLedger()} sheet rows matched to eBay orders`);
@@ -566,11 +663,13 @@ export async function syncEbay() {
       log.push(e.message);
       await save('failed', 0, 0);
       return { ok: false, status: 'failed', steps, log };
-    } finally {
-      running = null;
     }
   })();
-  return running;
+  running = run;
+  // Cleared however the run ends, also when the schema check or the log row itself fails (before the try above)
+  const clear = () => { if (running === run) running = null; };
+  run.then(clear, clear);
+  return run;
 }
 
 const STEPS = ['orders', 'finances', 'returns'];
@@ -584,6 +683,8 @@ const STEP_LABEL = { orders: 'orders', finances: 'Finances (fees, ad fees, refun
 //   financesFailed / financesStale / returnsFailed / returnsStale   the same, flattened for banners
 //   warnings     plain sentences naming every step that failed, was skipped or is stale (for a banner and the
 //                Settle warning: a payment worked out while Finances is stale can miss ad fees and refunds)
+//   notes        smaller things from steps that still worked (a return eBay no longer serves, left as stored); not
+//                a reason for a red banner or to hold a payment
 export async function ebayStatus() {
   const last = await one('select * from sync_log order by id desc limit 1');
   const lastOk = await one('select finished_at from sync_log where ok order by id desc limit 1');
@@ -592,14 +693,16 @@ export async function ebayStatus() {
   const now = Date.now();
   const steps = {};
   const warnings = [];
+  const notes = [];
   for (const name of STEPS) {
     const s = lastDone?.steps?.[name] || null; // runs from before per-step tracking have none
     const lastStepOk = await getSetting(STEP_LAST_OK[name]);
     const stale = configured && (!lastStepOk || now - new Date(lastStepOk).getTime() > STEP_STALE_MS);
     steps[name] = {
       ok: s ? s.ok : null, status: s?.status || 'unknown', at: s?.at || null, message: s?.message || null,
-      lastOk: lastStepOk || null, stale,
+      warnings: s?.warnings || [], lastOk: lastStepOk || null, stale,
     };
+    for (const w of s?.warnings || []) notes.push(`eBay ${STEP_LABEL[name]}: ${w}.`);
     if (!configured) continue;
     const since = lastStepOk ? `last synced ${new Date(lastStepOk).toISOString()}` : 'never synced';
     if (s && !s.ok) warnings.push(`eBay ${STEP_LABEL[name]} ${s.status} on the last sync (${s.message || 'no reason given'}); ${since}.`);
@@ -614,7 +717,9 @@ export async function ebayStatus() {
     connectedAt: connection?.connected_at || null,
     refreshExpiresAt: connection?.refresh_expires_at || null,
     source: connection?.refresh_token ? 'connected' : process.env.EBAY_REFRESH_TOKEN ? 'env' : null,
-    needsReconnect: /invalid_grant|refresh token is invalid|token refresh failed/i.test(last?.message || '') && !last?.ok,
+    // Only eBay saying the refresh token itself is bad means reconnect; a refresh that failed because eBay's sign-in
+    // was down (5xx, network) clears up on its own
+    needsReconnect: /invalid_grant|refresh token is invalid/i.test(last?.message || '') && !last?.ok,
     running: Boolean(running),
     scopes: tokenCache.scopes,
     last,
@@ -627,5 +732,6 @@ export async function ebayStatus() {
     returnsFailed: configured && steps.returns.ok === false,
     returnsStale: steps.returns.stale,
     warnings,
+    notes,
   };
 }
