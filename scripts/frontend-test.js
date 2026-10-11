@@ -494,6 +494,21 @@ if (snapPath && fs.existsSync(snapPath)) {
   });
 } else console.log('(production snapshot checks skipped: set DD_SNAPSHOT to the audit\'s dataset.json to run them)');
 
+// Adjustment lines (HOLD:/ADJ:, money moved between payments after one was paid) are never sales, products, tax lines or
+// editable rows
+await check('adjustment lines are not sales, products, tax lines or editable', () => {
+  const sale = { order_id: '01-1', source: 'ebay', counted: true, title: 'Widget', items: [{ sku: 'W' }], returns: [], amazon_orders: [], tracking_numbers: [], business_month: '2026-10', revenue: 20, fees: 2, refunds: 0, cost: 10, amazon_refund: 0, ad_fees: 0, extra_cost: 0, net: 8 };
+  const hold = { order_id: 'HOLD:01-1', source: 'adjustment', adjustment: true, adjustment_of: '01-1', counted: true, title: 'Held as paid · Widget', items: [], returns: [], amazon_orders: [], tracking_numbers: [], business_month: '2026-10', revenue: 5, fees: 0, refunds: 0, cost: 0, amazon_refund: 0, ad_fees: 0, extra_cost: 0, net: 5 };
+  const adj = { ...hold, order_id: 'ADJ:01-1:2026-09', title: 'Change after the 2026-09 payment · Widget', revenue: -5, net: -5 };
+  assert.equal(M.isSale(hold), false);
+  assert.equal(M.saleIdOf(adj), '01-1');
+  assert.deepEqual(M.byProduct([sale, hold, adj]).map((p) => [p.key, p.countedRows]), [['w', 1]]);
+  assert.equal(RM.taxRows([sale, hold, adj], '2026').length, 1);
+  assert.equal(E.isReadOnlyRow(adj), true);
+  assert.equal(E.isReadOnlyRow({ order_id: 'HOLD:x' }), true);
+  assert.equal(M.STATUS_META.adjustment.label, 'Payment adjustment');
+});
+
 await closeDb();
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(failed ? '\nFRONTEND: FAILED' : '\nFRONTEND: ALL CHECKS PASSED');

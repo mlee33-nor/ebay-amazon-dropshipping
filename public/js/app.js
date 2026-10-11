@@ -495,6 +495,18 @@ function setupBanner({ failuresOnly = false } = {}) {
   const unplaced = d.amazon?.unmatchedRefunds || [];
   if (unplaced.length)
     out.push(notice({ key: 'refund-unmatched', kind: 'bad', text: `<b>${unplaced.length === 1 ? 'An Amazon refund isn’t' : `${unplaced.length} Amazon refunds aren’t`} in the settlement yet.</b> It couldn’t be matched to exactly one sale. ${unplaced.slice(0, 3).map((r) => `<span class="muted">${money(r.amount, 2)} on ${fmtDate(r.received_at)}${r.title ? ` for “${esc(r.title.slice(0, 50))}”` : ''} (Amazon order ${esc(r.amazon_order_id)})</span>`).join(' ')} Set that sale’s Amazon refund in the Editor.`, action: 'Open Editor', href: '#/editor' }));
+  // eBay money with no order (a store subscription, a charge eBay didn't tie to a sale) is not in any sale's numbers.
+  // The key carries the list, so a new charge shows again after an older one was dismissed.
+  const orderless = d.flags?.unassignedCharges || [];
+  if (orderless.length) {
+    const total = orderless.reduce((t, c) => t + (Number(c.amount) || 0), 0);
+    out.push(notice({ key: `ebay-orderless-${orderless.map((c) => c.id).join('|').slice(-120)}`, text: `<b>${orderless.length === 1 ? 'An eBay charge has' : `${orderless.length} eBay charges have`} no order (${money(total, 2)} in all).</b> They are not in the numbers. If one is a business cost, add it under Operating costs. ${orderless.slice(0, 3).map((c) => `<span class="muted">${esc(String(c.fee_type || c.type || '').replace(/_/g, ' ').toLowerCase())} ${money(c.amount, 2)} on ${fmtDate(c.at)}</span>`).join(' ')}${orderless.length > 3 ? ` <span class="muted">and ${orderless.length - 3} more</span>` : ''}`, action: 'Operating costs', href: '#/costs', soft: true }));
+  }
+  // A return hold eBay never released or refunded after 30 days: a case that may have been decided without a refund
+  // record, so the sale's money may be wrong
+  const holds = d.flags?.openHolds || [];
+  if (holds.length)
+    out.push(notice({ key: `ebay-holds-${holds.map((h) => h.id).join('|').slice(-120)}`, kind: 'bad', text: `<b>${holds.length === 1 ? 'A return hold has' : `${holds.length} return holds have`} been open over 30 days.</b> eBay held the money and never released or refunded it. Check the case on eBay. ${holds.slice(0, 3).map((h) => `<span class="muted">order ${esc(h.order_id || '?')}: ${money(h.amount, 2)} since ${fmtDate(h.since)}</span>`).join(' ')}`, action: 'Returns', href: '#/returns' }));
   if (d.orders.some((o) => o.order_id.startsWith('DEMO-')))
     out.push(notice({ key: 'demo', kind: 'info', icon: ICONS.info, soft: true, text: "<b>You're looking at demo data.</b> It shows how the dashboard works before your real eBay and Amazon data arrives. Remove it any time.", action: 'Remove demo data', href: '#/settings' }));
   const loud = /data-k="(ebay-steps|email-unread|ebay-failing|email-failing|ebay-reconnect)"/;

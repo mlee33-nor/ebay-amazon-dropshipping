@@ -52,7 +52,8 @@ export function moneyError(f, v) {
 
 // A "Refund · …" line is computed from the refund records of its sale; it has nothing of its own to override (the
 // server never reads an override saved on it). Change the sale instead.
-export const isReadOnlyRow = (o) => o.source === 'refund' || String(o.order_id || '').startsWith('REFUND:');
+// An adjustment line (ADJ:/HOLD:) is worked out from a paid payment and the sale's numbers now, so it is read-only too.
+export const isReadOnlyRow = (o) => o.source === 'refund' || o.source === 'adjustment' || /^(REFUND|ADJ|HOLD):/.test(String(o.order_id || ''));
 
 // One dataset row as an Editor row. `nat_*` are the row's numbers without any of its overrides, worked out from what
 // the server sent (exact when the row has no override; a close estimate after an existing override is cleared).

@@ -119,7 +119,7 @@ await q(`insert into ebay_transactions (transaction_id, order_id, type, booking_
 const { transactionStatus: _s, payoutId: _p, ...noStatusRaw } = { ...legacyRaw, transactionId: 'DISPUTE_HOLD-6755036627', bookingEntry: 'DEBIT', transactionType: 'DISPUTE' };
 await legacy('DISPUTE_HOLD-6755036627', noStatusRaw);
 await legacy('DISPUTE_HOLD-6728705848', null);
-await ensureEbaySchema(); // what loadEbayConnection / the first sync do at startup
+await ensureEbaySchema(true); // what startup does (initDb runs it once; forced again here for the records inserted above)
 await check('startup adds the columns and fills refs, hold_id, status and payout on records stored before them', async () => {
   const row = await one('select refs, hold_id, transaction_status, payout_id from ebay_transactions where transaction_id = $1', [legacyRaw.transactionId]);
   assert.deepEqual(row.refs, legacyRaw.references);

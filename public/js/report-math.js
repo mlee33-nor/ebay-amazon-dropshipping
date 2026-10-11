@@ -52,7 +52,9 @@ export function taxLine(o, ebayById) {
 // Every counted line of a tax year, by the calendar month it happened (Arizona time)
 export function taxRows(orders, year) {
   const ebayById = new Map(orders.filter((o) => o.source === 'ebay').map((o) => [o.order_id, o]));
-  return orders.filter((o) => o.counted && (o.business_month || '').startsWith(year)).map((o) => taxLine(o, ebayById));
+  // Adjustment lines only move money between payments (they net to zero against the sale's real numbers), so the tax
+  // view leaves them out and shows every sale as it is now
+  return orders.filter((o) => o.counted && o.source !== 'adjustment' && (o.business_month || '').startsWith(year)).map((o) => taxLine(o, ebayById));
 }
 
 export function taxTotals(rows) {

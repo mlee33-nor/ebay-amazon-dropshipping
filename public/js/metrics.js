@@ -7,9 +7,10 @@ import { settlePeriodOf, settlePeriodRange, monthKey } from './settlement.js';
 export const rowMonth = (o) => o.settle_month || o.business_month || monthKey(o.created_at);
 // A refund line ("Refund · …", a refund booked on a later payment) or a monthly-sheet refund row is money, not a
 // sale: it keeps its money in every total but is never counted as an order, a unit, a buyer or a product of its own
-export const isSale = (o) => o.source !== 'refund' && !o.ledger?.is_refund;
+// Refund lines and adjustment lines (money moved between payments after one was paid) are never sales
+export const isSale = (o) => o.source !== 'refund' && o.source !== 'adjustment' && !o.ledger?.is_refund;
 // The sale a row belongs to: a refund line points at its sale, a sheet row at its eBay order when it has one
-export const saleIdOf = (o) => (o.source === 'refund' ? o.refund_of : o.ebay_order_id || o.order_id);
+export const saleIdOf = (o) => (o.source === 'refund' ? o.refund_of : o.source === 'adjustment' ? o.adjustment_of || o.order_id : o.ebay_order_id || o.order_id);
 
 // `month` picks a payment (pay period): from September 2026 that is the 27th of the month before through the 26th
 // (see settlement.js), so a month's numbers here are exactly that payment's numbers. `calendar` marks the one preset
@@ -186,7 +187,8 @@ export function byProduct(orders, all = orders) {
   const keyOf = productKeyer(all);
   const m = new Map();
   for (const o of orders) {
-    if (o.excluded || o.cancelled) continue;
+    // An adjustment line only moves a sale's money between payments; the sale itself already shows its real numbers
+    if (o.excluded || o.cancelled || o.source === 'adjustment') continue;
     const k = keyOf(o);
     if (!m.has(k)) m.set(k, { key: k, title: String(o.title || '').replace(/^Refund · /, ''), sku: o.items[0]?.sku || '', orders: [] });
     const p = m.get(k);
@@ -234,6 +236,7 @@ export const STATUS_META = {
   check_sheet: { label: 'Check: maybe in sheet', cls: 'warn' },
   // Held back because an Amazon email couldn't be read (sent by servers that have it; older ones never do)
   needs_review: { label: 'Needs review', cls: 'bad' },
+  adjustment: { label: 'Payment adjustment', cls: 'info' },
 };
 
 // Operating costs that fall in a range. A payment's range (Month) takes that payment's costs in full, exactly like the

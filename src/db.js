@@ -407,6 +407,9 @@ export async function initDb() {
   await impl.query(`insert into settlement_payments (month, amount, paid_at, note)
     select s.month, s.paid, s.paid_at, coalesce(s.note, 'recorded before payments were itemised') from settlements s
     where s.paid is not null and not exists (select 1 from settlement_payments p where p.month = s.month)`);
+  // eBay's extra columns (refs, hold ids, per-step sync status) are added here too, so the money pages that read them
+  // work before the first eBay sync after a deploy
+  await (await import('./ebay.js')).ensureEbaySchema(true);
   return impl.kind;
 }
 

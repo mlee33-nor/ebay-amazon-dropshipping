@@ -7,7 +7,7 @@ const cents = (n) => Math.round((Number(n) || 0) * 100);
 const dollars = (c) => c / 100;
 const payoutOf = (o) => cents(o.revenue) - cents(o.fees) - cents(o.refunds);
 // A refund line or a monthly-sheet refund row is money, not a sale (see metrics.js isSale)
-const isSale = (o) => o.source !== 'refund' && !o.ledger?.is_refund;
+const isSale = (o) => o.source !== 'refund' && o.source !== 'adjustment' && !o.ledger?.is_refund;
 
 export function promoMonth(orders, month) {
   const rows = orders.filter((o) => o.counted && o.business_month === month);

@@ -179,7 +179,8 @@ app.get('/api/export/backup', wrap(async (_req, res) => {
   const tables = ['ebay_orders', 'ebay_line_items', 'ebay_transactions', 'ebay_returns', 'amazon_lines', 'order_links', 'link_rejections', 'order_overrides', 'amazon_refunds', 'amazon_emails', 'ledger_entries', 'expenses', 'settlements', 'settlement_payments', 'settlement_freeze', 'money_log'];
   const out = { exported_at: new Date().toISOString(), tables: {} };
   for (const t of tables) out.tables[t] = await q(`select * from ${t}`).catch((e) => ({ error: e.message }));
-  out.settings = (await q('select key, value from settings')).filter((r) => !/oauth|token|secret|password|key/i.test(r.key));
+  // Secrets are left out by name and, as a backstop, by what the value looks like
+  out.settings = (await q('select key, value from settings')).filter((r) => !/oauth|token|secret|password|key/i.test(r.key) && !/token|secret|password|v^1.1#/i.test(JSON.stringify(r.value ?? '')));
   res.setHeader('Content-Disposition', `attachment; filename="dropship-ledger-backup-${businessDay(new Date())}.json"`);
   res.json(out);
 }));
@@ -408,6 +409,7 @@ app.post('/api/settlements/payments', wrap(async (req, res) => {
   if (!Number.isFinite(amt) || Math.abs(amt) < 0.01) return res.status(400).json({ error: 'Enter the amount paid (a correction can be negative)' });
   const day = paid_at ? String(paid_at) : businessDay(new Date());
   if (!DAY_RE.test(day)) return res.status(400).json({ error: 'paid_at must be YYYY-MM-DD' });
+  if (day > businessDay(new Date())) return res.status(400).json({ error: "A payment can't be dated in the future (Arizona time)" });
   await q('insert into settlement_payments (month, amount, paid_at, note) values ($1, $2, $3, $4)', [month, amt, day, note ? String(note).slice(0, 500) : null]);
   await logMoney(req, 'payment added', month, null, { amount: amt, paid_at: day, note: note || null });
   await syncPaid(month);
@@ -416,13 +418,17 @@ app.post('/api/settlements/payments', wrap(async (req, res) => {
 }));
 // "Paid in full": the server works out what's left from fresh numbers, so a stale page can't record the wrong amount
 app.post('/api/settlements/pay-remaining', wrap(async (req, res) => {
-  const { month, note } = req.body || {};
+  const { month, note, expected } = req.body || {};
   if (!MONTH_RE.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM' });
   const [orders, books] = await Promise.all([buildDataset(), buildBooks()]);
   const split = Number((await getSetting('split_amazon')) ?? 50);
   const s = settleMonth({ month, orders, expenses: books.expenses, settlements: books.settlements, splitAmazon: split });
   const left = Math.round((s.sellerSends - (s.paid || 0)) * 100) / 100;
   if (Math.abs(left) < 0.01) return res.json({ ok: true, nothing: true, ...books });
+  // The page shows what it thinks is left (signed: negative = Myles owes Drew); if the numbers moved since, say so
+  // instead of recording an amount nobody saw
+  if (expected !== undefined && expected !== null && Math.abs(Number(expected) - left) >= 0.005)
+    return res.status(409).json({ error: `The amount left changed to ${left.toFixed(2)} since the page loaded. Reload and check it.`, left });
   await q('insert into settlement_payments (month, amount, paid_at, note) values ($1, $2, $3, $4)', [month, left, businessDay(new Date()), note ? String(note).slice(0, 500) : 'remaining balance']);
   await logMoney(req, 'payment added (remaining balance)', month, null, { amount: left, paid_at: businessDay(new Date()) });
   await syncPaid(month);

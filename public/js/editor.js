@@ -200,16 +200,16 @@ function ebaySheet(focusOrder) {
     // Refund lines are never sent: the server has nothing to apply an override to there
     const changes = [...dirty.entries()].filter(([order_id]) => !isReadOnlyRow({ order_id })).map(([order_id, ch]) => ({ order_id, ...ch }));
     if (!changes.length) { dirty.clear(); markDirty(0); return; }
-    // A payment that has been made never changes. An edit that would change one (a cost, fee or refund on a row it
-    // covered, or excluding one) is refused; the correction goes on the next open payment as a cost or a credit.
+    // A payment that has been made never changes. An edit to a sale it covered (a cost, fee or refund, or excluding
+    // it) keeps that payment as paid (a "Held as paid" line) and puts the difference on the next open payment as an
+    // adjustment line, worked out by the server. Say so before saving.
     const books = state.data.books;
     const hit = paidPaymentChanges({ orders: state.data.orders, books, staged: new Map(changes.map(({ order_id, ...ch }) => [order_id, ch])), splitAmazon: Number(state.data.settings.split_amazon ?? 50) });
     if (hit.length) {
       const paid = paidMonthsOf(books);
       const names = (ids) => ids.map((id) => { const o = state.data.orders.find((x) => x.order_id === id); return o?.source === 'ledger' ? `${String(o.title || '').slice(0, 30)} (monthly sheet)` : id; }).join(', ');
-      // A message box, not a toast: it has to stay up long enough to read
-      alert(`Nothing saved.\n\n${hit.map((h) => `The ${monthLabel(h.month, 'long')} payment has been made. It is for ${money(h.before, 2)}; these edits would change it to ${money(h.after, 2)}: ${names(h.rows)}.\n\nA payment that has been made never changes. Undo these edits and put the correction on the ${monthLabel(nextOpenMonth(h.month, paid), 'long')} payment instead, as a cost or a credit with a note (Costs page).`).join('\n\n')}`);
-      return;
+      const ok = confirm(`${hit.map((h) => { const diff = Math.round((h.after - h.before) * 100) / 100; return `The ${monthLabel(h.month, 'long')} payment has been made and stays at ${money(h.before, 2)}. These edits change what it should have been by ${diff < 0 ? '−' : '+'}${money(Math.abs(diff), 2)} (${names(h.rows)}), so about that much goes on the ${monthLabel(nextOpenMonth(h.month, paid), 'long')} payment as an adjustment line.`; }).join('\n\n')}\n\nSave?`);
+      if (!ok) return;
     }
     $('#ed-save').disabled = true;
     try {
