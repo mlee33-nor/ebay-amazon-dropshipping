@@ -10,4 +10,5 @@ for t in audit-regression-test core-test sheet-reconcile-test ask-test ask-batte
 LOCAL_PG_PORT=$((5439 + OFF)) run node scripts/e2e-test.js
 run node scripts/stress-test.js 7 worst
 run node scripts/stress-test.js 7 realistic
+run node scripts/ebay-test.js
 [ $fail = 0 ] && echo "ALL SUITES PASSED" || { echo "SOME SUITES FAILED"; exit 1; }
