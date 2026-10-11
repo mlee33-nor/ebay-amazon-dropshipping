@@ -1352,23 +1352,33 @@ async function settings(el) {
 function dashboardCard(settings) {
   const p = dashPrefs(settings);
   const group = (g, title, list) => `<div class="dash-group"><div class="field-h">${title}</div>${list.map((o) => `<label class="dash-opt ${o.locked ? 'locked' : ''}"><input type="checkbox" data-g="${g}" data-k="${o.id}" ${p[g][o.id] ? 'checked' : ''} ${o.locked ? 'disabled' : ''} /><span><b>${esc(o.label)}</b><span class="muted">${esc(o.note)}</span></span></label>`).join('')}</div>`;
-  return card('What the dashboard shows', 'Turn things off to keep it simple. Hidden pages still open from links.', `<div class="dash-groups">
+  return card('What the dashboard shows', 'Each switch saves as soon as you click it. Hidden pages still open from links.', `<div class="dash-groups">
     ${group('pages', 'Pages in the menu', PAGE_OPTIONS)}
     ${group('cards', 'Overview cards', CARD_OPTIONS)}
     ${group('alerts', 'Alerts', ALERT_OPTIONS)}
     </div>
-    <div class="row mt"><button class="btn primary" id="dash-save">${ICONS.save} Save</button><button class="btn" id="dash-reset">Back to the defaults</button></div>`, { cls: 'set-card', id: 'dash-card' });
+    <div class="row mt"><button class="btn" id="dash-reset">Back to the defaults</button><span class="muted" id="dash-saved" style="font-size:12px"></span></div>`, { cls: 'set-card', id: 'dash-card' });
 }
 function bindDashboardCard() {
-  const save = async (prefs) => {
-    try { await api('/api/settings/dashboard', { method: 'POST', body: prefs }); toast('Dashboard saved', 'good'); await loadData(); renderPage(); } catch (e) { toast(e.message, 'bad'); }
+  // Saved on every click; the menu updates straight away and the page stays where it is
+  const save = async (prefs, rerender = false) => {
+    const note = $('#dash-saved');
+    if (note) note.textContent = 'Saving…';
+    try {
+      const r = await api('/api/settings/dashboard', { method: 'POST', body: prefs });
+      if (state.data) state.data.settings = r.settings;
+      renderNav();
+      if (rerender) renderPage();
+      else if (note) note.textContent = 'Saved';
+    } catch (e) { toast(e.message, 'bad'); if (note) note.textContent = ''; }
   };
-  $('#dash-save')?.addEventListener('click', () => {
+  const current = () => {
     const prefs = { pages: {}, cards: {}, alerts: {} };
-    for (const box of $('#dash-card input[type=checkbox]')) prefs[box.dataset.g][box.dataset.k] = box.checked;
-    save(prefs);
-  });
-  $('#dash-reset')?.addEventListener('click', () => { if (confirm('Put every page, card and alert back to the default?')) save(defaultPrefs()); });
+    for (const box of $$('#dash-card input[type=checkbox]')) prefs[box.dataset.g][box.dataset.k] = box.checked;
+    return prefs;
+  };
+  $$('#dash-card input[type=checkbox]').forEach((box) => box.addEventListener('change', () => save(current())));
+  $('#dash-reset')?.addEventListener('click', () => { if (confirm('Put every page, card and alert back to the default?')) save(defaultPrefs(), true); });
 }
 
 function ebayCard(e, log) {
