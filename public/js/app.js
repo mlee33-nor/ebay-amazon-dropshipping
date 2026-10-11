@@ -1,5 +1,7 @@
-import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, ago, api, toast, downloadCsv, ICONS, DAY, ymd, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel } from './util.js';
-import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor } from './metrics.js';
+import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, fmtTime, ago, api, toast, downloadCsv, ICONS, DAY, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel, azDay, azHour, azWeekday, azStart, addDays, daysBetween } from './util.js';
+import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor, isSale, saleIdOf, rowMonth } from './metrics.js';
+import { ORDER_EXPORT } from './report-math.js';
+import { ebayStepIssues, ebayIssueText, emailFailures, emailFailureText } from './health.js';
 import { mount, disposeAll, colors, tooltipBase, axisBase, ttRow, ttHead, ttNote, sparkline, shadowPointer, crosshair, areaFade } from './charts.js';
 import { renderEditor } from './editor.js';
 import { renderSettlement } from './settle-page.js';
@@ -9,15 +11,20 @@ import { renderListingsPanel } from './listings-panel.js';
 import { renderPromotionsPanel } from './promotions-panel.js';
 import { renderWatch } from './watch-page.js';
 import { renderReports } from './reports-page.js';
-import { settleMonth, monthKey, allMonths } from './settlement.js';
+import { settleMonth, allMonths, settlePeriodOf, settlePeriodRange, CYCLE_START } from './settlement.js';
+
+export { ORDER_EXPORT };
 
 // ---------------------------------------------------------------- state
 const store = (k, v) => { try { if (v === undefined) return JSON.parse(localStorage.getItem(k)); localStorage.setItem(k, JSON.stringify(v)); } catch { return null; } };
+const dueDayOf = () => Number(state.data?.settings?.settlement_day) || 26;
+// The payment being built today (Arizona time): from the 27th it is next month's
+const currentPeriod = () => settlePeriodOf(azDay(), dueDayOf());
 export const state = {
   data: null,
   range: store('dd_range') || '30d',
-  month: store('dd_month') || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`,
-  custom: store('dd_custom') || { from: ymd(Date.now() - 29 * DAY), to: ymd(Date.now()) },
+  month: store('dd_month') || settlePeriodOf(azDay(), 26), // a payment (pay period), see rangeFor
+  custom: store('dd_custom') || { from: addDays(azDay(), -29), to: azDay() },
   gran: null,
   page: 'overview',
   ordersFilter: 'all',
@@ -51,7 +58,7 @@ export async function loadData() {
   return state.data;
 }
 
-const range = () => rangeFor(state.range, state.custom, state.month);
+const range = () => rangeFor(state.range, state.custom, state.month, { dueDay: dueDayOf() });
 const scoped = () => inRange(state.data.orders, range());
 const prevScoped = () => inRange(state.data.orders, previousRange(range()));
 
@@ -85,6 +92,7 @@ function renderSidebarFoot() {
   let action = 'Set up';
   if (syncInProgress(e)) { dot = 'spin'; line = 'Syncing now…'; action = ''; }
   else if (e.needsReconnect) { dot = 'bad'; line = 'Needs reconnect'; action = 'Fix'; }
+  else if (e.configured && ebayStepIssues(e).length) { dot = 'bad'; line = `Incomplete: ${ebayStepIssues(e).map((i) => i.step).join(', ')}`; action = 'Details'; }
   else if (e.configured && e.last?.ok) { dot = 'ok'; line = `Synced ${ago(e.lastSuccess)}`; action = ''; }
   else if (e.configured && syncFailed(e)) { dot = 'bad'; line = 'Last sync failed'; action = 'Details'; }
   else if (e.configured) { dot = 'warn'; line = 'Waiting for first sync'; action = ''; }
@@ -101,6 +109,8 @@ function emailState() {
   const m = state.data.email;
   if (!m.configured) return { dot: 'warn', line: 'Not connected', action: 'Set up' };
   if (m.running) return { dot: 'spin', line: 'Checking mail…', action: '' };
+  const unread = emailFailures(m).length;
+  if (m.last?.ok && unread) return { dot: 'bad', line: `${unread} email${unread === 1 ? '' : 's'} not read`, action: 'Details' };
   if (m.last?.ok) return { dot: 'ok', line: `Checked ${ago(m.last.at)}`, action: '' };
   if (m.last) return { dot: 'bad', line: 'Last check failed', action: 'Details' };
   return { dot: 'warn', line: 'Not checked yet', action: '' };
@@ -110,12 +120,15 @@ const RANGES = [['1d', '1D'], ['7d', '7D'], ['30d', '30D'], ['90d', '90D'], ['mt
 function renderRangeSeg() {
   $('#range-seg').innerHTML = RANGES.map(([k, l]) => `<button data-r="${k}" class="${state.range === k ? 'on' : ''}">${l}</button>`).join('');
   $('#custom-range').classList.toggle('hidden', state.range !== 'custom');
-  // Month picker: every month that has sales, plus the last 12 calendar months
+  // Month picker: one entry per payment (from September 2026 a payment covers the 27th through the 26th, so its
+  // numbers match the Settlement page): every payment with sales, plus the last 12
   const months = new Set();
-  const now = new Date();
-  for (let i = 0; i < 12; i++) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); months.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
-  for (const o of state.data?.orders || []) { const d = new Date(o.created_at); months.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
-  $('#month-pick').innerHTML = [...months].sort().reverse().map((k) => { const [y, mo] = k.split('-').map(Number); return `<option value="${k}" ${k === state.month ? 'selected' : ''}>${new Date(y, mo - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</option>`; }).join('');
+  let m = currentPeriod();
+  for (let i = 0; i < 12; i++) { months.add(m); const [y, mo] = m.split('-').map(Number); m = mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`; }
+  for (const o of state.data?.orders || []) months.add(rowMonth(o));
+  const dd = dueDayOf();
+  const optLabel = (k) => { if (k < CYCLE_START) return monthLabel(k, 'long'); const p = settlePeriodRange(k, dd); return `${monthLabel(k, 'long')} payment · ${fmtDate(p.from)} – ${fmtDate(p.to)}`; };
+  $('#month-pick').innerHTML = [...months].filter(Boolean).sort().reverse().map((k) => `<option value="${k}" ${k === state.month ? 'selected' : ''}>${esc(optLabel(k))}</option>`).join('');
   $('#month-pick').classList.toggle('hidden', state.range !== 'month');
   $('#from-date').value = state.custom.from;
   $('#to-date').value = state.custom.to;
@@ -262,6 +275,8 @@ export function renderPage() {
   if (!state.data) { el.innerHTML = skeleton(); return; }
   const fn = { overview, ask: renderAsk, watch: renderWatch, reports: renderReports, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
+  // A failing sync is shown on every page, not only the Overview, so nobody pays or reads numbers from stale data
+  if (p.id !== 'overview') { const loud = setupBanner({ failuresOnly: true }); if (loud) el.insertAdjacentHTML('afterbegin', loud); }
 }
 
 // Red reminder across the top of every page: a settlement that is due within DUE_WARN_DAYS days, or overdue
@@ -292,10 +307,13 @@ function renderDueBar() {
 }
 
 // "Sep 1 – Sep 22", or with years when the range crosses a year boundary / isn't this year: "Sep 23, 2025 – Sep 22, 2026"
+// A payment (Month) says so: "October 2026 payment · Sep 27 – Oct 26"; the calendar month to date says so too
 function rangeText(r) {
-  const withYear = r.start.getFullYear() !== r.end.getFullYear() || r.end.getFullYear() !== new Date().getFullYear();
+  const y = (d) => azDay(d).slice(0, 4);
+  const withYear = y(r.start) !== y(r.end) || y(r.end) !== y(Date.now());
   const f = withYear ? { month: 'short', day: 'numeric', year: 'numeric' } : undefined;
-  return `${fmtDate(r.start, f)} – ${fmtDate(r.end, f)}`;
+  if (r.month && r.period) return `${monthLabel(r.month, 'long')} payment · ${fmtDate(r.period.from, f)} – ${fmtDate(r.period.to, f)}`;
+  return `${r.calendar ? 'Calendar month to date · ' : ''}${fmtDate(r.start, f)} – ${fmtDate(r.end, f)}`;
 }
 
 // Loading placeholders mirror the layout they stand in for (hero + settlement card, KPI strip, two charts)
@@ -381,6 +399,7 @@ const NO_NET = {
   not_dropship: ['not dropship', 'No Amazon purchase found for this sale, so it is treated as something else and left out'],
   awaiting_email: ['awaiting email', 'No Amazon order email has matched this sale yet. It is not counted until one does.'],
   awaiting_cost: ['needs cost', 'The Amazon order was found but its total is unknown (e.g. paid by gift card). Type the cost in the Editor.'],
+  needs_review: ['needs review', 'An Amazon email that may hold this sale couldn’t be read, so it is held back instead of being dropped. Check it and link or type the cost in the Editor.'],
 };
 // Display status: an uncosted sale is either still waiting for its Amazon email, or has one with no usable total
 export const viewStatus = (o) => (o.status === 'awaiting_cost' && !(o.amazon_orders || []).length ? 'awaiting_email' : o.status);
@@ -393,7 +412,7 @@ const refundWord = (o) => (o.source === 'ledger' ? 'eBay refund fee' : 'Refunded
 // Every status pill carries an icon as well as a colour, so state never relies on colour alone
 const STATUS_ICON = {
   profitable: 'trendUp', loss: 'trendDown', returned: 'return', return_open: 'clock', awaiting_cost: 'clock', awaiting_email: 'mail', cancelled: 'x',
-  cancelled_after_purchase: 'circleX', excluded: 'eyeOff', not_dropship: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert',
+  cancelled_after_purchase: 'circleX', excluded: 'eyeOff', not_dropship: 'eyeOff', in_sheet: 'sheet', before_start: 'history', check_sheet: 'alert', needs_review: 'alert',
 };
 export function statusPill(s) {
   const m = STATUS_META[s] || { label: s, cls: '' };
@@ -417,8 +436,7 @@ function bindGran(el) {
 const bucketLabel = (k, gran) => {
   if (k.includes('T')) { const h = Number(k.slice(11, 13)); return h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`; }
   if (gran === 'month') return monthLabel(k);
-  const [y, m, d] = k.split('-').map(Number);
-  const s = new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const s = fmtDate(k.slice(0, 10), { month: 'short', day: 'numeric' });
   return gran === 'week' ? `Wk ${s}` : s;
 };
 
@@ -441,7 +459,8 @@ function notice({ key, kind = '', icon = ICONS.alert, text, action, href, soft =
   return `<div class="banner ${kind}" data-k="${key}">${icon}<div>${text}</div>${action ? `<a class="btn sm" href="${href}">${action}</a>` : ''}${soft ? `<button class="banner-x" data-k="${key}" aria-label="Dismiss">${ICONS.x}</button>` : ''}</div>`;
 }
 
-function setupBanner() {
+// `failuresOnly`: just the loud failures (a sync step or the email import not working), shown on every other page
+function setupBanner({ failuresOnly = false } = {}) {
   const d = state.data;
   const out = [];
   if (!d.ebay.configured)
@@ -456,6 +475,16 @@ function setupBanner() {
     out.push(notice({ key: 'ebay-failing', kind: 'bad', text: `<b>eBay sync is failing.</b> New sales are not coming in. <span class="muted">${esc((d.ebay.last.message || '').slice(0, 180))}</span>`, action: 'Details', href: '#/settings' }));
   else if (d.ebay.configured && !syncInProgress(d.ebay) && d.ebay.lastSuccess && stale(d.ebay.lastSuccess, 3))
     out.push(notice({ key: 'ebay-stale', text: `<b>eBay hasn't synced since ${fmtDateTime(d.ebay.lastSuccess)}.</b> It normally runs every 30 minutes. Check that the server is running.`, action: 'Details', href: '#/settings' }));
+  // A sync can finish while one of its steps failed (Finances: fees, ad fees, refunds; Returns): loud, never dismissible
+  const steps = ebayStepIssues(d.ebay);
+  if (steps.length) {
+    const missing = steps.flatMap((i) => (i.step === 'finances' ? ['ad fees', 'fee credits', 'refunds'] : i.step === 'returns' ? ['open returns'] : ['new sales']));
+    const what = missing.length > 1 ? `${missing.slice(0, -1).join(', ')} and ${missing.at(-1)}` : missing[0];
+    out.push(notice({ key: 'ebay-steps', kind: 'bad', text: `<b>eBay sync is incomplete: ${esc(steps.map((i) => i.step).join(' and '))} ${steps.every((i) => i.problem === 'stale') ? 'behind' : 'not working'}.</b> ${esc(what[0].toUpperCase() + what.slice(1))} may be missing, so the numbers (and what is owed) can be wrong until it syncs. <span class="muted">${esc(ebayIssueText(steps))}</span>`, action: 'Details', href: '#/settings' }));
+  }
+  const unread = emailFailures(d.email);
+  if (unread.length)
+    out.push(notice({ key: 'email-unread', kind: 'bad', icon: ICONS.mail, text: `<b>${unread.length === 1 ? 'An Amazon email couldn’t be read' : `${unread.length} Amazon emails couldn’t be read`}.</b> Their costs or refunds are not in the numbers until fixed. ${unread.slice(0, 3).map((f) => `<span class="muted">${esc(emailFailureText(f).slice(0, 120))}</span>`).join(' ')}${unread.length > 3 ? ` <span class="muted">and ${unread.length - 3} more</span>` : ''}`, action: 'Details', href: '#/settings?focus=email' }));
   if (d.email.configured && !d.email.running && d.email.last && !d.email.last.ok)
     out.push(notice({ key: 'email-failing', kind: 'bad', text: `<b>Amazon email check is failing.</b> New Amazon costs are not coming in. <span class="muted">${esc((d.email.last.log || []).join(' ').slice(0, 180))}</span>`, action: 'Details', href: '#/settings?focus=email' }));
   else if (d.email.configured && !d.email.running && d.email.last && stale(d.email.last.at, 3))
@@ -468,7 +497,8 @@ function setupBanner() {
     out.push(notice({ key: 'refund-unmatched', kind: 'bad', text: `<b>${unplaced.length === 1 ? 'An Amazon refund isn’t' : `${unplaced.length} Amazon refunds aren’t`} in the settlement yet.</b> It couldn’t be matched to exactly one sale. ${unplaced.slice(0, 3).map((r) => `<span class="muted">${money(r.amount, 2)} on ${fmtDate(r.received_at)}${r.title ? ` for “${esc(r.title.slice(0, 50))}”` : ''} (Amazon order ${esc(r.amazon_order_id)})</span>`).join(' ')} Set that sale’s Amazon refund in the Editor.`, action: 'Open Editor', href: '#/editor' }));
   if (d.orders.some((o) => o.order_id.startsWith('DEMO-')))
     out.push(notice({ key: 'demo', kind: 'info', icon: ICONS.info, soft: true, text: "<b>You're looking at demo data.</b> It shows how the dashboard works before your real eBay and Amazon data arrives. Remove it any time.", action: 'Remove demo data', href: '#/settings' }));
-  const html = out.filter(Boolean).join('');
+  const loud = /data-k="(ebay-steps|email-unread|ebay-failing|email-failing|ebay-reconnect)"/;
+  const html = out.filter((h) => h && (!failuresOnly || loud.test(h))).join('');
   return html ? `<div class="banners">${html}</div>` : '';
 }
 
@@ -548,9 +578,11 @@ function overview(el) {
   const dailyForSpark = buckets(r, all, autoGran(r, all));
   const c = colors();
   const expenses = state.data.books.expenses;
-  const ox = opexFor(r, expenses);
-  const oxPrev = r.start ? opexFor(previousRange(r), expenses) : { total: 0 };
-  const biz = s.net - ox.total;
+  const ox = opexFor(r, expenses, { dueDay: dueDayOf() });
+  const oxPrev = r.start ? opexFor(previousRange(r), expenses, { dueDay: dueDayOf() }) : { total: 0 };
+  // A payment picked in the range bar shows that payment's own numbers, to the cent of the Settlement page
+  const rangeSettle = r.month ? settleMonth({ month: r.month, orders: state.data.orders, expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) }) : null;
+  const biz = rangeSettle ? rangeSettle.businessProfit : s.net - ox.total;
   const bizPrev = p.net - oxPrev.total;
   // Monthly-sheet rows are eBay payouts after fees, and their refund rows carry eBay's refund fee, not a buyer refund
   const split = refundSplit(all.filter((o) => o.counted));
@@ -561,20 +593,21 @@ function overview(el) {
     ? `sheet rows are already net of eBay fees · ${adPart}`
     : `${pct(s.revenue ? s.fees / s.revenue : null)} of revenue${sheetRows ? ' · sheet rows already net' : ''} · ${adPart}`;
 
-  // goal + run rate
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthOrders = inRange(state.data.orders, { start: monthStart, end: new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0, 23, 59, 59) });
-  const ms = summarize(monthOrders);
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const dayOfMonth = now.getDate() - 1 + now.getHours() / 24;
-  const projected = dayOfMonth > 0.5 ? (ms.net / dayOfMonth) * daysInMonth : null;
+  // goal + run rate, for the payment being built now (Arizona time): the card and the settlement use the same rows
+  const curMonth = currentPeriod();
+  const curRange = settlePeriodRange(curMonth, dueDayOf());
+  const thisSettle = settleMonth({ month: curMonth, orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) });
+  const ms = summarize(state.data.orders.filter((o) => rowMonth(o) === curMonth));
+  const periodDays = daysBetween(curRange.from, curRange.to) + 1;
+  const dayOfPeriod = Math.min(periodDays, Math.max(0, daysBetween(curRange.from, azDay()) + azHour(Date.now()) / 24));
+  const projected = dayOfPeriod > 0.5 ? (thisSettle.orderProfit / dayOfPeriod) * periodDays : null;
   const goal = Number(state.data.settings.monthly_goal) || 0;
-  const thisSettle = settleMonth({ month: monthKey(now), orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) });
 
-  const top = byProduct(all).filter((x) => x.countedOrders > 0).sort((a, b) => b.net - a.net).slice(0, 8);
+  const top = byProduct(all, state.data.orders).filter((x) => x.countedRows > 0).sort((a, b) => b.net - a.net).slice(0, 8);
   const allTime = summarize(state.data.orders);
   const oldAwaiting = state.data.orders.filter((o) => o.status === 'awaiting_cost' && Date.now() - new Date(o.created_at) > 3 * DAY);
+  // Sales the server holds back because an Amazon email couldn't be read (only sent by servers that have that status)
+  const needsReview = state.data.orders.filter((o) => o.status === 'needs_review');
   const openReturns = state.data.orders.filter((o) => o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
 
   // what we owe each other: this month's settlement + the running balance across every month
@@ -586,19 +619,20 @@ function overview(el) {
   const view = (x) => settleView(x, A, B);
   // Net position across every month: > 0 means B owes A, < 0 means A owes B (a loss month can flip the direction)
   const owedAll = Math.round(allSettled.reduce((t, x) => t + view(x).signedOwed, 0) * 100) / 100;
-  // The card shows the month picked in the range bar (Month range), otherwise the current month
+  // The card shows the payment picked in the range bar (Month range), otherwise the one being built now. From the
+  // 27th that is next month's payment: the one due on the 26th is already closed.
   const pickedMonth = state.range === 'month' && /^\d{4}-\d{2}$/.test(state.month || '') ? state.month : null;
-  const cardMonth = pickedMonth || monthKey(now);
-  const cardSettle = cardMonth === monthKey(now) ? thisSettle : settleMonth({ month: cardMonth, ...settleArgs });
+  const cardMonth = pickedMonth || curMonth;
+  const cardSettle = cardMonth === curMonth ? thisSettle : settleMonth({ month: cardMonth, ...settleArgs });
   const cv = view(cardSettle);
   const cardDue = dueStatus(settlementDueDate(cardMonth, dueDay), { paid: cv.fullyPaid });
   const settleStatus = (() => {
     if (cv.paid === null) {
-      if (cv.nothingDue) return { cls: '', icon: ICONS.info, t: cardMonth === monthKey(now) ? 'Nothing due yet' : 'Nothing to send', s: cardMonth === monthKey(now) ? 'No settled sales this month so far' : 'No amount due for this month' };
+      if (cv.nothingDue) return { cls: '', icon: ICONS.info, t: cardMonth === curMonth ? 'Nothing due yet' : 'Nothing to send', s: cardMonth === curMonth ? 'No settled sales in this pay period so far' : 'No amount due for this payment' };
       if (cardDue.kind === 'overdue') return { cls: 'bad', icon: ICONS.alert, t: cardDue.text, s: `${esc(cv.from)} sends ${esc(cv.to)} · was due ${cardDue.label}` };
       return { cls: 'warn', icon: ICONS.clock, t: cardDue.kind === 'soon' ? cardDue.text : 'Not paid yet', s: `${esc(cv.from)} sends by ${cardDue.label}` };
     }
-    if (cv.fullyPaid) return { cls: 'good', icon: ICONS.check, t: 'Paid in full', s: cardSettle.paidAt ? `on ${fmtDate(`${cardSettle.paidAt}T12:00`)}` : 'Recorded on the monthly sheet' };
+    if (cv.fullyPaid) return { cls: 'good', icon: ICONS.check, t: 'Paid in full', s: cardSettle.paidAt ? `on ${fmtDate(cardSettle.paidAt)}` : 'Recorded on the monthly sheet' };
     if (cv.outstanding > 0) return { cls: cardDue.kind === 'overdue' ? 'bad' : 'warn', icon: ICONS.clock, t: `${money(cv.outstanding, 2)} still owed`, s: `${money(cv.paid, 2)} paid so far · ${cardDue.text.toLowerCase()}` };
     return { cls: 'info', icon: ICONS.info, t: `Overpaid by ${money(-cv.outstanding, 2)}`, s: `${money(cv.paid, 2)} paid by ${esc(cv.from)}` };
   })();
@@ -656,8 +690,8 @@ function overview(el) {
       </div>
       <div class="hero-value num ${biz < 0 ? 'neg' : ''}" id="hero-value">${money(biz, 2)}</div>
       <div class="hero-meta">
-        <span>Item profit <b>${money(s.net, 2)}</b></span>
-        <span>− operating costs <b>${money(ox.total, 2)}</b></span>
+        <span>Item profit <b>${money(rangeSettle ? rangeSettle.orderProfit : s.net, 2)}</b></span>
+        <span>− operating costs <b>${money(rangeSettle ? rangeSettle.opex : ox.total, 2)}</b></span>
         <span><b>${count(s.countedOrders)}</b> costed of <b>${count(s.orders)}</b> sales</span>
       </div>
       <div class="scrub-at" id="hero-at" aria-live="polite">Drag across the chart to see the running profit</div>
@@ -678,7 +712,7 @@ function overview(el) {
       <div class="settle-who">${avatar(cv.from)}<b>${esc(cv.from)}</b><span class="muted">sends</span>${ICONS.arrowRight.replace('<svg', '<svg class="arrow"')}${avatar(cv.to)}<b>${esc(cv.to)}</b></div>
       <div class="settle-amt num" id="settle-value">${money(cv.amount, 2)}</div>
       <div class="settle-math"><span>Reimbursement <b>${money(cardSettle.cogs + cardSettle.opexAmazon, 2)}</b></span><span>${cardSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(cardSettle.shareAmazon), 2)}</b></span></div>
-      <div class="settle-hint">${pickedMonth ? 'The month picked in the range bar' : 'This month so far · pick <b>Month</b> in the range bar to see another'}</div>
+      <div class="settle-hint">${pickedMonth ? 'The payment picked in the range bar' : `This pay period so far (${fmtDate(curRange.from)} – ${fmtDate(curRange.to)}) · pick <b>Month</b> in the range bar to see another`}</div>
       <div class="state ${settleStatus.cls}" role="status" title="${!cv.nothingDue ? esc(`Settlements are due on the ${dueDay}th of each month`) : ''}">
         <div class="ic">${stateIcon}</div>
         <div><div class="lbl"><span class="live"></span>${stateLabel}</div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>
@@ -704,18 +738,19 @@ function overview(el) {
   </div>
 
   <div class="grid g-12 mt">
-    ${card('This month', now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), `
-      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0" ${countable(ms.net, (v) => money(v, 0))}>${money(ms.net, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
-      <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, ms.net / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
-      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (ms.net / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
+    ${card('This pay period', `${monthLabel(curMonth, 'long')} payment · ${fmtDate(curRange.from)} – ${fmtDate(curRange.to)}`, `
+      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0" ${countable(thisSettle.orderProfit, (v) => money(v, 0))}>${money(thisSettle.orderProfit, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
+      <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, thisSettle.orderProfit / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
+      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (thisSettle.orderProfit / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
       <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${thisSettle.businessProfit < 0 ? 'neg' : ''}">${money(thisSettle.businessProfit, 2)}</span></div>
-      <div class="stat-row"><span class="k">Projected month-end</span><span class="v">${projected !== null ? money(projected, 0) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfMonth > 0.5 ? money(ms.net / dayOfMonth) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Orders this month</span><span class="v">${count(ms.orders)}</span></div>
+      <div class="stat-row"><span class="k">Projected for the period</span><span class="v">${projected !== null ? money(projected, 0) : '—'}</span></div>
+      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfPeriod > 0.5 ? money(thisSettle.orderProfit / dayOfPeriod) : '—'}</span></div>
+      <div class="stat-row"><span class="k">Sales this period</span><span class="v">${count(ms.orders)}</span></div>
       <div class="stat-row"><span class="k">All-time item profit</span><span class="v">${money(allTime.net, 0)}</span></div>`, { cls: 'c-4' })}
     ${card('Needs attention', 'Click an item to jump there', `<div class="alert-list">
       ${alertItem('bad', ICONS.alert, 'Loss-making orders', `${money(s.lossTotal)} lost in this range`, s.lossCount, '#/orders?f=loss')}
       ${alertItem('info', ICONS.mail, 'Sales awaiting the Amazon email', `${oldAwaiting.length} older than 3 days · open one and press Check email now`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/orders?f=awaiting_cost')}
+      ${needsReview.length ? alertItem('bad', ICONS.alert, 'Sales held for review', 'An Amazon email that may hold their cost couldn’t be read', needsReview.length, '#/orders?f=needs_review') : ''}
       ${alertItem('warn', ICONS.link, 'Suggested matches to review', 'Title-only matches need a human yes/no', state.data.amazon.suggestions || 0, '#/editor?tab=matches')}
       ${alertItem('warn', ICONS.return, 'Open returns', 'Returns not closed yet', openReturns.length, '#/returns')}
       ${alertItem('good', ICONS.users, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
@@ -821,11 +856,14 @@ function overview(el) {
   // cumulative
   const cumGran = autoGran(r, all);
   const opexPerBucket = dailyForSpark.map((b) => {
-    const [y, mo, d] = b.key.split('-').map(Number);
-    const bStart = new Date(y, (mo || 1) - 1, d || 1);
-    const bEnd = cumGran === 'month' ? new Date(y, mo, 0, 23, 59, 59) : cumGran === 'week' ? new Date(bStart.getTime() + 7 * DAY - 1) : new Date(bStart.getTime() + DAY - 1);
+    // Bucket keys are Arizona days ('YYYY-MM-DD', 'YYYY-MM-DDTHH' for hours, 'YYYY-MM' for months)
+    const [y, mo] = b.key.split('-').map(Number);
+    const bStart = cumGran === 'hour' ? new Date(azStart(b.key.slice(0, 10)).getTime() + Number(b.key.slice(11, 13)) * 3600_000)
+      : azStart(cumGran === 'month' ? `${b.key}-01` : b.key);
+    const bEnd = cumGran === 'month' ? new Date(azStart(new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 10)).getTime() - 1)
+      : new Date(bStart.getTime() + (cumGran === 'week' ? 7 * DAY : cumGran === 'hour' ? 3600_000 : DAY) - 1);
     const clip = { start: r.start && r.start > bStart ? r.start : bStart, end: r.end < bEnd ? r.end : bEnd };
-    return opexFor(clip, expenses).total;
+    return opexFor(clip, expenses, { dueDay: dueDayOf() }).total;
   });
   let acc = 0;
   const cum = dailyForSpark.map((b, i) => (acc += b.net - opexPerBucket[i]));
@@ -840,19 +878,21 @@ function overview(el) {
   });
 
   // outcomes donut (status colors + labels)
+  // Sales only: a refund line is money on a later payment, not an order of its own
+  const outSales = all.filter(isSale);
   const outcome = [
-    ['Profitable', all.filter((o) => o.status === 'profitable').length, c.good],
-    ['Loss', all.filter((o) => o.status === 'loss' || o.status === 'cancelled_after_purchase').length, c.bad],
-    ['Returned', all.filter((o) => o.status === 'returned').length, c.warn],
-    ['Awaiting email', all.filter((o) => o.status === 'awaiting_cost').length, c.accent],
-    ['Cancelled', all.filter((o) => o.status === 'cancelled').length, c.ink3],
+    ['Profitable', outSales.filter((o) => o.status === 'profitable').length, c.good],
+    ['Loss', outSales.filter((o) => o.status === 'loss' || o.status === 'cancelled_after_purchase').length, c.bad],
+    ['Returned', outSales.filter((o) => o.status === 'returned' || o.status === 'return_open').length, c.warn],
+    ['Awaiting email', outSales.filter((o) => o.status === 'awaiting_cost').length, c.accent],
+    ['Cancelled', outSales.filter((o) => o.status === 'cancelled').length, c.ink3],
   ].filter((x) => x[1] > 0);
   if (!outcome.length) $('#ch-outcomes').outerHTML = `<div class="empty"><div class="ic">${ICONS.orders}</div><div class="t">No orders to chart</div>Order outcomes appear once sales land in this range.</div>`;
   else mount($('#ch-outcomes'), {
     tooltip: { ...tooltipBase(), trigger: 'item', formatter: (p) => ttHead(p.name) + `${count(p.value)} orders · ${p.percent.toFixed(1)}%` },
     legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: c.ink2, fontSize: 11.5 } },
     series: [{ type: 'pie', radius: ['52%', '76%'], center: ['50%', '42%'], padAngle: 2, itemStyle: { borderRadius: 5, borderColor: c.surface, borderWidth: 2 },
-      label: { show: true, position: 'center', formatter: () => `{a|${pct(outcome[0] ? outcome[0][1] / all.length : 0, 0)}}\n{b|profitable}`,
+      label: { show: true, position: 'center', formatter: () => `{a|${pct(outSales.length ? outSales.filter((o) => o.status === 'profitable').length / outSales.length : 0, 0)}}\n{b|profitable}`,
         rich: { a: { fontSize: 22, fontWeight: 700, color: c.ink }, b: { fontSize: 11, color: c.ink3, padding: [4, 0, 0, 0] } } },
       emphasis: { scale: true, scaleSize: 4, label: { show: true } },
       data: outcome.map(([name, value, color]) => ({ name, value, itemStyle: { color } })) }],
@@ -887,8 +927,7 @@ function overview(el) {
   const months = [...new Set(expenses.map((e) => e.month))].sort().reverse();
   $('#opex-months').innerHTML = months.length ? `<table class="simple"><thead><tr><th>Month</th><th>Items</th><th class="r">Total</th></tr></thead><tbody>${months.map((mo) => {
     const list = expenses.filter((e) => e.month === mo);
-    const [yy, mm] = mo.split('-').map(Number);
-    return `<tr><td>${new Date(yy, mm - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</td><td class="muted" style="font-size:12px">${list.map((e) => esc(e.category)).join(', ')}</td><td class="r"><b>${money(list.reduce((t, e) => t + e.amount, 0), 2)}</b></td></tr>`;
+    return `<tr><td>${monthLabel(mo)}</td><td class="muted" style="font-size:12px">${list.map((e) => esc(e.category)).join(', ')}</td><td class="r"><b>${money(list.reduce((t, e) => t + e.amount, 0), 2)}</b></td></tr>`;
   }).join('')}</tbody></table>` : '<div class="empty">None yet</div>';
 
   $$('.alert', el).forEach((a) => {
@@ -908,7 +947,8 @@ function trends(el) {
   if (!all.length) return emptyState(el);
   const c = colors();
   const s = summarize(all);
-  const live = all.filter((o) => !o.excluded && !o.cancelled);
+  // Order counts are sales only (refund lines keep their money in the totals); times are Arizona time
+  const live = all.filter((o) => !o.excluded && !o.cancelled && isSale(o));
   const counted = all.filter((o) => o.counted);
   const gran = state.gran || autoGran(r, all);
   const series = buckets(r, all, gran);
@@ -925,7 +965,7 @@ function trends(el) {
   </div>
 
   <div class="grid g-12 mt">
-    ${card('When orders come in', 'Orders by weekday and hour (your local time)', '<div class="chart" id="ch-heat" style="height:290px"></div>', { cls: 'c-8' })}
+    ${card('When orders come in', 'Orders by weekday and hour (Arizona time)', '<div class="chart" id="ch-heat" style="height:290px"></div>', { cls: 'c-8' })}
     ${card('Profit by weekday', 'Total net profit per day of week', '<div class="chart" id="ch-wd" style="height:290px"></div>', { cls: 'c-4' })}
   </div>
   <div class="grid g-12 mt">
@@ -942,7 +982,7 @@ function trends(el) {
   </div>
   <div class="grid g-12 mt">
     ${card('Where buyers are', 'Net profit by ship-to state (top 15)', '<div class="chart" id="ch-state" style="height:380px"></div>', { cls: 'c-6' })}
-    ${card('Orders by hour', 'All days combined', '<div class="chart" id="ch-hour" style="height:380px"></div>', { cls: 'c-6' })}
+    ${card('Orders by hour', 'All days combined · Arizona time', '<div class="chart" id="ch-hour" style="height:380px"></div>', { cls: 'c-6' })}
   </div>
   <div class="mt">${card('Period breakdown', `${granLabel[gran]} totals with change vs the prior period`, '<div class="table-wrap" id="period-table"></div>', { right: '<button class="btn sm" id="dl-periods">Export CSV</button>' })}</div>`;
   bindGran(el);
@@ -951,7 +991,7 @@ function trends(el) {
   const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const heat = [];
   const grid = Array.from({ length: 7 }, () => Array(24).fill(0));
-  for (const o of live) { const d = new Date(o.created_at); grid[(d.getDay() + 6) % 7][d.getHours()]++; }
+  for (const o of live) grid[(azWeekday(o.created_at) + 6) % 7][azHour(o.created_at)]++;
   let maxH = 0;
   grid.forEach((row, di) => row.forEach((v, h) => { heat.push([h, di, v]); maxH = Math.max(maxH, v); }));
   mount($('#ch-heat'), {
@@ -967,7 +1007,7 @@ function trends(el) {
   // weekday profit
   const wd = Array(7).fill(0);
   const wdN = Array(7).fill(0);
-  for (const o of counted) { const i = (new Date(o.created_at).getDay() + 6) % 7; wd[i] += o.net; wdN[i]++; }
+  for (const o of counted) { const i = (azWeekday(o.created_at) + 6) % 7; wd[i] += o.net; if (isSale(o)) wdN[i]++; }
   mount($('#ch-wd'), {
     grid: { left: 8, right: 8, top: 16, bottom: 4, containLabel: true },
     tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => ttHead(days[ps[0].dataIndex]) + ttRow(c.profit, 'Net profit', money(wd[ps[0].dataIndex]), true) + `<div style="opacity:.6">${wdN[ps[0].dataIndex]} orders · ${money(wdN[ps[0].dataIndex] ? wd[ps[0].dataIndex] / wdN[ps[0].dataIndex] : 0)}/order</div>` },
@@ -1050,7 +1090,7 @@ function trends(el) {
 
   // hours
   const hours = Array(24).fill(0);
-  for (const o of live) hours[new Date(o.created_at).getHours()]++;
+  for (const o of live) hours[azHour(o.created_at)]++;
   mount($('#ch-hour'), {
     grid: { left: 8, right: 8, top: 16, bottom: 4, containLabel: true },
     tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => ttHead(hourLabel(ps[0].dataIndex)) + `${count(ps[0].value)} orders` },
@@ -1106,8 +1146,9 @@ function products(el) {
   const all = scoped();
   if (!all.length) { el.innerHTML = `${tabs}<div id="prod-empty"></div>`; bindTabs(); return emptyState($('#prod-empty')); }
   const c = colors();
-  const prods = byProduct(all);
-  const costed = prods.filter((p) => p.countedOrders > 0);
+  // A refund line counts under the product it refunds, never as a product of its own
+  const prods = byProduct(all, state.data.orders);
+  const costed = prods.filter((p) => p.countedRows > 0);
   const best = [...prods].sort((a, b) => b.orders - a.orders)[0];
   const most = [...costed].sort((a, b) => b.net - a.net)[0];
   const worst = [...costed].sort((a, b) => a.net - b.net)[0];
@@ -1115,7 +1156,7 @@ function products(el) {
 
   el.innerHTML = `${tabs}
   <div class="kpis five">
-    ${kpi({ label: 'Products sold', value: count(prods.length), foot: `${count(prods.filter((p) => p.orders >= 2).length)} sold 2+ times` })}
+    ${kpi({ label: 'Products sold', value: count(prods.filter((p) => p.orders > 0).length), foot: `${count(prods.filter((p) => p.orders >= 2).length)} sold 2+ times` })}
     ${kpi({ label: 'Best seller', value: best ? `${count(best.orders)} orders` : '—', foot: best ? esc(trunc(best.title, 34)) : '' })}
     ${kpi({ label: 'Most profitable', sw: '--s-profit', value: most ? moneyShort(most.net) : '—', foot: most ? esc(trunc(most.title, 34)) : '' })}
     ${kpi({ label: 'Best margin (3+ orders)', value: bestMargin ? pct(bestMargin.margin) : '—', foot: bestMargin ? esc(trunc(bestMargin.title, 34)) : '' })}
@@ -1230,7 +1271,7 @@ function orders(el) {
     selectableRows: false,
     initialSort: [{ column: 'created_at', dir: 'desc' }],
     columns: [
-      { title: 'Date', field: 'created_at', width: 108, minWidth: 100, formatter: (c) => `${fmtDate(c.getValue())}<div class="muted" style="font-size:11px">${new Date(c.getValue()).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>` },
+      { title: 'Date', field: 'created_at', width: 108, minWidth: 100, formatter: (c) => `${fmtDate(c.getValue())}<div class="muted" style="font-size:11px">${c.getRow().getData().approx_date ? 'date approx.' : `${fmtTime(c.getValue())} AZ`}</div>` },
       { title: 'Item', field: 'title', minWidth: 186, widthGrow: 3, formatter: (c) => { const d = c.getRow().getData(); return `<div style="white-space:normal;line-height:1.3">${esc(trunc(d.title, 90))}</div><div class="${d.source === 'ledger' ? '' : 'mono '}muted" style="font-size:11px">${esc(orderLabel(d))}${d.units > 1 ? ` · ×${d.units}` : ''}</div>`; } },
       { title: 'Buyer', field: 'buyer', width: 120, minWidth: 110, formatter: (c) => { const d = c.getRow().getData(); return `${esc(d.buyer || '')}<div class="muted" style="font-size:11px">${esc([d.ship_city, d.ship_state].filter(Boolean).join(', '))}</div>`; } },
       { title: 'Revenue', field: 'revenue', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 92, formatter: (c) => money(c.getValue()) },
@@ -1238,7 +1279,7 @@ function orders(el) {
       { title: 'Fees', field: 'fees', hozAlign: 'right', width: 82, minWidth: 78, sorter: (a, b, ra, rb) => (a + ra.getData().ad_fees) - (b + rb.getData().ad_fees), formatter: (c) => money(c.getValue() + c.getRow().getData().ad_fees) },
       { title: 'Refund', field: 'refunds', hozAlign: 'right', sorter: 'number', width: 90, minWidth: 86, formatter: (c) => (c.getValue() ? `<span title="${refundWord(c.getRow().getData())}">${money(c.getValue(), 2)}</span>` : '<span class="muted">—</span>') },
       { title: 'Net', field: 'net', hozAlign: 'right', sorter: 'number', width: 96, minWidth: 90, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? `<b class="${d.net < 0 ? 'neg' : 'pos'}">${money(d.net)}</b>` : noNetLabel(d); } },
-      { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 86, minWidth: 82, formatter: (c) => (c.getRow().getData().has_cost ? pct(c.getValue()) : '') },
+      { title: 'Margin', field: 'margin', hozAlign: 'right', sorter: 'number', width: 86, minWidth: 82, formatter: (c) => { const d = c.getRow().getData(); return d.has_cost && !d.excluded ? pct(c.getValue()) : ''; } },
       { title: 'Status', field: 'status', width: 160, minWidth: 156, formatter: (c) => statusPill(viewStatus(c.getRow().getData())) },
     ],
   }));
@@ -1264,14 +1305,7 @@ function orders(el) {
 // Not-dropship sales are hidden everywhere except the Excluded filter
 const matchFilter = (o, f) => (f === 'loss' ? Boolean(o.counted) && o.net < 0 : f === 'all' ? o.status !== 'not_dropship' : o.status === f || (f === 'cancelled' && o.status === 'cancelled_after_purchase') || (f === 'excluded' && o.status === 'not_dropship'));
 
-export const ORDER_EXPORT = [
-  { title: 'Date', get: (o) => o.created_at }, { title: 'eBay order', get: (o) => (o.source === 'ledger' ? orderLabel(o) : o.order_id) }, { title: 'Item', get: (o) => o.title },
-  { title: 'Units', get: (o) => o.units }, { title: 'Buyer', get: (o) => o.buyer }, { title: 'State', get: (o) => o.ship_state },
-  { title: 'Revenue', get: (o) => o.revenue }, { title: 'Amazon cost', get: (o) => o.cost }, { title: 'eBay fees', get: (o) => o.fees },
-  { title: 'Ad fees', get: (o) => o.ad_fees }, { title: 'Refunds', get: (o) => o.refunds }, { title: 'Amazon refund', get: (o) => o.amazon_refund },
-  { title: 'Extra cost', get: (o) => o.extra_cost }, { title: 'Net profit', get: (o) => (o.has_cost ? o.net : '') }, { title: 'Status', get: (o) => o.status },
-  { title: 'Amazon orders', get: (o) => o.amazon_orders.map((a) => a.amazon_order_id).join(' ') }, { title: 'Notes', get: (o) => o.overrides.notes },
-];
+// ORDER_EXPORT (the order CSV columns) lives in report-math.js and is re-exported above
 
 // ---------------------------------------------------------------- order drawer
 export function openOrder(id) {
@@ -1286,7 +1320,7 @@ export function openOrder(id) {
         <div class="row" style="gap:8px">${statusPill(viewStatus(o))}<span class="${o.source === 'ledger' ? '' : 'mono '}muted">${esc(orderLabel(o))}</span></div>
         <div style="font-weight:650;font-size:15px;margin-top:8px;line-height:1.35">${esc(o.title)}</div>
         <div class="muted" style="font-size:12.5px;margin-top:4px">${[
-          o.approx_date ? `${new Date(o.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (from monthly sheet, exact date unknown)` : fmtDateTime(o.created_at),
+          o.approx_date ? `${monthLabel(o.business_month, 'long')} (from monthly sheet, exact date unknown)` : `${fmtDateTime(o.created_at)} Arizona time`,
           esc(o.buyer || ''),
           esc([o.ship_name, o.ship_city, o.ship_state, o.ship_zip].filter(Boolean).join(', ')),
         ].filter(Boolean).join(' · ')}</div>
@@ -1432,6 +1466,7 @@ function returns(el) {
   const s = summarize(all);
   // Only what's in the books: a sheet-covered sale appears once (its sheet row), and later refunds are their own lines
   const ret = all.filter((o) => o.counted && (o.returns.length || o.refunds > 0 || o.return_open || o.source === 'refund'));
+  const retSales = new Set(ret.map(saleIdOf)); // a sale and its later refund line are one returned sale
   const lossOnReturns = ret.filter((o) => o.counted).reduce((a, o) => a + Math.min(0, o.net), 0);
   const open = ret.filter((o) => o.return_open || o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
   const recovered = ret.reduce((a, o) => a + o.amazon_refund, 0);
@@ -1439,7 +1474,7 @@ function returns(el) {
   const rs = refundSplit(all.filter((o) => o.counted));
   el.innerHTML = `
   <div class="kpis six">
-    ${kpi({ label: 'Returned orders', sw: '--s-refunds', value: count(ret.length), foot: `${count(open.length)} still open` })}
+    ${kpi({ label: 'Returned orders', sw: '--s-refunds', value: count(retSales.size), foot: `${count(open.length)} still open` })}
     ${kpi({ label: 'Return rate', value: pct(s.returnRate), foot: 'of orders in range' })}
     ${kpi({ label: 'Refunded to buyers', value: money(rs.buyer, 2), foot: rs.fee ? `+ ${money(rs.fee, 2)} eBay refund fees on sheet rows` : 'eBay orders', tip: 'Monthly-sheet refund rows record the eBay refund fee (e.g. $0.40), not money sent back to the buyer, so they are listed separately.' })}
     ${kpi({ label: 'Recovered from Amazon', sw: '--good', value: money(recovered, 2), foot: 'entered in Editor' })}
@@ -1476,7 +1511,7 @@ function returns(el) {
     series: [{ type: 'bar', data: reasons.map((x) => x.n), barWidth: 14, itemStyle: { color: c.refunds, borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: c.ink2, fontSize: 11 } }],
   });
 
-  const prodRet = byProduct(all).filter((p) => p.returnCount > 0).sort((a, b) => b.returnCount - a.returnCount || b.returnRate - a.returnRate).slice(0, 12);
+  const prodRet = byProduct(all, state.data.orders).filter((p) => p.returnCount > 0).sort((a, b) => b.returnCount - a.returnCount || b.returnRate - a.returnRate).slice(0, 12);
   $('#ret-prod').innerHTML = prodRet.length ? `<table class="simple"><thead><tr><th>Product</th><th class="r">Returns</th><th class="r">Rate</th><th class="r">Net</th></tr></thead><tbody>
     ${prodRet.map((p) => `<tr><td title="${esc(p.title)}">${esc(trunc(p.title, 48))}</td><td class="r">${p.returnCount}</td><td class="r ${p.returnRate > 0.1 ? 'neg' : ''}">${pct(p.returnRate, 0)}</td><td class="r ${p.net < 0 ? 'neg' : ''}">${money(p.net, 2)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No returns in this range 🎉</div>';
 
@@ -1495,7 +1530,7 @@ function returns(el) {
 
 // ---------------------------------------------------------------- IMPORT
 // Monthly partner sheets: the only upload in the app. Amazon costs otherwise arrive from the email import.
-const monthName = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }); };
+const monthName = (m) => monthLabel(m, 'long');
 
 // Derived from the dataset (ledger rows carry their source file), so it never drifts from what is actually loaded
 function sheetsOnFile() {

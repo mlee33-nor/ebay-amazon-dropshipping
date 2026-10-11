@@ -27,15 +27,36 @@ export const count = (n) => (n === null || n === undefined ? '—' : int.format(
 export const signed = (n) => (n > 0 ? `+${money(n)}` : money(n));
 
 export const DAY = 86400_000;
-export const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
-export const ymd = (d) => {
-  const x = new Date(d);
-  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+// ---- Arizona time. The business runs on Arizona days (America/Phoenix: UTC-7 all year, Arizona has no daylight
+// saving), the same days the server uses for months and pay periods. Dates, ranges, buckets and due dates all use
+// them, so a viewer in another timezone sees exactly what a viewer in Arizona sees.
+export const AZ_TZ = 'America/Phoenix';
+const AZ_OFFSET = 7 * 3600_000;
+const toMs = (d) => (d instanceof Date ? d.getTime() : typeof d === 'number' ? d : Date.parse(d));
+// 'YYYY-MM-DD' (or the older 'YYYY-MM-DDT12:00' idiom) is a calendar day already, never an instant to convert
+const calendarDay = (d) => (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}(T12:00(:00)?)?$/.test(d) ? d.slice(0, 10) : null);
+const azShift = (d) => { const ms = toMs(d); return Number.isFinite(ms) ? new Date(ms - AZ_OFFSET) : null; };
+// The Arizona day ('YYYY-MM-DD') of an instant
+export const azDay = (d = Date.now()) => calendarDay(d) || azShift(d)?.toISOString().slice(0, 10) || '';
+export const azMonth = (d = Date.now()) => azDay(d).slice(0, 7);
+export const azHour = (d) => azShift(d)?.getUTCHours() ?? 0;
+export const azWeekday = (d) => azShift(d)?.getUTCDay() ?? 0; // 0 = Sunday
+// First instant of an Arizona day
+export const azStart = (day) => new Date(Date.parse(`${day}T00:00:00Z`) + AZ_OFFSET);
+export const addDays = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
+export const daysBetween = (from, to) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY);
+export const startOfDay = (d) => azStart(azDay(d));
+export const ymd = (d) => azDay(d);
+export const parseYmd = (s) => azStart(s);
+// Dates read as Arizona dates; a plain 'YYYY-MM-DD' is shown as that day whatever the viewer's timezone
+export const fmtDate = (d, opts = { month: 'short', day: 'numeric' }) => {
+  const cal = calendarDay(d);
+  if (cal) return new Date(`${cal}T12:00:00Z`).toLocaleDateString('en-US', { ...opts, timeZone: 'UTC' });
+  return new Date(d).toLocaleDateString('en-US', { timeZone: AZ_TZ, ...opts });
 };
-export const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
-export const fmtDate = (d, opts = { month: 'short', day: 'numeric' }) => new Date(d).toLocaleDateString('en-US', opts);
 export const fmtDateTime = (d) =>
-  new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: AZ_TZ });
+export const fmtTime = (d) => new Date(d).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: AZ_TZ });
 export const ago = (d) => {
   if (!d) return 'never';
   const s = (Date.now() - new Date(d).getTime()) / 1000;
@@ -81,15 +102,14 @@ export function downloadCsv(filename, rows, columns) {
 
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-// Partner settlement for calendar month `month` (YYYY-MM) is due on `day` of that SAME month (Sep is due Sep 26).
-// Sales after that day still belong to the month; whatever the payment didn't cover shows as still owed.
-export const settlementDueDate = (month, day = 26) => {
-  const [y, m] = month.split('-').map(Number);
-  const d = Math.min(Math.max(1, Number(day) || 26), 28);
-  return new Date(y, m - 1, d);
-};
-export function dueStatus(due, { paid = false } = {}) {
-  const days = Math.round((startOfDay(due) - startOfDay(new Date())) / DAY);
+// The payment for `month` (YYYY-MM) is due on `day` of that same month, in Arizona (October is due Oct 26).
+const dueDd = (day) => String(Math.min(Math.max(1, Number(day) || 26), 28)).padStart(2, '0');
+export const settlementDueDay = (month, day = 26) => `${month}-${dueDd(day)}`;
+// As an instant: noon that day in Arizona, so it reads as the same date everywhere
+export const settlementDueDate = (month, day = 26) => new Date(`${settlementDueDay(month, day)}T19:00:00Z`);
+// Days are counted between Arizona dates, never the viewer's own: "Due today" means the 26th in Arizona
+export function dueStatus(due, { paid = false, now = Date.now() } = {}) {
+  const days = daysBetween(azDay(now), azDay(due));
   const label = fmtDate(due, { month: 'short', day: 'numeric', year: 'numeric' });
   const plural = (n) => `${n} day${n === 1 ? '' : 's'}`;
   if (paid) return { kind: 'paid', days, label, text: `${days < 0 ? 'Was due' : 'Due'} ${label}` };
@@ -102,7 +122,7 @@ export function dueStatus(due, { paid = false } = {}) {
 // Unambiguous month label for a YYYY-MM key: "Sep 2026" (short) or "September 2026" (long)
 export const monthLabel = (m, style = 'short') => {
   const [y, mo] = String(m).split('-').map(Number);
-  return new Date(y, mo - 1, 1).toLocaleDateString('en-US', { month: style, year: 'numeric' });
+  return new Date(Date.UTC(y, mo - 1, 15)).toLocaleDateString('en-US', { month: style, year: 'numeric', timeZone: 'UTC' });
 };
 
 // Direction-aware view of one settleMonth() result. sellerSends < 0 means the month lost more than the

@@ -606,6 +606,9 @@ table.simple td.bad-input .input, .input[aria-invalid='true'] { border-color: va
 .tabulator-row .tabulator-cell.cell-edit { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .tabulator-row .tabulator-cell.cell-dirty { background: var(--warn-soft) !important; box-shadow: inset 2px 0 0 var(--warn); }
 .tabulator-row .tabulator-cell.cell-ro { color: var(--ink-2); }
+/* Editor: a refund line is worked out from its sale's refunds, so it has nothing to edit */
+.tabulator-row.row-ro .tabulator-cell.cell-edit { background: transparent; cursor: not-allowed; }
+.tabulator-row.row-ro .tabulator-cell { color: var(--ink-2); }
 .tabulator .tabulator-footer { background: var(--surface); border-top: 1px solid var(--line); color: var(--ink-2); }
 .tabulator .tabulator-footer .tabulator-page { background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-2); border-radius: 6px; }
 .tabulator .tabulator-footer .tabulator-page.active { color: var(--accent); border-color: var(--accent); }
@@ -806,6 +809,10 @@ table.simple td.bad-input .input, .input[aria-invalid='true'] { border-color: va
 .banner .muted { color: var(--ink-3); }
 .banner b { font-weight: 600; }
 .banner.bad b, .banner.bad { color: var(--ink); }
+/* Lists inside a notice (sheet checks, "this payment may not be final yet") */
+.check-list { margin: 6px 0 0; padding-left: 18px; }
+.check-list > li { margin: 3px 0; }
+.check-list ul { margin: 2px 0 0; padding-left: 16px; }
 
 /* Settlement callout: the one line that says who owes whom right now */
 .callout {

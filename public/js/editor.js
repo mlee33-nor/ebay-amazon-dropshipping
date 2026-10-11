@@ -2,6 +2,8 @@
 // plus a match-review queue. Edits are staged locally (highlighted) until Save.
 import { $, $$, esc, money, pct, fmtDate, api, toast, downloadCsv, ICONS, monthLabel } from './util.js';
 import { state, loadData, renderPage, trackTable, openOrder, ORDER_EXPORT, statusPill, skeletonRows } from './app.js';
+import { normVal, moneyError, editorRow, recompute, isReadOnlyRow } from './editor-math.js';
+import { defaultCostMonth } from './opex-math.js';
 
 let tab = 'ebay';
 const dirty = new Map(); // key -> {field: value}
@@ -60,13 +62,6 @@ function markDirty(n) {
 
 const numEditor = { editor: 'number', editorParams: { step: 0.01, selectContents: true }, sorter: 'number' };
 const dateFmt = { month: 'short', day: 'numeric', year: 'numeric' };
-const blank = (v) => v === '' || v === null || v === undefined;
-// Normalise an edited cell value so "12", 12 and 12.0 compare equal and a cleared cell means "no override"
-const normVal = (f, v) => {
-  if (f === 'excluded' || f === 'ignored') return v === true || v === 'true' || v === 1 || v === '1';
-  if (f === 'notes' || f === 'note' || f === 'category' || f === 'month' || f === 'paid_by') return blank(v) ? '' : String(v);
-  return blank(v) || Number.isNaN(Number(v)) ? null : Number(v);
-};
 // Paint the yellow "unsaved" tint from the dirty map (also re-applied whenever Tabulator re-renders a row)
 const paintDirty = (row, key, fields) => {
   const ch = dirty.get(key) || {};
@@ -74,38 +69,16 @@ const paintDirty = (row, key, fields) => {
 };
 const moneyFmt = (c) => { const v = c.getValue(); return v === null || v === undefined || v === '' ? '<span class="muted">—</span>' : money(Number(v)); };
 
-function recompute(d) {
-  const cost = d.cost_override !== null && d.cost_override !== '' && d.cost_override !== undefined ? Number(d.cost_override) : d.amazon_cost;
-  const fees = d.fee_override !== null && d.fee_override !== '' && d.fee_override !== undefined ? Number(d.fee_override) : d.base_fees;
-  const refunds = d.refund_override !== null && d.refund_override !== '' && d.refund_override !== undefined ? Number(d.refund_override) : d.base_refunds;
-  const hasCost = d.has_link || (d.cost_override !== null && d.cost_override !== '' && d.cost_override !== undefined);
-  const rev = d.cancelled ? 0 : d.revenue;
-  d.net = hasCost ? +(rev - (d.cancelled ? 0 : fees) - (d.cancelled ? 0 : d.ad_fees) - cost - (d.cancelled ? 0 : refunds) + Number(d.amazon_refund || 0) - Number(d.extra_cost || 0)).toFixed(2) : null;
-  // Same rule as the server's `counted`: sheet-covered and pre-partnership sales never count, nor do exclusions
-  const notCounted = d.status === 'in_sheet' || d.status === 'before_start';
-  const keep = notCounted || (d.status === 'not_dropship' && !hasCost) || d.status === 'check_sheet' || d.status === 'cancelled' || d.status === 'cancelled_after_purchase';
-  d.live_counted = !notCounted && !d.excluded && hasCost && !(d.cancelled && !cost);
-  d.view_status = keep && !(d.status === 'check_sheet' && hasCost) ? d.status
-    : d.excluded ? 'excluded' : !hasCost ? (d.amazon_ids ? 'awaiting_cost' : 'awaiting_email') : d.return_open && !(refunds > 0) ? 'return_open' : refunds > 0 || d.has_returns ? 'returned' : d.net < 0 ? 'loss' : 'profitable';
-  return d;
-}
-
 // ------------------------------------------------------------------ eBay sheet
 function ebaySheet(focusOrder) {
   toolbar(`<select class="select" id="ed-filter" style="height:28px;font-size:12px"><option value="all">All orders</option><option value="edited">Edited only</option><option value="awaiting_cost">Awaiting email / cost</option><option value="loss">Losses</option><option value="returned">Returned</option></select>`);
-  // Monthly-sheet rows carry their Amazon cost from the sheet, so they are costed like any linked order
-  const rows = state.data.orders.map((o) => recompute({
-    order_id: o.order_id, source: o.source, ebay_order_id: o.ebay_order_id || null, created_at: o.created_at, title: o.title, revenue: o.revenue, status: o.status, cancelled: o.cancelled,
-    base_fees: o.cancelled ? 0 : o.raw_fees, ad_fees: o.ad_fees, has_returns: o.returns.length > 0, return_open: Boolean(o.return_open),
-    base_refunds: o.cancelled ? 0 : o.raw_refunds, amazon_cost: o.amazon_cost, has_link: o.source === 'ledger' || (o.amazon_orders.length > 0 && o.cost_source === 'amazon'),
-    cost_origin: o.source === 'ledger' ? 'sheet' : o.amazon_orders.length ? 'amazon' : null,
-    amazon_ids: o.amazon_orders.map((a) => a.amazon_order_id).join(', '),
-    cost_override: o.overrides.cost_override, fee_override: o.overrides.fee_override, refund_override: o.overrides.refund_override,
-    extra_cost: o.overrides.extra_cost, amazon_refund: o.overrides.amazon_refund, excluded: o.overrides.excluded, notes: o.overrides.notes,
-    edited: Object.entries(o.overrides).some(([k, v]) => (k === 'excluded' ? v : k === 'notes' ? Boolean(v) : v !== null)),
-  }));
+  // Every row starts from the server's own numbers (see editor-math.js), so with nothing staged the Net column is the
+  // net the books count. Monthly-sheet rows carry their Amazon cost from the sheet, so they are costed like any linked order.
+  const rows = state.data.orders.map((o) => recompute(editorRow(o)));
   const EDIT_FIELDS = ['cost_override', 'fee_override', 'refund_override', 'extra_cost', 'amazon_refund', 'excluded', 'notes'];
   const editable = new Set(EDIT_FIELDS);
+  // A "Refund ·" line has nothing of its own to edit: it is worked out from its sale's refunds
+  const canEdit = (cell) => !cell.getRow().getData().read_only;
   const orig = new Map(rows.map((r) => [r.order_id, Object.fromEntries(EDIT_FIELDS.map((f) => [f, normVal(f, r[f])]))]));
   const refundTitle = (d) => (d.source === 'ledger' ? 'eBay refund fee (monthly sheet)' : 'Refunded to buyer');
   const t = trackTable(new Tabulator('#ed-body', {
@@ -126,13 +99,13 @@ function ebaySheet(focusOrder) {
     clipboardPasteParser: 'range',
     clipboardPasteAction: 'range',
     rowHeader: { resizable: false, frozen: true, width: 44, hozAlign: 'center', formatter: 'rownum', cssClass: 'cell-ro', headerSort: false },
-    rowFormatter: (row) => paintDirty(row, row.getData().order_id, EDIT_FIELDS),
+    rowFormatter: (row) => { paintDirty(row, row.getData().order_id, EDIT_FIELDS); row.getElement().classList.toggle('row-ro', Boolean(row.getData().read_only)); },
     initialSort: [{ column: 'created_at', dir: 'desc' }],
     placeholder: 'No eBay orders yet. Connect eBay in Settings or upload a monthly sheet.',
     columnDefaults: { headerSort: true, resizable: true },
     columns: [
       { title: 'Date', field: 'created_at', width: 110, formatter: (c) => fmtDate(c.getValue(), dateFmt), cssClass: 'cell-ro' },
-      { title: 'eBay order', field: 'order_id', width: 170, cssClass: 'cell-ro', formatter: (c) => { const d = c.getRow().getData(); return d.source === 'ledger' ? `<span title="Row from the monthly settlement sheet">Monthly sheet</span>${d.ebay_order_id ? ` <span class="mono muted">${esc(d.ebay_order_id)}</span>` : ''}` : `<span class="mono">${esc(c.getValue())}</span>`; } },
+      { title: 'eBay order', field: 'order_id', width: 170, cssClass: 'cell-ro', formatter: (c) => { const d = c.getRow().getData(); if (d.read_only) return `<span title="Refund of an earlier sale, booked on a later payment. Edit the sale itself, not this line.">Refund of</span> <span class="mono muted">${esc(d.refund_of || '')}</span>`; return d.source === 'ledger' ? `<span title="Row from the monthly settlement sheet">Monthly sheet</span>${d.ebay_order_id ? ` <span class="mono muted">${esc(d.ebay_order_id)}</span>` : ''}` : `<span class="mono">${esc(c.getValue())}</span>`; } },
       { title: 'Item', field: 'title', width: 280, cssClass: 'cell-ro', formatter: (c) => `<span title="${esc(c.getValue())}">${esc(c.getValue())}</span>` },
       { title: 'Status', field: 'view_status', width: 172, cssClass: 'cell-ro', formatter: (c) => statusPill(c.getValue()) },
       { title: 'Revenue', field: 'revenue', hozAlign: 'right', width: 95, sorter: 'number', formatter: (c) => `<span title="${c.getRow().getData().source === 'ledger' ? 'eBay payout after fees (monthly sheet)' : 'Buyer paid, excl. tax'}">${moneyFmt(c)}</span>`, cssClass: 'cell-ro' },
@@ -140,38 +113,56 @@ function ebaySheet(focusOrder) {
         const d = c.getRow().getData();
         if (d.status === 'in_sheet') return '<span class="muted" title="This eBay sale is covered by its monthly-sheet row, which carries the cost">in monthly sheet</span>';
         if (d.status === 'before_start') return '<span class="muted" title="Sold before the partnership started; not counted">before partnership</span>';
+        if (d.read_only) return '<span class="muted" title="A refund line has no Amazon cost of its own">—</span>';
         if (d.cost_origin === 'sheet') return `${money(c.getValue())} <span class="pill" title="Amazon cost from the monthly settlement sheet">${ICONS.sheet} sheet</span>`;
-        return d.has_link ? money(c.getValue()) : '<span class="muted">not linked</span>';
+        return d.nat_has_cost ? money(c.getValue()) : '<span class="muted">not linked</span>';
       } },
-      { title: 'Cost override', field: 'cost_override', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
-      { title: 'eBay fees', field: 'base_fees', hozAlign: 'right', width: 95, sorter: 'number', formatter: (c) => (c.getRow().getData().source === 'ledger' && !c.getValue() ? '<span class="muted" title="Sheet payouts are already net of eBay fees">in payout</span>' : moneyFmt(c)), cssClass: 'cell-ro' },
-      { title: 'Fee override', field: 'fee_override', hozAlign: 'right', width: 110, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
+      { title: 'Cost override', field: 'cost_override', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit', editable: canEdit },
+      { title: 'eBay fees', field: 'base_fees', hozAlign: 'right', width: 95, sorter: 'number', formatter: (c) => { const d = c.getRow().getData(); return d.source === 'ledger' && !c.getValue() ? '<span class="muted" title="Sheet payouts are already net of eBay fees">in payout</span>' : `<span title="${d.read_only ? 'Fees eBay gave back with the refund' : 'After any fees eBay gave back on a refund in this payment'}">${moneyFmt(c)}</span>`; }, cssClass: 'cell-ro' },
+      { title: 'Fee override', field: 'fee_override', hozAlign: 'right', width: 110, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit', editable: canEdit },
       { title: 'Ad fees', field: 'ad_fees', hozAlign: 'right', width: 85, sorter: 'number', formatter: moneyFmt, cssClass: 'cell-ro' },
       { title: 'Refunds', field: 'base_refunds', hozAlign: 'right', width: 90, sorter: 'number', formatter: (c) => `<span title="${refundTitle(c.getRow().getData())}">${moneyFmt(c)}</span>`, cssClass: 'cell-ro' },
-      { title: 'Refund override', field: 'refund_override', hozAlign: 'right', width: 125, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
-      { title: 'Amazon refund', field: 'amazon_refund', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
-      { title: 'Extra cost', field: 'extra_cost', hozAlign: 'right', width: 100, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit' },
+      { title: 'Refund override', field: 'refund_override', hozAlign: 'right', width: 125, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Amazon refund', field: 'amazon_refund', hozAlign: 'right', width: 120, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Extra cost', field: 'extra_cost', hozAlign: 'right', width: 100, ...numEditor, formatter: moneyFmt, cssClass: 'cell-edit', editable: canEdit },
       { title: 'Net', field: 'net', hozAlign: 'right', width: 110, sorter: 'number', cssClass: 'cell-ro', formatter: (c) => {
         const d = c.getRow().getData();
         if (d.status === 'in_sheet') return '<span class="muted" title="Counted once, through its monthly-sheet row">in sheet</span>';
         if (d.status === 'before_start') return '<span class="muted" title="Before the partnership started">not counted</span>';
+        if (d.read_only) return `<b class="${c.getValue() < 0 ? 'neg' : 'pos'}" title="Refund line: what this refund took off (or gave back to) the payment it is on">${money(c.getValue())}</b>`;
         return c.getValue() === null ? '<span class="muted">pending</span>' : `<b class="${c.getValue() < 0 ? 'neg' : 'pos'}">${money(c.getValue())}</b>`;
       } },
-      { title: 'Exclude', field: 'excluded', hozAlign: 'center', width: 85, editor: 'tickCross', formatter: 'tickCross', formatterParams: { crossElement: '<span class="muted">·</span>' }, cssClass: 'cell-edit' },
-      { title: 'Notes', field: 'notes', width: 240, editor: 'input', cssClass: 'cell-edit' },
+      { title: 'Exclude', field: 'excluded', hozAlign: 'center', width: 85, editor: 'tickCross', formatter: 'tickCross', formatterParams: { crossElement: '<span class="muted">·</span>' }, cssClass: 'cell-edit', editable: canEdit },
+      { title: 'Notes', field: 'notes', width: 240, editor: 'input', cssClass: 'cell-edit', editable: canEdit },
       { title: 'Amazon orders', field: 'amazon_ids', width: 190, cssClass: 'cell-ro', formatter: (c) => `<span class="mono muted">${esc(c.getValue())}</span>` },
     ],
   }));
 
   // Every edit, undo and redo re-diffs the cell against the saved value, so undoing back to the original
   // removes the pending change (no phantom yellow cell or Save count)
+  let roWarned = false;
   const syncCell = (cell) => {
     const f = cell.getField();
     if (!editable.has(f)) return;
     const row = cell.getRow();
     const d = row.getData();
-    const v = normVal(f, cell.getValue());
     const ch = { ...(dirty.get(d.order_id) || {}) };
+    const prev = Object.prototype.hasOwnProperty.call(ch, f) ? ch[f] : orig.get(d.order_id)[f];
+    // A paste that reaches a refund line is put back: those lines are worked out from the sale's refunds
+    if (d.read_only) {
+      row.update({ [f]: prev });
+      if (!roWarned) { toast('Refund lines can’t be edited. Change the sale they refund instead.', 'bad'); roWarned = true; setTimeout(() => { roWarned = false; }, 1500); }
+      return;
+    }
+    const raw = cell.getValue();
+    const v = normVal(f, raw);
+    // Text that isn't an amount (or a negative cost) is refused and the cell keeps what it had, never silently cleared
+    const err = moneyError(f, v);
+    if (err) {
+      row.update({ [f]: prev });
+      toast(`${cell.getColumn().getDefinition().title}: “${String(raw).slice(0, 30)}” ${err}`, 'bad');
+      return;
+    }
     if (v === orig.get(d.order_id)[f]) delete ch[f]; else ch[f] = v;
     if (Object.keys(ch).length) dirty.set(d.order_id, ch); else dirty.delete(d.order_id);
     row.update(recompute({ ...d, [f]: v }));
@@ -206,7 +197,9 @@ function ebaySheet(focusOrder) {
     downloadCsv('orders-edited.csv', state.data.orders.filter((o) => ids.has(o.order_id)), ORDER_EXPORT);
   };
   $('#ed-save').onclick = async () => {
-    const changes = [...dirty.entries()].map(([order_id, ch]) => ({ order_id, ...ch }));
+    // Refund lines are never sent: the server has nothing to apply an override to there
+    const changes = [...dirty.entries()].filter(([order_id]) => !isReadOnlyRow({ order_id })).map(([order_id, ch]) => ({ order_id, ...ch }));
+    if (!changes.length) { dirty.clear(); markDirty(0); return; }
     $('#ed-save').disabled = true;
     try {
       await api('/api/overrides', { method: 'POST', body: { changes } });
@@ -273,8 +266,15 @@ async function amazonSheet() {
       // keep every line of the same Amazon order in sync
       t.getRows().filter((r) => r.getData().amazon_order_id === d.amazon_order_id).forEach((r) => { r.update({ ebay_order_id: cell.getValue() }); r.getCell('ebay_order_id')?.getElement().classList.toggle('cell-dirty', changed); });
     } else if (f === 'cost_override' || f === 'ignored') {
-      const v = normVal(f, cell.getValue());
+      const raw = cell.getValue();
+      const v = normVal(f, raw);
       const ch = { ...(dirty.get(d.line_key) || {}) };
+      const err = moneyError(f, v);
+      if (err) {
+        cell.getRow().update({ [f]: Object.prototype.hasOwnProperty.call(ch, f) ? ch[f] : origAz.get(d.line_key)[f] });
+        toast(`Cost override: “${String(raw).slice(0, 30)}” ${err}`, 'bad');
+        return;
+      }
       if (v === origAz.get(d.line_key)[f]) delete ch[f]; else ch[f] = v;
       if (Object.keys(ch).length) dirty.set(d.line_key, ch); else dirty.delete(d.line_key);
       paintDirty(cell.getRow(), d.line_key, ['cost_override', 'ignored']);
@@ -354,8 +354,8 @@ function expensesSheet() {
   const A = state.data.settings.partner_amazon;
   const B = state.data.settings.partner_ebay;
   toolbar('<button class="btn sm" id="ex-add" title="Add a row for this month">+ Add expense</button>');
-  const now = new Date();
-  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // New costs go on the payment being built now (from the 27th, that is next month's payment), Arizona time
+  const thisMonth = defaultCostMonth({ books: state.data.books, dueDay: state.data.settings.settlement_day ?? 26 });
   const rows = state.data.books.expenses.map((x) => ({ ...x }));
   const payer = { seller: `${B} (eBay partner)`, amazon: `${A} (Amazon partner)` };
   const EX_FIELDS = ['month', 'category', 'amount', 'paid_by', 'note'];
@@ -422,8 +422,20 @@ function expensesSheet() {
   $('#ed-discard').onclick = () => { dirty.clear(); renderPage(); };
   $('#ed-export').onclick = () => t.download('csv', 'operating-expenses.csv');
   $('#ed-save').onclick = async () => {
-    const changes = [...dirty.values()].map((c) => Object.fromEntries(Object.entries(c).filter(([k]) => !k.startsWith('__')))).filter((c) => c._delete || (c.category && /^\d{4}-\d{2}$/.test(c.month || '')));
-    if (changes.length < dirty.size) toast('Rows need a month (YYYY-MM) and a category, so some were skipped', 'bad');
+    const all = [...dirty.values()].map((c) => Object.fromEntries(Object.entries(c).filter(([k]) => !k.startsWith('__'))));
+    // Amounts are read like any pasted money ("$16.19", "1,234"); a credit (negative amount) needs a note saying what it
+    // is. Nothing is saved while any row is wrong, so a batch never half-saves.
+    const bad = [];
+    const changes = [];
+    for (const c of all) {
+      if (c._delete) { changes.push(c); continue; }
+      const amount = normVal('amount', c.amount);
+      if (!c.category || !/^\d{4}-\d{2}$/.test(c.month || '')) bad.push(`${c.category || 'a row'}: needs a month (YYYY-MM) and a name`);
+      else if (amount === null || Number.isNaN(amount) || amount === 0) bad.push(`${c.category}: “${c.amount ?? ''}” isn’t an amount`);
+      else if (amount < 0 && !String(c.note || '').trim()) bad.push(`${c.category}: a credit (negative amount) needs a note saying what it is`);
+      else changes.push({ ...c, amount });
+    }
+    if (bad.length) { toast(`Nothing saved. ${bad.join(' · ')}`, 'bad'); return; }
     try {
       await api('/api/expenses', { method: 'POST', body: { changes } });
       toast('Expenses saved', 'good');
