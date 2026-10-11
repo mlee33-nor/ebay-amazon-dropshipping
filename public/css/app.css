@@ -1183,3 +1183,24 @@ tr.row-bad td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
 .dash-opt.locked { cursor: default; opacity: .7; }
 .nav-sep { height: 1px; background: var(--line); margin: 10px 8px; }
 @media (max-width: 1200px) { .ov-owed.c-4, .ov-attn.c-4 { grid-column: span 12; } }
+
+/* ---------------------------------------------------------------- Review page (review-page.js) */
+.rv-top { display: flex; align-items: center; gap: 10px; padding: 14px 18px; margin-bottom: 14px; border-radius: var(--r-lg); background: var(--hover); font-size: 14.5px; color: var(--ink-2); }
+.rv-top b { color: var(--ink); }
+.rv-top svg { width: 20px; height: 20px; color: var(--good); flex: none; }
+.rv-h { display: flex; gap: 12px; align-items: flex-start; }
+.rv-ic { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--r-md); background: var(--hover); color: var(--ink-2); flex: none; }
+.rv-ic svg { width: 16px; height: 16px; }
+.rv-ic.bad { background: var(--bad-soft); color: var(--bad-ink); }
+.rv-ic.warn { background: var(--warn-soft); color: var(--warn-ink); }
+.rv-ic.good { background: var(--good-soft); color: var(--good-ink); }
+.rv-n { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: var(--r-full); background: var(--hover); font-size: 12px; font-weight: 600; color: var(--ink-2); vertical-align: 2px; }
+.rv-list { display: flex; flex-direction: column; }
+.rv-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.rv-item:last-child { border-bottom: 0; }
+.rv-item .muted { font-size: 12.5px; margin-top: 2px; }
+.rv-item.done { opacity: .6; }
+.rv-item .btn, .rv-item .pill { flex: none; }
+.rv-rows tr { cursor: pointer; }
+.rv-rows tr:hover td { background: var(--hover); }
+.ov-todo { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--ink-2); }

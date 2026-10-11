@@ -12,6 +12,7 @@ import { renderPromotionsPanel } from './promotions-panel.js';
 import { renderWatch } from './watch-page.js';
 import { renderReports } from './reports-page.js';
 import { renderOverview } from './overview-page.js';
+import { renderReview, reviewItems } from './review-page.js';
 import { dashPrefs, showPage, showAlert, PAGE_OPTIONS, CARD_OPTIONS, ALERT_OPTIONS, defaultPrefs } from './dash-prefs.js';
 import { settleMonth, allMonths, settlePeriodOf, settlePeriodRange, CYCLE_START } from './settlement.js';
 
@@ -37,6 +38,7 @@ export const trackTable = (t) => { tables.add(t); return t; };
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit and what is owed, at a glance', group: 'Main' },
+  { id: 'review', label: 'Review', icon: 'alert', sub: 'Things to look at: sales waiting for a cost, emails, eBay charges', noRange: true, group: 'Main' },
   { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every sale and what it made', group: 'Main' },
   { id: 'settlement', label: 'Payments', icon: 'settle', sub: 'What Drew sends Myles each pay period', noRange: true, group: 'Main' },
   { id: 'reports', label: 'Statements', icon: 'receipt', sub: 'A statement for each payment, and the year-end export for taxes', noRange: true, group: 'Main' },
@@ -81,6 +83,7 @@ function renderNav() {
   const badges = {
     editor: d?.amazon?.suggestions || 0,
     orders: d ? d.orders.filter((o) => o.status === 'awaiting_cost').length : 0,
+    review: d ? reviewItems(d).open : 0,
   };
   const groups = [];
   // Pages switched off in Settings -> Customize dashboard are left out of the menu (the open one always shows)
@@ -93,6 +96,7 @@ function renderNav() {
   function navLink(p) {
     let b = '';
     if (p.id === 'editor' && badges.editor) b = `<span class="badge" title="Suggested matches to review">${badges.editor}</span>`;
+    else if (p.id === 'review' && badges.review) b = `<span class="badge" title="Things to look at">${badges.review}</span>`;
     else if (p.id === 'orders' && badges.orders) b = `<span class="nav-count" title="Sales awaiting their Amazon order email">${badges.orders}</span>`;
     return `<a href="#/${p.id}" class="${state.page === p.id ? 'active' : ''}" ${state.page === p.id ? 'aria-current="page"' : ''}>${ICONS[p.icon]}<span>${p.label}</span>${b}</a>`;
   }
@@ -288,7 +292,7 @@ export function renderPage() {
   el.classList.add('page-in');
   renderDueBar();
   if (!state.data) { el.innerHTML = skeleton(); return; }
-  const fn = { overview: renderOverview, promotions: (x) => renderPromotionsPanel(x), ask: renderAsk, watch: renderWatch, reports: renderReports, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
+  const fn = { overview: renderOverview, review: renderReview, promotions: (x) => renderPromotionsPanel(x), ask: renderAsk, watch: renderWatch, reports: renderReports, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
   // A failing sync is shown on every page, not only the Overview, so nobody pays or reads numbers from stale data
   if (p.id !== 'overview') { const loud = setupBanner({ failuresOnly: true }); if (loud) el.insertAdjacentHTML('afterbegin', loud); }
@@ -474,6 +478,7 @@ const alertKind = (key) => (/^(ebay-setup|email-setup|demo|ebay-expiring)$/.test
   : key.startsWith('ebay-orderless') ? 'charges' : key.startsWith('ebay-holds') ? 'holds' : 'sync');
 function notice({ key, kind = '', icon = ICONS.alert, text, action, href, soft = false }) {
   if (soft && dismissed.has(key)) return '';
+  if (['emails', 'refunds', 'charges', 'holds'].includes(alertKind(key))) return ''; // listed on the Review page instead
   if (state.data && !showAlert(state.data.settings, alertKind(key))) return '';
   return `<div class="banner ${kind}" data-k="${key}">${icon}<div>${text}</div>${action ? `<a class="btn sm" href="${href}">${action}</a>` : ''}${soft ? `<button class="banner-x" data-k="${key}" aria-label="Dismiss">${ICONS.x}</button>` : ''}</div>`;
 }

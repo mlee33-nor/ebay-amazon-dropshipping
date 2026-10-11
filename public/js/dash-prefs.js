@@ -4,6 +4,7 @@
 
 export const PAGE_OPTIONS = [
   { id: 'overview', label: 'Overview', on: true, locked: true, note: 'The home page' },
+  { id: 'review', label: 'Review', on: true, note: 'Things to look at, in one list (with a count in the menu)' },
   { id: 'orders', label: 'Orders', on: true, note: 'Every sale and what it made' },
   { id: 'settlement', label: 'Payments', on: true, note: 'What Drew sends Myles each pay period' },
   { id: 'reports', label: 'Statements', on: true, note: 'A printable statement for each payment, and the tax export' },
@@ -22,7 +23,7 @@ export const PAGE_OPTIONS = [
 export const CARD_OPTIONS = [
   { id: 'profit', label: 'Profit', on: true, note: 'Profit for the time picked, and how it adds up' },
   { id: 'owed', label: 'What Drew owes Myles', on: true, note: 'This payment, when it is due and whether it is paid' },
-  { id: 'attention', label: 'Needs attention', on: true, note: 'Only shows when something needs a look' },
+  { id: 'attention', label: 'Needs attention', on: true, note: 'How many things are on the Review page' },
   { id: 'chart', label: 'Profit by day', on: true, note: 'A simple bar chart' },
   { id: 'recent', label: 'Latest sales', on: true, note: 'The newest sales and what each made' },
   { id: 'promo', label: 'Promotions summary', on: true, note: 'Ad fees and promoted sales for the time picked' },
@@ -32,10 +33,6 @@ export const CARD_OPTIONS = [
 export const ALERT_OPTIONS = [
   { id: 'sync', label: 'Connection problems', on: true, note: 'eBay or Amazon email stopped working (recommended)' },
   { id: 'due', label: 'Payment due', on: true, note: 'The red bar when a payment is due within 5 days' },
-  { id: 'emails', label: 'Emails that couldn’t be read', on: true, note: 'An Amazon email the reader didn’t understand' },
-  { id: 'refunds', label: 'Amazon refunds not matched', on: true, note: 'A refund that couldn’t be tied to one sale' },
-  { id: 'holds', label: 'Return holds over 30 days', on: true, note: 'eBay held money and never released it' },
-  { id: 'charges', label: 'eBay charges with no order', on: false, note: 'Subscriptions and other account charges' },
   { id: 'setup', label: 'Setup tips', on: true, note: 'Reminders like “connect your email”' },
 ];
 

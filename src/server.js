@@ -82,7 +82,8 @@ app.use((req, res, next) => {
   res.redirect('/login');
 });
 
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// Browsers check for a newer copy every time (a quick 304 when nothing changed), so a deploy shows up on the next load
+app.use(express.static(path.join(__dirname, '..', 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 
 // Every manual change to money is logged: what, when, before and after, and from where
 async function logMoney(req, action, subject, before, after, run = q) {
@@ -122,7 +123,9 @@ app.get('/api/data', wrap(async (_req, res) => {
     emailStatus(),
     buildBooks(),
   ]);
-  res.json({ orders, flags: { unassignedCharges: orders.unassignedCharges || [], openHolds: orders.openHolds || [] }, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
+  // eBay charges someone already looked at on the Review page are marked, not dropped
+  const reviewed = new Set((await getSetting('reviewed_charges')) || []);
+  res.json({ orders, flags: { unassignedCharges: (orders.unassignedCharges || []).map((c) => ({ ...c, reviewed: reviewed.has(c.id) })), openHolds: orders.openHolds || [] }, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
 }));
 
 async function runMatcherSuggestionsCount() {
@@ -310,6 +313,17 @@ app.post('/api/settings/dashboard', wrap(async (req, res) => {
   }
   await setSetting('dashboard', clean);
   res.json({ ok: true, settings: await getAllSettings() });
+}));
+
+// Review page: mark an eBay charge with no order as looked at (or not)
+app.post('/api/review/charge', wrap(async (req, res) => {
+  const id = String(req.body?.id || '').slice(0, 200);
+  if (!id) return res.status(400).json({ error: 'id required' });
+  const list = new Set((await getSetting('reviewed_charges')) || []);
+  if (req.body?.reviewed === false) list.delete(id); else list.add(id);
+  await setSetting('reviewed_charges', [...list]);
+  await logMoney(req, req.body?.reviewed === false ? 'charge un-reviewed' : 'charge reviewed', id, null, null);
+  res.json({ ok: true });
 }));
 
 app.post('/api/sync', wrap(async (_req, res) => res.json(await syncEbay())));

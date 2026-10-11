@@ -8,6 +8,7 @@ import { settleMonth, settlePeriodRange } from './settlement.js';
 import { emailFailures, emailFailureText } from './health.js';
 import { showCard } from './dash-prefs.js';
 import { state, loadData, renderPage, currentRange, currentPeriod, setupBanner, statusPill, viewStatus, openOrder } from './app.js';
+import { reviewItems } from './review-page.js';
 
 const cents = (n) => Math.round((Number(n) || 0) * 100);
 // A cost line: minus sign only when there is something to take off
@@ -112,23 +113,20 @@ export function renderOverview(el) {
     <a class="btn sm" href="#/settlement" style="margin-top:12px">Open Payments ${ICONS.arrow}</a>
   </div>`;
 
-  // ---- needs attention: only what actually needs a look
-  const unread = emailFailures(d.email);
-  const unmatched = d.amazon?.unmatchedRefunds || [];
-  const allWaiting = d.orders.filter((o) => o.status === 'awaiting_cost');
-  const review = d.orders.filter((o) => o.status === 'needs_review');
-  const openReturns = d.orders.filter((o) => o.counted && o.return_open);
-  const items = [
-    allWaiting.length && { kind: 'warn', icon: ICONS.mail, t: `${count(allWaiting.length)} sale${allWaiting.length === 1 ? ' is' : 's are'} waiting for the Amazon cost`, s: 'Not counted in profit until the Amazon order is found', href: '#/orders?f=awaiting_cost' },
-    review.length && { kind: 'bad', icon: ICONS.alert, t: `${count(review.length)} sale${review.length === 1 ? '' : 's'} held for a check`, s: 'An Amazon email that may have the cost couldn’t be read', href: '#/orders?f=needs_review' },
-    unread.length && { kind: 'warn', icon: ICONS.mail, t: `${count(unread.length)} Amazon email${unread.length === 1 ? '' : 's'} couldn’t be read`, s: 'Usually a multi-item or gift-card order. If it isn’t for an eBay sale, dismiss it.', action: 'emails' },
-    unmatched.length && { kind: 'bad', icon: ICONS.alert, t: `${count(unmatched.length)} Amazon refund${unmatched.length === 1 ? '' : 's'} not matched to a sale`, s: 'Set it on the right sale in the Editor', href: '#/editor' },
-    (d.amazon?.suggestions || 0) && { kind: 'info', icon: ICONS.link, t: `${count(d.amazon.suggestions)} possible match${d.amazon.suggestions === 1 ? '' : 'es'} to confirm`, s: 'Amazon orders that might belong to a sale', href: '#/editor?tab=matches' },
-    openReturns.length && { kind: 'info', icon: ICONS.return, t: `${count(openReturns.length)} return${openReturns.length === 1 ? '' : 's'} still open`, s: 'A refund would come off the next payment', href: '#/returns' },
+  // ---- needs attention: a short summary of the Review page
+  const rv = reviewItems(d);
+  const X = rv.sections;
+  const lines = [
+    X.waiting.length && `${count(X.waiting.length)} sale${X.waiting.length === 1 ? '' : 's'} waiting for the Amazon cost`,
+    X.held.length && `${count(X.held.length)} sale${X.held.length === 1 ? '' : 's'} held for a check`,
+    X.emails.length && `${count(X.emails.length)} Amazon email${X.emails.length === 1 ? '' : 's'} to look at`,
+    X.refunds.length && `${count(X.refunds.length)} Amazon refund${X.refunds.length === 1 ? '' : 's'} not matched`,
+    X.holds.length && `${count(X.holds.length)} return hold${X.holds.length === 1 ? '' : 's'} over 30 days`,
+    X.charges.filter((c) => !c.reviewed && !c.cost).length && `${count(X.charges.filter((c) => !c.reviewed && !c.cost).length)} eBay charge${X.charges.filter((c) => !c.reviewed && !c.cost).length === 1 ? '' : 's'} with no order`,
   ].filter(Boolean);
   const attentionCard = `<div class="card ov-attn c-4">
     <div class="card-h"><div><h3>Needs attention</h3></div></div>
-    <div class="card-b">${items.length ? `<div class="alert-list">${items.map((x) => `<div class="alert" ${x.href ? `data-href="${x.href}" role="link" tabindex="0"` : ''}><div class="alert-ic ${x.kind}">${x.icon}</div><div style="flex:1"><div class="alert-t">${x.t}</div><div class="alert-s">${x.s}</div>${x.action === 'emails' ? `<div class="ov-mails">${unread.slice(0, 5).map((f) => `<div class="ov-mail"><span>${esc(emailFailureText(f).slice(0, 90))}</span>${f.message_id ? `<button class="btn sm" data-dismiss="${esc(f.message_id)}">Dismiss</button>` : ''}</div>`).join('')}</div>` : ''}</div>${x.href ? ICONS.chevron.replace('<svg', '<svg class="chev"') : ''}</div>`).join('')}</div>`
+    <div class="card-b">${lines.length ? `<ul class="ov-todo">${lines.map((l) => `<li>${l}</li>`).join('')}</ul><a class="btn sm primary" href="#/review" style="margin-top:12px">Open Review ${ICONS.arrow}</a>`
       : `<div class="ov-allgood">${ICONS.circleCheck}<div><b>All good</b><div class="muted">Every sale has its cost and nothing needs a look.</div></div></div>`}</div>
   </div>`;
 
@@ -185,11 +183,6 @@ export function renderOverview(el) {
     a.addEventListener('click', (e) => { if (!e.target.closest('button')) location.hash = a.dataset.href; });
     a.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); location.hash = a.dataset.href; } });
   });
-  $$('[data-dismiss]', el).forEach((b) => b.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    if (!confirm('Dismiss this email? Only do this if it isn’t for an eBay sale (a personal order, or one already costed). It stays in the email log.')) return;
-    try { await api('/api/email/failed/dismiss', { method: 'POST', body: { message_id: b.dataset.dismiss } }); toast('Dismissed', 'good'); await loadData(); renderPage(); } catch (err) { toast(err.message, 'bad'); }
-  }));
 }
 
 // Re-exported for the tests: the money of any rows, the way the Overview adds it up
