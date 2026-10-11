@@ -12,7 +12,7 @@ import { isLedgerCsv, importLedgerCsv, matchLedger, parseLedgerCsv } from './led
 import { checkSheet } from './sheetcheck.js';
 import { businessDay } from './time.js';
 import { settleMonth, CYCLE_START } from '../public/js/settlement.js';
-import { syncEmail, emailStatus, emailConfigured, ingestMessage } from './email.js';
+import { syncEmail, emailStatus, emailConfigured, ingestMessage, reprocessEmail, dismissFailedEmail } from './email.js';
 import { ask } from './ask.js';
 import { routeQuestion, writeAnswer, llmConfigured, checkModel } from './llm.js';
 import { syncListings, listingAnalytics } from './listings.js';
@@ -454,14 +454,20 @@ app.post('/api/ledger/link', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 app.post('/api/email/sync', wrap(async (_req, res) => res.json(await syncEmail())));
-app.post('/api/email/reprocess', wrap(async (_req, res) => {
-  const ids = (await q("select distinct amazon_order_id from amazon_lines where source = 'email'")).map((r) => r.amazon_order_id);
-  if (ids.length) await q("delete from order_links where amazon_order_id = any($1) and method = 'auto'", [ids]);
-  await q("delete from amazon_lines where source = 'email'");
-  await q('delete from amazon_refunds');
-  await q('delete from amazon_emails');
-  await setSetting('email_last_sync', null);
-  res.json(await syncEmail());
+// Re-read every Amazon email in place: nothing is deleted first, links and typed costs are kept, and if the mailbox
+// can't be read nothing changes (see reprocessEmail in email.js)
+app.post('/api/email/reprocess', wrap(async (req, res) => {
+  const out = await reprocessEmail();
+  await logMoney(req, 'reprocess emails', null, null, { ok: out?.ok ?? null });
+  res.json(out);
+}));
+// An unreadable Amazon email someone has checked by hand: stop warning about it
+app.post('/api/email/failed/dismiss', wrap(async (req, res) => {
+  const id = String(req.body?.message_id || '');
+  if (!id) return res.status(400).json({ error: 'message_id required' });
+  await dismissFailedEmail(id);
+  await logMoney(req, 'dismiss unreadable email', id, null, null);
+  res.json({ ok: true, ...(await emailStatus()) });
 }));
 app.get('/api/email/debug', wrap(async (_req, res) =>
   res.json(await q("select subject, kind, order_ids, ok, note, parsed->>'total' as total, parsed->>'shipText' as ship, parsed->>'excerpt' as excerpt from amazon_emails order by created_at desc limit 5"))));
