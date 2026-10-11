@@ -1,12 +1,15 @@
 // Regression tests for the Amazon email side of the accounting audit: refund copies booked twice, parser bugs
 // (accents, "cancel" in a subject, legacy shipped emails, gift cards, quantity), failed emails retried and surfaced,
 // one Amazon order for two sales, cancelled orders as rivals, and a safe "reprocess emails".
-// Part 1 loads the read-only production snapshot (Sep 719.55 / Oct 240.87); part 2 uses small fixtures.
+// Part 1 loads the read-only production snapshot (Sep 719.55 / Oct 213.08 on this code base); part 2 uses small fixtures.
 // Throwaway database on its own port; never touches real data or a real mailbox.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+
+// The server runs on UTC (Railway sets no TZ): every date below must come out right there, not just in Arizona
+process.env.TZ = 'UTC';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-email-'));
 process.env.LOCAL_PG_DIR = dir;
@@ -87,6 +90,39 @@ await check('"refund is being processed" is a note; "Refund issued" is booked', 
   assert.equal(parseAmazonEmail({ subject: 'Your refund is being processed', text: 'Order # 111-0000008-0000001\nRefund total: $26.12' }).pending, true);
   assert.equal(parseAmazonEmail({ subject: 'Refund issued for Pet Hair Remover', text: 'Your refund was issued.\nOrder # 111-0000008-0000001\nTotal refund $26.12' }).pending, false);
 });
+// Amazon's own wording for a refund that is done and cancellations that are done (what the Govee and Sep emails say)
+const REAL_REFUND = (id, amt) => `Hello,\nWe've processed your refund of $${amt} for your return of 1 item.\nOrder # ${id}\nRefund subtotal: $${amt}\nTotal refund: $${amt}\nThe refund will be processed to your original payment method. It may take 2-3 business days for the refund to appear.\n`;
+const REAL_ITEM_CANCEL = (id) => `Hello,\nYour request to cancel the item(s) below from order #${id} was successful. You have not been charged for the canceled item(s).\n`;
+const REAL_ORDER_CANCEL = (id) => `Hello,\nYour cancellation request has been processed.\nOrder #${id}\nYou have not been charged for this order.\n`;
+await check('real refund wording ("processed … will be processed to your original payment method") is a done refund, not "being processed"', async () => {
+  const p = parseAmazonEmail({ subject: 'Your refund for Govee Control Box', text: REAL_REFUND('111-8776178-7476264', '42.89') });
+  assert.equal(p.kind, 'refund');
+  assert.equal(p.pending, false);
+  assert.equal(p.refund, 42.89);
+});
+await check('real cancel wording is confirmed: "Item canceled successfully" + "Your request to cancel … was successful", "has been canceled" + "Your cancellation request has been processed"', async () => {
+  const item = parseAmazonEmail({ subject: 'Item canceled successfully', text: REAL_ITEM_CANCEL('111-3484881-3461831') });
+  assert.equal(item.kind, 'cancel');
+  assert.equal(item.confirmed, true);
+  const whole = parseAmazonEmail({ subject: 'Your Amazon.com order #111-0308083-4765038 has been canceled', text: REAL_ORDER_CANCEL('111-0308083-4765038') });
+  assert.equal(whole.confirmed, true);
+  assert.equal(whole.fullOrder, true);
+  // Refusals and attempts still never confirm
+  assert.equal(parseAmazonEmail({ subject: 'Update on your cancellation request', text: 'We were unable to cancel order #111-0000010-0000001.' }).confirmed, false);
+  assert.equal(parseAmazonEmail({ subject: 'Your cancellation request', text: "We're attempting to cancel order #111-0000010-0000001." }).confirmed, false);
+});
+await check('a bare product word in a legacy subject ("Your Amazon.com order of Time Delay Relay") is an order, not a shipment', async () => {
+  assert.equal(classify('Your Amazon.com order of Time Delay Relay', ''), 'order');
+  assert.equal(classify('Your Amazon.com order of Time Delay Relay has been delivered', ''), 'shipment');
+  assert.equal(classify('Your package is on the way', ''), 'shipment');
+});
+await check('a forward\'s zoneless "Date: Fri, Oct 9, 2026 at 1:30 AM" is Arizona time on a UTC server (08:30Z, not 01:30Z)', async () => {
+  const p = parseAmazonEmail({ subject: 'Fwd: Refund issued for Lamp', date: '2026-10-10T16:00:00Z',
+    text: '---------- Forwarded message ---------\nFrom: Amazon.com <return@amazon.com>\nDate: Fri, Oct 9, 2026 at 1:30 AM\nSubject: Refund issued\n\nOrder # 111-0000030-0000001\nTotal refund $30.00\n' });
+  assert.equal(p.originalDate, '2026-10-09T08:30:00.000Z');
+  const z = parseAmazonEmail({ subject: 'Fwd: Refund issued', text: '---------- Forwarded message ---------\nFrom: Amazon.com <return@amazon.com>\nDate: Fri, 9 Oct 2026 01:30:00 -0700\n\nOrder # 111-0000030-0000001\n' });
+  assert.equal(z.originalDate, '2026-10-09T08:30:00.000Z');
+});
 
 // ---------------------------------------------------------------- part 1: the production snapshot
 console.log('production snapshot');
@@ -114,7 +150,7 @@ if (fs.existsSync(AUDIT)) {
   // Mozi Wash refund line on Oct (213.08). Every check below compares against this baseline: email work must not move it.
   await check(`snapshot baseline: Sep sends ${base.sep} (audit 719.55), Oct sends ${base.oct}`, async () => {
     assert.equal(base.sep, 719.55);
-    assert.ok(Number.isFinite(base.oct));
+    assert.equal(base.oct, 213.08);
   });
   const unchanged = async (what) => {
     assert.equal(await sends('2026-09'), base.sep, `Sep after ${what}`);
@@ -151,6 +187,44 @@ if (fs.existsSync(AUDIT)) {
     await ingestMessage(m);
     assert.equal((await q("select 1 from amazon_refunds where amazon_order_id = '111-8776178-7476264'")).length, 1);
     await unchanged('the webhook copies');
+  });
+
+  const GOVEE = '<010001a0d17101bf-bd329880-ab6f-40e0-9279-cb66c745c48f-000000@email.amazonses.com>';
+  const goveeRows = async () => (await q("select amount::text from amazon_refunds where amazon_order_id = '111-8776178-7476264'")).map((r) => r.amount);
+  await check('Govee (Sep, paid): read again with Amazon\'s real wording, the $42.89 refund stays booked; Sep and Oct stay', async () => {
+    await ingestMessage({ messageId: GOVEE, subject: 'Your refund for Govee Control Box', date: '2026-09-24T03:23:59Z', text: REAL_REFUND('111-8776178-7476264', '42.89') }, { force: true });
+    assert.deepEqual(await goveeRows(), ['42.89']);
+    assert.equal((await q('select ok from amazon_emails where message_id = $1', [GOVEE]))[0].ok, true);
+    await unchanged('re-reading the Govee refund');
+  });
+  await check('Govee: a re-read that now says "being processed" keeps the booked $42.89 and lists the email; Sep and Oct stay', async () => {
+    await ingestMessage({ messageId: GOVEE, subject: 'Your refund is being processed', date: '2026-09-24T03:23:59Z', text: 'Order # 111-8776178-7476264\nRefund total: $42.89\n' }, { force: true });
+    assert.deepEqual(await goveeRows(), ['42.89']);
+    const f = (await emailStatus()).failed.find((x) => x.message_id === GOVEE);
+    assert.ok(f, 'listed');
+    assert.match(f.reason, /kept/);
+    await unchanged('a "being processed" re-read');
+    // Read with its real wording again: booked once, no longer listed
+    await ingestMessage({ messageId: GOVEE, subject: 'Your refund for Govee Control Box', date: '2026-09-24T03:23:59Z', text: REAL_REFUND('111-8776178-7476264', '42.89') }, { force: true });
+    assert.deepEqual(await goveeRows(), ['42.89']);
+    assert.ok(!(await emailStatus()).failed.some((x) => x.message_id === GOVEE));
+  });
+  await check('Sep (paid): a legacy "Item canceled successfully" on a now 2-unit order never takes its $51.35 cost off Sep; the email is listed', async () => {
+    // 111-1285765-9255441 is the purchase for a Sep sale. As a 2-unit order, one item cancelled would leave its cost
+    // unknown, but Sep is paid: the cost stays and the email is listed for a look.
+    await q("update amazon_lines set quantity = 2 where amazon_order_id = '111-1285765-9255441'");
+    await q(`insert into amazon_emails (message_id, received_at, subject, kind, order_ids, ok, note, parsed)
+             values ('<legacy-item-cancel@amazon.com>', '2026-09-23T15:00:00Z', 'Item canceled successfully', 'cancel', array['111-1285765-9255441'], true,
+                     'partial cancellation, review the order in Editor', $1::jsonb)`,
+    [JSON.stringify({ kind: 'cancel', orderIds: ['111-1285765-9255441'], fullOrder: false, excerpt: 'We have canceled 1 item from your order.\nOrder #111-1285765-9255441\nYou have not been charged for this item.' })]);
+    await email.applyCancellations();
+    assert.equal((await q("select line_total::text from amazon_lines where amazon_order_id = '111-1285765-9255441'"))[0].line_total, '51.35');
+    const f = (await emailStatus()).failed.find((x) => x.message_id === '<legacy-item-cancel@amazon.com>');
+    assert.ok(f, 'listed');
+    assert.match(f.reason, /2026-09 payment/);
+    await unchanged('a legacy item cancel on a paid month');
+    await q("delete from amazon_emails where message_id = '<legacy-item-cancel@amazon.com>'");
+    await q("update amazon_lines set quantity = 1 where amazon_order_id = '111-1285765-9255441'");
   });
 
   // Every email-sourced line and refund in the snapshot, as the emails that made them
@@ -190,6 +264,50 @@ if (fs.existsSync(AUDIT)) {
     assert.equal(after.cost, before.cost);
     assert.ok(after.links >= before.links, 'no link lost');
     await unchanged('a full reprocess');
+  });
+  // The same emails in Amazon's real wording: refunds that "will be processed to your original payment method",
+  // cancellations that say "Your request to cancel … was successful" / "Your cancellation request has been processed"
+  const realMails = snapMails.map((m) => {
+    const id = (m.text.match(/\d{3}-\d{7}-\d{7}/) || [])[0];
+    if (m.messageId.startsWith('<cancel-')) {
+      const units = raw.amazon_lines.filter((l) => l.amazon_order_id === id).reduce((t, l) => t + Number(l.quantity || 1), 0);
+      return units > 1 ? { ...m, subject: `Your Amazon.com order #${id} has been canceled`, text: REAL_ORDER_CANCEL(id) }
+        : { ...m, subject: 'Item canceled successfully', text: REAL_ITEM_CANCEL(id) };
+    }
+    if (/refund/i.test(m.subject)) return { ...m, text: REAL_REFUND(id, (m.text.match(/\$([\d.]+)/) || [])[1]) };
+    return m;
+  });
+  const cancelledOrders = async () => (await q("select amazon_order_id from amazon_lines where order_status ~* 'cancel' order by 1")).map((r) => r.amazon_order_id);
+  await check('Reprocess with Amazon\'s real wording: no refund dropped, no cancelled order un-cancelled (111-3484881-3461831 $64.94 stays cancelled), Sep 719.55 / Oct 213.08', async () => {
+    const before = await counts();
+    const wasCancelled = await cancelledOrders();
+    assert.ok(wasCancelled.includes('111-3484881-3461831'));
+    useMailboxForTests(mailbox(realMails));
+    await reprocessEmail();
+    assert.deepEqual(await counts(), before);
+    assert.deepEqual(await cancelledOrders(), wasCancelled);
+    await unchanged('a reprocess in real wording');
+  });
+  await check('Reprocess: a cancellation email that no longer reads as confirmed leaves the order cancelled and is listed (Sep stays)', async () => {
+    const mid = '<cancel-111-3484881-3461831@amazon.com>';
+    useMailboxForTests(mailbox([{ messageId: mid, subject: 'Update on your cancellation request', date: '2026-09-23T20:00:00Z',
+      text: "We're attempting to cancel the item(s) in order #111-3484881-3461831. We'll email you when it is done." }]));
+    await reprocessEmail();
+    assert.equal((await q("select order_status from amazon_lines where amazon_order_id = '111-3484881-3461831'"))[0].order_status, 'Cancelled');
+    const f = (await emailStatus()).failed.find((x) => x.message_id === mid);
+    assert.ok(f, 'listed');
+    assert.match(f.reason, /stays cancelled/);
+    await unchanged('an unconfirmed cancel re-read');
+  });
+  await check('Reprocess: an email that throws while being re-read keeps what it booked and is stored as failed (listed, retried)', async () => {
+    useMailboxForTests(mailbox([{ messageId: GOVEE, subject: 'Your refund for Govee Control Box', date: 'not a date', text: REAL_REFUND('111-8776178-7476264', '42.89') }]));
+    const r = await reprocessEmail();
+    assert.match(r.log[0], /1 need review/);
+    assert.deepEqual(await goveeRows(), ['42.89']);
+    const e = (await q('select ok, note from amazon_emails where message_id = $1', [GOVEE]))[0];
+    assert.equal(e.ok, false);
+    assert.match(e.note, /could not be read/);
+    await unchanged('a re-read that throws');
   });
   await check('Reprocess never overlaps a sync in flight (it waits for it)', async () => {
     useMailboxForTests(mailbox(snapMails));
@@ -305,6 +423,30 @@ await check('refunds: a partial second refund is capped at what is left of the c
   const rows = await q("select amount, email_amount from amazon_refunds where amazon_order_id = '111-0000013-0000001' order by received_at");
   assert.deepEqual(rows.map((x) => [x.amount, x.email_amount]), [['20.00', '20.00'], ['10.00', '15.00']]);
 });
+await check('refunds: a same-day copy of the capped $15.00 refund is recognised as a copy (by the email\'s $15.00, not the $10.00 counted)', async () => {
+  await mail('Your refund for Lamp Shade', 'Refund issued\nOrder # 111-0000013-0000001\nRefund total: $15.00', day(2), '<capped-copy@amazon.com>');
+  assert.match((await q("select note from amazon_emails where message_id = '<capped-copy@amazon.com>'"))[0].note, /duplicate copy/);
+  assert.equal((await q("select sum(amount)::text s from amazon_refunds where amazon_order_id = '111-0000013-0000001'"))[0].s, '30.00');
+});
+await check('refunds: a forward of a 1:30 AM Arizona refund on a UTC server is the same day: one $30.00 row for an order this inbox never saw', async () => {
+  // The original at 2026-10-09T08:30Z (Oct 9, 1:30 AM Arizona), then the partner's forward of it
+  await ingestMessage({ messageId: '<orig-0130@amazon.com>', subject: 'Refund issued for Desk Lamp...', date: '2026-10-09T08:30:00Z',
+    text: 'Your refund was issued.\nOrder # 111-0000030-0000001\nTotal refund $30.00\n' });
+  await ingestMessage({ messageId: '<fwd-0130@example.com>', subject: 'Fwd: Refund issued for Desk Lamp...', date: '2026-10-10T16:00:00Z', from: 'drew@example.com',
+    text: '---------- Forwarded message ---------\nFrom: Amazon.com <return@amazon.com>\nDate: Fri, Oct 9, 2026 at 1:30 AM\nSubject: Refund issued for Desk Lamp...\n\nYour refund was issued.\nOrder # 111-0000030-0000001\nTotal refund $30.00\n' });
+  assert.deepEqual((await q("select amount::text from amazon_refunds where amazon_order_id = '111-0000030-0000001'")).map((r) => r.amount), ['30.00']);
+  const fwd = (await q("select received_at, note from amazon_emails where message_id = '<fwd-0130@example.com>'"))[0];
+  assert.equal(new Date(fwd.received_at).toISOString(), '2026-10-09T08:30:00.000Z');
+  assert.match(fwd.note, /duplicate copy/);
+});
+await check('refunds: "being processed" alone is not booked and is listed until the "Refund issued" email books it', async () => {
+  await orderMail({ id: '111-0000032-0000001', ship: 'Ann - RENO, NV', total: '19.99', at: day(6) });
+  await mail('Your refund is being processed', 'Order # 111-0000032-0000001\nRefund total: $19.99', day(2), '<pending-only@amazon.com>');
+  assert.equal((await q("select 1 from amazon_refunds where amazon_order_id = '111-0000032-0000001'")).length, 0);
+  assert.ok((await emailStatus()).failed.some((x) => x.message_id === '<pending-only@amazon.com>'), 'listed while not booked');
+  await mail('Refund issued for Lamp...', 'Your refund was issued.\nOrder # 111-0000032-0000001\nTotal refund $19.99', day(1));
+  assert.ok(!(await emailStatus()).failed.some((x) => x.message_id === '<pending-only@amazon.com>'), 'sorted once booked');
+});
 
 await check('partial cancel: 1 of 2 units cancelled on a $81.30 order leaves the 2-unit sale needing its cost', async () => {
   await order('S4', day(5), 'Thyle 12 Sets Weaving Loom Kit', 151.98, { name: 'george rice', city: 'Nashville', st: 'IN', qty: 2 });
@@ -319,6 +461,19 @@ await check('partial cancel: 1 of 2 units cancelled on a $81.30 order leaves the
   assert.equal(o.has_cost, false);
   assert.equal(o.counted, false);
   assert.equal(o.status, 'awaiting_cost');
+});
+await check('partial cancel on a sale whose payment is already made (closed): the $40.00 cost stays and the email is listed', async () => {
+  await order('FZ-1', day(5), 'Ceramic Knife Set 2 Pack', 79.98, { name: 'Paula Grant', city: 'Dayton', st: 'OH', qty: 2 });
+  await orderMail({ id: '111-0000033-0000001', ship: 'Paula - DAYTON, OH', total: '40.00', subject: 'Ordered: 2 Kitchen items', at: day(5, 19) });
+  await runMatcher();
+  assert.equal((await sale('FZ-1')).cost, 40);
+  await q("insert into settlement_freeze (month, row_keys, source) values ('2099-01', $1::jsonb, 'test')", [JSON.stringify(['FZ-1'])]);
+  await mail('Item canceled successfully', REAL_ITEM_CANCEL('111-0000033-0000001'), day(5, 20), '<fz-cancel@amazon.com>');
+  assert.equal(await lineTotal('111-0000033-0000001'), '40.00');
+  const f = (await emailStatus()).failed.find((x) => x.message_id === '<fz-cancel@amazon.com>');
+  assert.ok(f, 'listed');
+  assert.match(f.reason, /2099-01 payment, already made/);
+  await q("delete from settlement_freeze where month = '2099-01'");
 });
 
 await check('units: a 2-unit sale bought as one 2-unit Amazon order is full; a second order from that buyer is not linked to it', async () => {
@@ -357,6 +512,15 @@ await check('...and once that order is linked to one of them, the other sale is 
   assert.equal(s?.linked_to, 'S3-A');
   assert.deepEqual(s.sales.map((x) => x.ebay_order_id), ['S3-A', 'S3-B']);
 });
+await check('...the split is of the cost the books use: a typed-in $20.00 cost replaces the $23.90 Grand Total, shares add up to it', async () => {
+  await q("update amazon_lines set cost_override = 20.00 where amazon_order_id = '111-0000003-0000001'");
+  const s = (await sharedOrderSuggestions()).find((x) => x.amazon_order_id === '111-0000003-0000001');
+  assert.equal(s.total, 20);
+  assert.equal(s.sales.reduce((t, x) => t + x.cost_share, 0).toFixed(2), '20.00');
+  await q("update amazon_lines set cost_override = null where amazon_order_id = '111-0000003-0000001'");
+  const again = (await sharedOrderSuggestions()).find((x) => x.amazon_order_id === '111-0000003-0000001');
+  assert.equal(again.total, 23.9, 'recomputed once the cost changed (not a stale cached answer)');
+});
 
 await check('failed emails are listed by emailStatus() with message id, subject, date and reason', async () => {
   await mail('Ordered: 1 Toy item', 'Thanks for your order!\nGrand Total:\n$12.00\n', day(1), '<no-order-number@amazon.com>');
@@ -386,6 +550,26 @@ await check('a failed email is read again on the next sync (not marked seen fore
   assert.equal(e.attempts, 2);
   assert.equal((await sale('RETRY-1')).cost, 18.2);
   assert.ok(r.log.some((l) => /1 imported/.test(l)));
+});
+await check('a legacy "has shipped" email stored as a failed order ("Grand Total missing") is sorted after one sync, not retried forever', async () => {
+  const msg = { messageId: '<legacy-shipped@amazon.com>', subject: 'Your Amazon.com order #111-0000031-0000001 has shipped', date: day(3), text: 'Your package is on the way.\nOrder #111-0000031-0000001\n' };
+  await q(`insert into amazon_emails (message_id, received_at, subject, kind, order_ids, ok, note, parsed, attempts, parser_version)
+           values ($1, $2, $3, 'order', array['111-0000031-0000001'], false, 'Grand Total missing or $0.00 (gift card / points?) - enter the Amazon cost for this sale', '{}', 1, 1)`,
+  [msg.messageId, msg.date, msg.subject]);
+  assert.ok((await emailStatus()).failed.some((x) => x.message_id === msg.messageId));
+  const box = await mailbox([msg])();
+  let reads = 0;
+  useMailboxForTests(async () => ({ ...box, list: async () => [], read: async (h) => { reads++; return box.read(h); } }));
+  await syncEmail();
+  const e = (await q('select ok, kind from amazon_emails where message_id = $1', [msg.messageId]))[0];
+  assert.equal(e.ok, true);
+  assert.equal(e.kind, 'shipment');
+  assert.equal(reads, 0, 'not downloaded again');
+  assert.ok(!(await emailStatus()).failed.some((x) => x.message_id === msg.messageId));
+  // A retried email that only reads as "not an Amazon order" once downloaded is sorted the same way
+  await q("insert into amazon_emails (message_id, received_at, subject, kind, order_ids, ok, note, attempts, parser_version) values ('<now-other@amazon.com>', $1, 'Ordered: 1 Toy item', 'order', '{}', false, 'no order number found', 1, 1)", [day(3)]);
+  await ingestMessage({ messageId: '<now-other@amazon.com>', subject: 'Your Amazon.com account', text: 'Hello', date: day(3) });
+  assert.equal((await q("select ok from amazon_emails where message_id = '<now-other@amazon.com>'"))[0].ok, true);
 });
 await check('a sync with unsorted failed emails is not "ok", and names them; a dismissed one stops warning', async () => {
   useMailboxForTests(mailbox([]));

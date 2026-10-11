@@ -132,6 +132,10 @@ async function loadAmazon({ linked }) {
     `select l.amazon_order_id, min(l.order_date) as order_date,
             string_agg(coalesce(l.ship_name,'') || ' ' || coalesce(l.ship_address,''), ' ') as ship_text,
             max(l.ship_zip) as zip, max(l.ship_state) as state, sum(l.line_total) as total,
+            -- what the books count as this order's cost: lines still bought (not ignored or cancelled), a typed-in
+            -- cost first; unknown when any such line has no cost yet
+            case when bool_or(coalesce(l.cost_override, l.line_total) is null) filter (where not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel') then null
+                 else sum(coalesce(l.cost_override, l.line_total)) filter (where not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel') end as cost,
             string_agg(coalesce(l.tracking,''), ' ') as tracking,
             array_agg(l.title) as titles, bool_and(l.ignored) as all_ignored,
             bool_and(coalesce(l.order_status, '') ~* 'cancel') as all_cancelled,
@@ -150,6 +154,7 @@ async function loadAmazon({ linked }) {
       zip: r.zip,
       state: r.state ? String(r.state).toUpperCase() : null,
       total: r.total === null ? null : Number(r.total),
+      cost: r.cost === null ? null : Number(r.cost),
       tracking: trackingTokens(r.tracking),
       // Email-sourced rows only carry a category placeholder, never compare it as a product title
       titles: (r.titles || []).filter((t) => t && !/title not in email/i.test(t)),
@@ -324,6 +329,10 @@ export async function getSuggestions(limit = 300) {
     .slice(0, limit);
 }
 
+// The last answer and the inputs it was worked out from: the dashboard asks on every load, but the full Amazon x eBay
+// scan only runs again when an order, link, cost or rejection changed
+let sharedCache = { key: null, value: null };
+
 // One Amazon order that looks like the purchase for two or more eBay sales (the same buyer bought twice, Amazon
 // shipped both in one order). order_links holds one sale per Amazon order, so this is never linked automatically: it
 // is listed so the cost can be split by hand. An Amazon order with 2+ units qualifies when 2+ sales from that buyer
@@ -335,6 +344,8 @@ export async function sharedOrderSuggestions() {
   const ebay = await loadEbay();
   const linkCounts = await loadLinkCounts();
   const rej = new Set((await q('select amazon_order_id, ebay_order_id from link_rejections')).map((r) => `${r.amazon_order_id}|${r.ebay_order_id}`));
+  const key = JSON.stringify([amazon, ebay, [...linkCounts], [...rej].sort()]);
+  if (sharedCache.key === key) return sharedCache.value;
   const out = [];
   for (const az of amazon) {
     const sales = [];
@@ -356,19 +367,27 @@ export async function sharedOrderSuggestions() {
     }
     if (fit.length < 2) continue;
     const revenue = fit.reduce((t, x) => t + x.eb.revenue, 0);
+    // Suggested share of the Amazon cost the books count (typed-in costs, cancelled and ignored lines left out), split
+    // by each sale's eBay revenue; the last share takes the rounding so the shares add up to the cost exactly
+    let left = az.cost;
+    const shares = fit.map((x, i) => {
+      if (az.cost === null || !(revenue > 0)) return null;
+      const share = i === fit.length - 1 ? Math.round(left * 100) / 100 : Math.round((az.cost * x.eb.revenue / revenue) * 100) / 100;
+      left -= share;
+      return share;
+    });
     out.push({
       amazon_order_id: az.amazon_order_id,
       order_date: az.order_date,
       amazon_units: az.units,
-      total: az.total,
+      total: az.cost,
       linked_to: az.linked_to || null,
-      sales: fit.map((x) => ({
+      sales: fit.map((x, i) => ({
         ebay_order_id: x.eb.order_id, created_at: x.eb.created_at, ship_name: x.eb.ship_name, units: Math.max(1, x.eb.units),
-        revenue: x.eb.revenue, score: x.s.score, reasons: x.s.reasons,
-        // Suggested share of the Amazon cost: split by each sale's eBay revenue
-        cost_share: az.total !== null && revenue > 0 ? Math.round((az.total * x.eb.revenue / revenue) * 100) / 100 : null,
+        revenue: x.eb.revenue, score: x.s.score, reasons: x.s.reasons, cost_share: shares[i],
       })),
     });
   }
+  sharedCache = { key, value: out };
   return out;
 }

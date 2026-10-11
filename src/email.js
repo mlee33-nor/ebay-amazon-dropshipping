@@ -8,7 +8,8 @@ import { simpleParser } from 'mailparser';
 import { q, one, getSetting, setSetting } from './db.js';
 import { runMatcher, sharedOrderSuggestions } from './matcher.js';
 import { extractZip } from './amazon.js';
-import { businessDay } from './time.js';
+import { businessDay, BUSINESS_TZ } from './time.js';
+import { settlePeriodOf } from '../public/js/settlement.js';
 
 export function emailConfigured() {
   return Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASSWORD);
@@ -36,7 +37,7 @@ const clean = (s) => String(s || '').replace(INVISIBLE, '').replace(/&#847;|&zwn
 const unfwd = (s) => clean(s).replace(/^\s*((fwd?|fw)\s*:\s*)+/i, '');
 
 // Bump when the parser changes: every email that failed to read is tried once more with the new parser
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 3;
 // A failed email is fetched and read again on the next syncs, up to this many tries (then once per parser change)
 const MAX_TRIES = 5;
 // Failed emails older than this no longer raise a warning (and are no longer retried)
@@ -56,19 +57,26 @@ export function classify(subject, body = '') {
   if (/refund/i.test(bare)) return 'refund';
   if (CANCEL_WORD.test(bare)) return 'cancel';
   // A legacy "Your Amazon.com order #… has shipped" is a shipment, never an order (it has no Grand Total)
-  if (/shipped|delivered|out for delivery|arriving|delay|cannot be shipped|could not be shipped|on (its|the) way/i.test(bare)) return 'shipment';
+  // Status wording only: a product word in a legacy subject ("Your Amazon.com order of Time Delay Relay") is an order.
+  if (/\b(has|have|was|were|is|are) (been )?(shipped|delivered|delayed)\b|\bout for delivery\b|\b(cannot|could not|can['’]t) be shipped\b|\bon (its|the) way\b|\b(is|are) arriving\b|\barriving (today|tomorrow|soon|early|late)\b|\bdelay(ed)? in (shipping|delivery)\b|\b(shipping|shipment|delivery) (delay|update)\b/i.test(bare)) return 'shipment';
   if (/^\s*(your amazon(\.com)? order|order confirmation|thanks for your order)/i.test(bare)) return 'order';
   if (/thanks for your order|order confirmation/i.test(String(body).slice(0, 2000)) && /grand total/i.test(body)) return 'order';
   return 'other';
 }
 
-// Only wording that says the cancellation HAPPENED cancels a purchase. "Your cancellation request…", "we're
-// attempting to cancel", "we were unable to cancel" are review-only: the seller may still ship and charge.
-const CANCEL_DONE = /\b(has been|have been|was|were|we['’]ve|we have|is now)\s+cancell?ed\b|\bcancell?ed successfully\b|\bsuccessfully cancell?ed\b|you (have not|haven['’]t) been charged|cancellation (is |was )?complete/i;
-const CANCEL_NOT_DONE = /\b(unable to|could not|couldn['’]t|cannot|can['’]t|not able to|weren['’]t able to)\b[^.\n]{0,40}cancel|attempt(ing)? to cancel|request(ed)? (to|a) cancel|cancell?ation request|we['’]ll (try|attempt)/i;
-export function cancelConfirmed(text) {
-  const t = unquote(text);
-  return CANCEL_DONE.test(t) && !CANCEL_NOT_DONE.test(t);
+// Only wording that says the cancellation HAPPENED cancels a purchase. "We're attempting to cancel", "we were unable
+// to cancel" are review-only: the seller may still ship and charge. A subject that says it was cancelled ("Item
+// canceled successfully", "Your Amazon.com order #… has been canceled") decides on its own: Amazon's confirmed
+// emails often go on to say "Your request to cancel … was successful" or "Your cancellation request has been processed".
+const CANCEL_DONE = /\b(has been|have been|was|were|we['’]ve|we have|is now)\s+cancell?ed\b|\bcancell?ed successfully\b|\bsuccessfully cancell?ed\b|\bcancel\b[^.\n]{0,80}\b(was|were|has been) successful\b|you (have not|haven['’]t) been charged|(?<!\b(when|once|after|until) (the |your )?)\bcancellation (is |was |has been )?complete/i;
+const CANCEL_DONE_SUBJECT = /\bcancell?ed successfully\b|\bsuccessfully cancell?ed\b|\b(has been|have been|was|were|is)\s+cancell?ed\b|^\s*(your )?(amazon(\.com)? )?(order|items?)\s+cancell?ed\b/i;
+const CANCEL_NOT_DONE = /\b(unable to|could not|couldn['’]t|cannot|can['’]t|not able to|weren['’]t able to|wasn['’]t able to)\b[^.\n]{0,40}cancel|\battempt(ing)? to cancel|\bwe['’]ll (try|attempt)|\bnot (been |yet been )?cancell?ed\b/i;
+export function cancelConfirmed(subject, body = '') {
+  const s = unquote(unfwd(subject));
+  if (CANCEL_NOT_DONE.test(s)) return false;
+  if (CANCEL_DONE_SUBJECT.test(s)) return true;
+  const b = unquote(body);
+  return CANCEL_DONE.test(b) && !CANCEL_NOT_DONE.test(b);
 }
 
 // Amazon writes totals as "$12.60" in HTML and "12.6 USD" in the text part
@@ -99,6 +107,24 @@ const samePrefix = (a, b) => {
   return n >= 8 && a.slice(0, n).toLowerCase() === b.slice(0, n).toLowerCase();
 };
 
+// The Date line of a forwarded email. Gmail writes "Fri, Oct 9, 2026 at 1:30 AM" with no time zone, in the zone of
+// whoever forwarded it: the partners, in Arizona. It is read as business time, never the server's own zone (the
+// server runs on UTC, which would put a 1:30 AM email on the day before). A line with its own zone keeps it.
+function forwardedDate(line) {
+  const s = String(line).replace(/\s+at\s+/i, ' ').replace(/[  ]/g, ' ').trim();
+  if (/[+-]\d{2}:?\d{2}\b|\b(GMT|UTC|Z)\b|\b[A-Z][SD]T\b/.test(s)) {
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : t;
+  }
+  const wall = Date.parse(`${s} GMT`); // the clock time as if it were UTC
+  if (Number.isNaN(wall)) return null;
+  // Shift by the business zone's offset at that moment (Arizona: always 7 hours)
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: BUSINESS_TZ, hourCycle: 'h23', year: 'numeric', month: 'numeric',
+    day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(new Date(wall)).map((x) => [x.type, x.value]));
+  const seen = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute), Number(p.second));
+  return wall + (wall - seen);
+}
+
 export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
   const excerptSource = `${text || ''}\n---html---\n${htmlToText(html || '')}`;
   const forwarded = /^\s*(fwd?|fw)\s*:/i.test(clean(subject));
@@ -116,10 +142,8 @@ export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
     out.forwarded = true;
     out.fromAmazon = /amazon\.com/i.test(body.slice(0, 3000));
     const fd = body.match(/Forwarded message[\s\S]{0,600}?Date:\s*([^\n]+)/i);
-    if (fd) {
-      const t = Date.parse(fd[1].replace(/\s+at\s+/i, ' ').replace(/[  ]/g, ' ').trim());
-      if (!Number.isNaN(t)) out.originalDate = new Date(t).toISOString();
-    }
+    const t = fd ? forwardedDate(fd[1]) : null;
+    if (t !== null) out.originalDate = new Date(t).toISOString();
   }
 
   if (kind === 'order') {
@@ -171,13 +195,13 @@ export function parseAmazonEmail({ subject = '', text = '', html = '', date }) {
     out.refund = moneyNear(body, ['Total refund', 'Refund total', 'Refund subtotal', 'Refund amount']);
     const t = subject.match(/Refund issued for (.+)$/i);
     if (t) out.itemTitle = t[1].replace(/\.{3,}$/, '').trim();
-    // "Your refund is being processed" comes before the "Refund issued" email for the same money: a note, never booked
-    const head = `${subject}\n${body.slice(0, 2000)}`;
-    out.pending = /being processed|processing your (return|refund)|will (be )?(issue|process)|refund (is )?(pending|initiated)/i.test(head)
-      && !/refund (was |has been )?issued|issued (a |your )?refund|refund (was|has been) (processed|completed)/i.test(head);
+    // "Your refund is being processed" comes before the "Refund issued" email for the same money: not booked, and
+    // listed until that email books it. Decided by the SUBJECT only: a real refund's body often says the money "will
+    // be processed to your original payment method".
+    out.pending = /\brefund (is )?(being processed|pending|initiated)\b|\bprocessing your (return|refund)\b/i.test(subject);
   } else if (kind === 'cancel') {
     const head = `${subject}\n${body.slice(0, 1500)}`;
-    out.confirmed = cancelConfirmed(head);
+    out.confirmed = cancelConfirmed(subject, body.slice(0, 1500));
     out.fullOrder = /order[^.\n]{0,60}(has been|was|is) cancel/i.test(unquote(head)) && !/\bitem/i.test(subject);
   }
   out.excerpt = clean(excerptSource).replace(/<?https?:\/\/\S+>?/g, '').replace(/[ \t]{2,}/g, ' ').replace(/\n\s*\n+/g, '\n').slice(0, 6000);
@@ -194,23 +218,32 @@ async function orderCost(amazonOrderId) {
   return r2(lines.reduce((s, l) => s + Number(l.cost_override ?? l.line_total), 0));
 }
 
+// Returns { ok, note } plus `booked` (this email's refund row was written) or `copyOf` (the same money is already
+// booked by another email, so this one books nothing).
 async function ingestRefund(messageId, receivedAt, p) {
   const id = p.orderIds[0];
   const item = p.itemTitle || null;
-  if (p.pending) return { ok: true, note: 'refund being processed: booked when the "Refund issued" email arrives' };
   // The same refund seen twice: a forward, a Sent copy in All Mail, a webhook copy, or two differently worded emails.
-  // Same order and same amount to the cent, on the same Arizona day of the original send (or a forward whose original
-  // date can't be read, or when booking it would take the order's refunds past its cost) = the same money, unless the
-  // two emails name different items.
+  // Same order and same amount to the cent (the email's own figure, not a capped one), on the same Arizona day of the
+  // original send (or a forward whose original date can't be read, or when booking it would take the order's refunds
+  // past its cost) = the same money, unless the two emails name different items.
   const day = businessDay(receivedAt || new Date());
-  const others = await q('select message_id, amount, received_at, title from amazon_refunds where amazon_order_id = $1 and message_id <> $2', [id, messageId]);
+  const others = await q('select message_id, amount, email_amount, received_at, title from amazon_refunds where amazon_order_id = $1 and message_id <> $2', [id, messageId]);
+  const stated = (t) => Number(t.email_amount ?? t.amount);
+  // "Your refund is being processed" comes before the "Refund issued" email for the same money: never booked. It is
+  // listed for a look until a refund for the order is booked (or it is already covered by one).
+  if (p.pending) {
+    const covered = others.find((t) => Math.abs(stated(t) - p.refund) < 0.005);
+    if (covered) return { ok: true, copyOf: covered.message_id, note: `refund being processed: already booked by ${covered.message_id}` };
+    return { ok: false, note: 'refund being processed, not booked yet: it is booked when the "Refund issued" email arrives' };
+  }
   const cost = await orderCost(id);
   const before = r2(others.reduce((s, t) => s + Number(t.amount), 0));
   const overCost = cost !== null && before + p.refund > cost + 0.005;
-  const twin = others.find((t) => Math.abs(Number(t.amount) - p.refund) < 0.005
+  const twin = others.find((t) => Math.abs(stated(t) - p.refund) < 0.005
     && ((p.forwarded && !p.originalDate) || overCost || (t.received_at && businessDay(t.received_at) === day))
     && !(t.title && item && !samePrefix(words(t.title), words(item)) && words(t.title) !== words(item)));
-  if (twin) return { ok: true, note: `duplicate copy of a refund already booked (${twin.message_id}), not counted again` };
+  if (twin) return { ok: true, copyOf: twin.message_id, note: `duplicate copy of a refund already booked (${twin.message_id}), not counted again` };
   // Refunds can never add up to more than the order cost (when the cost is known)
   let amount = p.refund;
   if (overCost) {
@@ -221,8 +254,8 @@ async function ingestRefund(messageId, receivedAt, p) {
            on conflict (message_id, amazon_order_id) do update set amount = excluded.amount, email_amount = excluded.email_amount,
              title = coalesce(amazon_refunds.title, excluded.title)`,
     [messageId, id, amount, receivedAt, item, p.refund]);
-  if (amount < p.refund) return { ok: false, note: `refund capped at the order cost: $${p.refund.toFixed(2)} in the email, $${amount.toFixed(2)} counted. Check it` };
-  return { ok: true, note: '' };
+  if (amount < p.refund) return { ok: false, booked: true, note: `refund capped at the order cost: $${p.refund.toFixed(2)} in the email, $${amount.toFixed(2)} counted. Check it` };
+  return { ok: true, booked: true, note: '' };
 }
 
 async function ingestOrder(subject, receivedAt, p) {
@@ -275,13 +308,22 @@ async function ingestOrder(subject, receivedAt, p) {
   return { ok, note };
 }
 
+// Puts an email on the list for a look (ok = false). `review` keeps it listed even when its order looks sorted
+// (linked, with a cost), until it is dismissed.
+async function flagEmail(messageId, note, { review = false } = {}) {
+  await q(`update amazon_emails set ok = false, note = $2,
+             parsed = case when $3 then coalesce(parsed, '{}'::jsonb) || '{"review": true}'::jsonb else parsed - 'review' end
+           where message_id = $1`, [messageId, String(note).slice(0, 500), review]);
+}
+
 // Reads one parsed email into the books. An email read before is skipped, unless it failed (it is read again: the
 // order email may have arrived since, or the parser was fixed) or `force` is set (reprocess).
 async function ingest(messageId, receivedAt, subject, p, { force = false } = {}) {
   const prev = await one('select ok from amazon_emails where message_id = $1', [messageId]);
   if (prev && prev.ok && !force) return 'seen';
-  // Read again from scratch: whatever this email booked before is replaced by what it says now
-  if (prev) await q('delete from amazon_refunds where message_id = $1', [messageId]);
+  // What this email booked before stays until the new reading replaces it: nothing is deleted first, so an error
+  // half-way never loses a refund that is already booked (it may be on a payment already made)
+  const booked = prev ? await q('select amazon_order_id, amount from amazon_refunds where message_id = $1', [messageId]) : [];
   let res = { ok: true, note: '' };
   if (p.kind === 'order') res = await ingestOrder(subject, receivedAt, p);
   else if (p.kind === 'refund') {
@@ -293,15 +335,52 @@ async function ingest(messageId, receivedAt, subject, p, { force = false } = {})
       : p.orderIds.length !== 1 ? 'cancellation email without a single order number: review the order in Editor'
       : 'cancellation read';
   }
+  let review = false;
+  if (booked.length) {
+    if (res.booked) {
+      // Re-booked under its (possibly corrected) order number: the old reading's row for another order goes
+      await q('delete from amazon_refunds where message_id = $1 and amazon_order_id <> $2', [messageId, p.orderIds[0]]);
+    } else if (res.copyOf) {
+      // The same money is booked by another email (a copy booked twice before this fix): this email's row goes
+      await q('delete from amazon_refunds where message_id = $1', [messageId]);
+    } else {
+      // Read again, it books nothing ("being processed", unreadable, no longer a refund): what it booked before is
+      // kept, never silently dropped, and the email is listed for a look
+      const was = booked.map((b) => `$${Number(b.amount).toFixed(2)} on ${b.amazon_order_id}`).join(', ');
+      res = { ok: false, note: `read again, this email no longer books its refund (${res.note || p.kind}). The ${was} it booked before is kept: check it` };
+      review = true;
+    }
+  }
   await q(
     `insert into amazon_emails (message_id, received_at, subject, kind, order_ids, ok, note, parsed, attempts, parser_version)
      values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,1,$9)
      on conflict (message_id) do update set received_at = excluded.received_at, subject = excluded.subject, kind = excluded.kind,
        order_ids = excluded.order_ids, ok = excluded.ok, note = excluded.note, parsed = excluded.parsed,
        attempts = coalesce(amazon_emails.attempts, 1) + 1, parser_version = excluded.parser_version`,
-    [messageId, receivedAt, subject, p.kind, p.orderIds, res.ok, res.note, JSON.stringify(p), PARSER_VERSION]
+    [messageId, receivedAt, subject, p.kind, p.orderIds, res.ok, res.note, JSON.stringify(review ? { ...p, review } : p), PARSER_VERSION]
   );
   return res.ok ? 'ok' : 'failed';
+}
+
+// A stored cancellation email's verdict: as this parser read it, or (stored by an older parser, which had no such
+// verdict or a looser one) judged again from its stored subject and text
+function storedConfirmed(r) {
+  if (r.parser_version === PARSER_VERSION && typeof r.parsed?.confirmed === 'boolean') return r.parsed.confirmed;
+  return cancelConfirmed(r.subject || '', String(r.parsed?.excerpt || '').slice(0, 1500));
+}
+
+// The month of a payment already made that covers the sale this Amazon order is linked to (null when none): the
+// payment that closed with that sale on it (settlement_freeze), or, for a payment recorded before closing existed,
+// a recorded payment for the sale's own pay period
+async function paidMonthOf(amazonOrderId) {
+  const f = await one(`select f.month from order_links k join settlement_freeze f on f.row_keys ? k.ebay_order_id
+                       where k.amazon_order_id = $1 order by f.month limit 1`, [amazonOrderId]);
+  if (f) return f.month;
+  const sale = await one('select o.created_at from order_links k join ebay_orders o on o.order_id = k.ebay_order_id where k.amazon_order_id = $1', [amazonOrderId]);
+  if (!sale) return null;
+  const month = settlePeriodOf(businessDay(sale.created_at), Number(await getSetting('settlement_day')) || 26);
+  const paid = await one('select paid from settlements where month = $1', [month]);
+  return paid && Number.isFinite(Number(paid.paid)) && Math.abs(Number(paid.paid)) >= 0.005 ? month : null;
 }
 
 // A confirmed cancellation email cancels the whole Amazon purchase when it says the order was cancelled, or when the
@@ -309,13 +388,11 @@ async function ingest(messageId, receivedAt, subject, p, { force = false } = {})
 // order leaves the cost unknown (Amazon only charges for what ships), so the sale waits for its real cost. Runs after
 // every email sync, so a cancellation read before its order email, or before this rule existed, still gets applied.
 export async function applyCancellations() {
-  const rows = await q("select message_id, subject, order_ids, parsed, note from amazon_emails where kind = 'cancel' and array_length(order_ids, 1) = 1");
+  const rows = await q("select message_id, subject, order_ids, parsed, parser_version, note from amazon_emails where kind = 'cancel' and array_length(order_ids, 1) = 1");
   const done = [];
   for (const r of rows) {
     const id = r.order_ids[0];
-    // Emails stored before 'confirmed' existed are judged by their stored subject and text
-    const confirmed = r.parsed?.confirmed ?? cancelConfirmed(`${r.subject || ''}\n${String(r.parsed?.excerpt || '').slice(0, 1500)}`);
-    if (!confirmed) continue;
+    if (!storedConfirmed(r)) continue;
     const lines = await q('select line_key, quantity, order_status, line_total, source from amazon_lines where amazon_order_id = $1 and not ignored', [id]);
     if (!lines.length) continue; // the order email isn't in yet
     if (lines.every((l) => /cancel/i.test(l.order_status || ''))) continue;
@@ -327,10 +404,18 @@ export async function applyCancellations() {
       continue;
     }
     // Part of a multi-unit email order: its Grand Total no longer is the cost. A CSV line has its own per-item status.
-    const emailLines = lines.filter((l) => l.source === 'email' && l.line_total !== null);
-    if (emailLines.length) await q("update amazon_lines set line_total = null, updated_at = now() where amazon_order_id = $1 and source = 'email'", [id]);
-    await q('update amazon_emails set ok = false, note = $2 where message_id = $1', [r.message_id,
-      `one item of this ${units}-unit order was cancelled: its Grand Total is no longer the cost. Enter the Amazon cost for this sale`]);
+    const partNote = `one item of this ${units}-unit order was cancelled: its Grand Total is no longer the cost. Enter the Amazon cost for this sale`;
+    if (lines.some((l) => l.source === 'email' && l.line_total !== null)) {
+      // Its sale is on a payment already made: that payment's cost is never taken away after the fact. Listed instead,
+      // so the real charge is checked and any difference goes on the next payment.
+      const month = await paidMonthOf(id);
+      if (month) {
+        await flagEmail(r.message_id, `one item of this ${units}-unit order was cancelled, but its sale is on the ${month} payment, already made: its cost was left as it is. Check what Amazon charged and correct it on the next payment`, { review: true });
+        continue;
+      }
+      await q("update amazon_lines set line_total = null, updated_at = now() where amazon_order_id = $1 and source = 'email'", [id]);
+    }
+    await flagEmail(r.message_id, partNote);
   }
   return done;
 }
@@ -341,15 +426,27 @@ const selfAddress = (from) => {
   return Boolean(me) && String(from || '').toLowerCase().split(/[\s,;<>]+/).includes(me);
 };
 
+// An email skipped as not an Amazon order / refund / cancellation that is stored as failed (a legacy "has shipped"
+// email once read as an order, a retried one that now reads differently) is marked sorted, so it stops being retried
+// and stops warning. Anything it booked is left alone.
+async function settleSkipped(id, kind) {
+  await q(`update amazon_emails set ok = true, kind = $2, note = 'not an Amazon order/refund/cancel email (re-read)', parser_version = $3
+           where message_id = $1 and not ok`, [id, kind, PARSER_VERSION]);
+}
+
 export async function ingestMessage({ messageId, subject = '', text = '', html = '', date, from = '' }, opts = {}) {
   const parsed = parseAmazonEmail({ subject, text, html, date });
-  if (parsed.kind === 'other' || parsed.kind === 'shipment') return 'seen';
-  if (parsed.forwarded && !parsed.fromAmazon) return 'seen'; // a forward that isn't an Amazon email
-  // A forward sent FROM this account (its Sent copy shows up in Gmail's All Mail) is a copy of an email already read
-  if (parsed.forwarded && selfAddress(from)) return 'seen';
-  if (parsed.originalDate) date = parsed.originalDate;
   // No Message-ID (a webhook post): the email's own content is its id, so posting it twice never books it twice
   const id = messageId || hashId([subject, date, text, html]);
+  const skip = parsed.kind === 'other' || parsed.kind === 'shipment'
+    || (parsed.forwarded && !parsed.fromAmazon) // a forward that isn't an Amazon email
+    // A forward sent FROM this account (its Sent copy shows up in Gmail's All Mail) is a copy of an email already read
+    || (parsed.forwarded && selfAddress(from));
+  if (skip) {
+    await settleSkipped(id, ['other', 'shipment'].includes(parsed.kind) ? parsed.kind : 'other');
+    return 'seen';
+  }
+  if (parsed.originalDate) date = parsed.originalDate;
   const result = await ingest(id, date ? new Date(date) : null, clean(subject), parsed, opts);
   if (parsed.kind === 'cancel' || parsed.kind === 'order') await applyCancellations();
   return result;
@@ -423,6 +520,14 @@ async function retryableFailed() {
      order by received_at desc nulls last limit 50`, [FAILED_WINDOW_DAYS, MAX_TRIES, PARSER_VERSION])).map((r) => r.message_id);
 }
 
+// An email that threw while being read: stored as failed, so it is listed and read again on the next syncs
+async function storeReadError(messageId, subject, e) {
+  await q(`insert into amazon_emails (message_id, received_at, subject, kind, order_ids, ok, note, attempts, parser_version)
+           values ($1, now(), $2, $3, '{}', false, $4, 1, $5)
+           on conflict (message_id) do update set ok = false, note = excluded.note, attempts = coalesce(amazon_emails.attempts, 1) + 1`,
+  [messageId, subject || '', classify(subject || ''), `could not be read: ${e.message}`.slice(0, 300), PARSER_VERSION]);
+}
+
 const fmtFailed = (failed) => `${failed.length} Amazon email${failed.length > 1 ? 's' : ''} could not be read and need${failed.length > 1 ? '' : 's'} a look: ${failed.slice(0, 3).map((f) => `"${String(f.subject || '').slice(0, 60)}" (${f.reason})`).join('; ')}`;
 
 let running = null;
@@ -447,7 +552,16 @@ export async function syncEmail() {
         const retry = new Set(await retryableFailed());
         const listed = new Set(headers.map((h) => h.messageId));
         const missing = [...retry].filter((id) => !listed.has(id));
-        if (missing.length) headers.push(...(await box.byIds(missing)).filter((h) => !listed.has(h.messageId)));
+        if (missing.length) {
+          for (const h of await box.byIds(missing)) {
+            if (listed.has(h.messageId)) continue;
+            // A stored failure that is not an order / refund / cancellation at all (a legacy "has shipped" email once
+            // read as an order) is marked sorted instead of being downloaded again on every sync
+            const kind = classify(h.subject || '', '');
+            if (['other', 'shipment'].includes(kind)) { await settleSkipped(h.messageId, kind); counts.seen++; continue; }
+            headers.push(h);
+          }
+        }
         const wanted = [];
         for (const h of headers) {
           if (!retry.has(h.messageId) && (await one('select 1 from amazon_emails where message_id = $1', [h.messageId]))) { counts.seen++; continue; }
@@ -460,10 +574,7 @@ export async function syncEmail() {
             // One bad email never stops the rest; it is stored as failed so it is read again next time
             counts.failed++;
             errors.push(e.message);
-            await q(`insert into amazon_emails (message_id, received_at, subject, kind, order_ids, ok, note, attempts, parser_version)
-                     values ($1, now(), $2, $3, '{}', false, $4, 1, $5)
-                     on conflict (message_id) do update set ok = false, note = excluded.note, attempts = coalesce(amazon_emails.attempts, 1) + 1`,
-            [h.messageId, h.subject, classify(h.subject || ''), `could not be read: ${e.message}`.slice(0, 300), PARSER_VERSION]).catch(() => {});
+            await storeReadError(h.messageId, h.subject, e).catch(() => {});
           }
         }
       } finally {
@@ -524,16 +635,31 @@ export async function reprocessEmail() {
       const reread = new Set();
       try {
         for (const mail of staged) {
-          try { counts[await ingestMessage(mail, { force: true })]++; reread.add(mail.messageId); } catch { counts.failed++; }
+          try {
+            counts[await ingestMessage(mail, { force: true })]++;
+            reread.add(mail.messageId);
+          } catch (e) {
+            // Never swallowed: the email is stored as failed (listed, and read again on the next sync). What it booked
+            // before is still there, since a re-read never deletes before it replaces.
+            counts.failed++;
+            if (mail.messageId) await storeReadError(mail.messageId, mail.subject, e).catch(() => {});
+          }
         }
-        // A cancellation an email used to make (a "Noise Cancelling" title, a cancellation REQUEST) is undone when, read
-        // again, no confirmed cancellation remains for that order
+        // A cancellation an email used to make is undone only when, read again, that order has no cancellation email
+        // left at all (a "Noise Cancelling" order email the old parser took for a cancellation). One that is still a
+        // cancellation but no longer reads as confirmed never un-cancels on wording alone: it is listed for a look.
         for (const [mid, orderId] of wasCancelling) {
           if (!reread.has(mid)) continue;
-          const still = await q("select subject, parsed from amazon_emails where kind = 'cancel' and order_ids = array[$1]::text[]", [orderId]);
-          if (still.some((r) => r.parsed?.confirmed ?? cancelConfirmed(`${r.subject || ''}
-${String(r.parsed?.excerpt || '').slice(0, 1500)}`))) continue;
-          await q("update amazon_lines set order_status = 'Ordered', updated_at = now() where amazon_order_id = $1 and source = 'email' and order_status ~* 'cancel'", [orderId]);
+          const still = await q("select message_id, subject, parsed, parser_version from amazon_emails where kind = 'cancel' and order_ids = array[$1]::text[]", [orderId]);
+          if (!still.length) {
+            await q("update amazon_lines set order_status = 'Ordered', updated_at = now() where amazon_order_id = $1 and source = 'email' and order_status ~* 'cancel'", [orderId]);
+            continue;
+          }
+          if (still.some(storedConfirmed)) continue;
+          if (!(await one("select 1 from amazon_lines where amazon_order_id = $1 and order_status ~* 'cancel' limit 1", [orderId]))) continue;
+          for (const r of still) {
+            await flagEmail(r.message_id, 'read again, this cancellation email does not clearly say the order was cancelled. The order stays cancelled: check it on Amazon', { review: true });
+          }
         }
         await applyCancellations();
       } finally {
@@ -552,17 +678,22 @@ ${String(r.parsed?.excerpt || '').slice(0, 1500)}`))) continue;
 }
 
 // Emails from the last 60 days that could not be fully read and still leave something unsorted. An order email is
-// sorted once its Amazon order has a known cost (or a typed-in cost on its sale) and is linked; a refund or other
-// email stays until it is dismissed.
+// sorted once its Amazon order has a known cost (or a typed-in cost on its sale) and is linked; a "refund being
+// processed" email once a refund for its order is booked. One flagged for review, a refund or any other email stays
+// until it is dismissed.
 export async function failedEmails() {
   const rows = await q(
-    `select message_id, subject, received_at, kind, order_ids, note from amazon_emails
+    `select message_id, subject, received_at, kind, order_ids, note, coalesce((parsed->>'review')::boolean, false) as review,
+            coalesce((parsed->>'pending')::boolean, false) as pending from amazon_emails
      where not ok and not coalesce(dismissed, false) and coalesce(received_at, created_at) > now() - make_interval(days => $1)
      order by received_at desc nulls last`, [FAILED_WINDOW_DAYS]);
   const out = [];
   for (const r of rows) {
     let sorted = false;
-    if (['order', 'cancel'].includes(r.kind) && r.order_ids?.length) {
+    if (r.review) sorted = false;
+    else if (r.kind === 'refund' && r.pending && r.order_ids?.length) {
+      sorted = Boolean(await one('select 1 from amazon_refunds where amazon_order_id = any($1::text[]) limit 1', [r.order_ids]));
+    } else if (['order', 'cancel'].includes(r.kind) && r.order_ids?.length) {
       sorted = true;
       for (const id of r.order_ids) {
         const s = await one(
