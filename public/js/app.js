@@ -11,6 +11,8 @@ import { renderListingsPanel } from './listings-panel.js';
 import { renderPromotionsPanel } from './promotions-panel.js';
 import { renderWatch } from './watch-page.js';
 import { renderReports } from './reports-page.js';
+import { renderOverview } from './overview-page.js';
+import { dashPrefs, showPage, showAlert, PAGE_OPTIONS, CARD_OPTIONS, ALERT_OPTIONS, defaultPrefs } from './dash-prefs.js';
 import { settleMonth, allMonths, settlePeriodOf, settlePeriodRange, CYCLE_START } from './settlement.js';
 
 export { ORDER_EXPORT };
@@ -22,7 +24,7 @@ const dueDayOf = () => Number(state.data?.settings?.settlement_day) || 26;
 const currentPeriod = () => settlePeriodOf(azDay(), dueDayOf());
 export const state = {
   data: null,
-  range: store('dd_range') || '30d',
+  range: ['today', 'period', 'lastperiod', 'month', 'all', 'custom'].includes(store('dd_range')) ? store('dd_range') : 'period',
   month: store('dd_month') || settlePeriodOf(azDay(), 26), // a payment (pay period), see rangeFor
   custom: store('dd_custom') || { from: addDays(azDay(), -29), to: azDay() },
   gran: null,
@@ -34,19 +36,20 @@ const tables = new Set();
 export const trackTable = (t) => { tables.add(t); return t; };
 
 const PAGES = [
-  { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit at a glance', group: 'Insights' },
-  { id: 'ask', label: 'Ask AI', icon: 'spark', sub: 'Ask about the business in your own words · every answer comes straight from your numbers', noRange: true, group: 'Insights' },
-  { id: 'trends', label: 'Analytics', icon: 'trends', sub: 'Patterns, timing, pricing and geography', group: 'Insights' },
-  { id: 'products', label: 'Products', icon: 'products', sub: 'What sells, what earns, what bleeds', group: 'Insights' },
-  { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every eBay sale with its full profit math', group: 'Insights' },
-  { id: 'watch', label: 'Watchlist', icon: 'alert', sub: 'Money to chase and things to fix: Amazon refunds, unmatched purchases, weak products', noRange: true, group: 'Insights' },
-  { id: 'returns', label: 'Returns', icon: 'returns', sub: 'Refunds, reasons and recovery', group: 'Insights' },
-  { id: 'settlement', label: 'Settlement', icon: 'settle', sub: 'Monthly partner settlement', noRange: true, group: 'Partners' },
-  { id: 'reports', label: 'Reports', icon: 'receipt', sub: 'Monthly statement for the partners and the year-end export for taxes', noRange: true, group: 'Partners' },
-  { id: 'costs', label: 'Operating costs', icon: 'wallet', sub: 'Monthly business expenses that come out of profit before the split', noRange: true, group: 'Partners' },
-  { id: 'editor', label: 'Editor', icon: 'editor', sub: 'Spreadsheet mode: manual adjustments and matching', noRange: true, group: 'Data' },
-  { id: 'import', label: 'Monthly sheets', icon: 'sheet', sub: 'Check the partners\' sheets against the site', noRange: true, group: 'Data' },
-  { id: 'settings', label: 'Settings', icon: 'settings', sub: 'eBay connection, Amazon email import, partners, goals', noRange: true, group: 'Data' },
+  { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit and what is owed, at a glance', group: 'Main' },
+  { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every sale and what it made', group: 'Main' },
+  { id: 'settlement', label: 'Payments', icon: 'settle', sub: 'What Drew sends Myles each pay period', noRange: true, group: 'Main' },
+  { id: 'reports', label: 'Statements', icon: 'receipt', sub: 'A statement for each payment, and the year-end export for taxes', noRange: true, group: 'Main' },
+  { id: 'costs', label: 'Monthly costs', icon: 'wallet', sub: 'Subscriptions and tools that come out of profit before the split', noRange: true, group: 'Main' },
+  { id: 'promotions', label: 'Promotions', icon: 'target', sub: 'Promoted listings: ad fees and what they sold', noRange: true, group: 'Main' },
+  { id: 'ask', label: 'Ask AI', icon: 'spark', sub: 'Ask about the business in your own words · every answer comes straight from your numbers', noRange: true, group: 'Main' },
+  { id: 'trends', label: 'Analytics', icon: 'trends', sub: 'Patterns, timing, pricing and geography', group: 'More' },
+  { id: 'products', label: 'Products', icon: 'products', sub: 'Listings, views and what sells', group: 'More' },
+  { id: 'returns', label: 'Returns', icon: 'returns', sub: 'Refunds, reasons and recovery', group: 'More' },
+  { id: 'watch', label: 'Watchlist', icon: 'alert', sub: 'Money to chase and things to fix: Amazon refunds, unmatched purchases, weak products', noRange: true, group: 'More' },
+  { id: 'editor', label: 'Editor', icon: 'editor', sub: 'Spreadsheet mode: fix a cost or match by hand', noRange: true, group: 'More' },
+  { id: 'import', label: 'Monthly sheets', icon: 'sheet', sub: 'Check the partners\' sheets against the site', noRange: true, group: 'More' },
+  { id: 'settings', label: 'Settings', icon: 'settings', sub: 'Connections, partners, and what the dashboard shows', noRange: true, group: 'Settings' },
 ];
 
 // ---------------------------------------------------------------- data
@@ -58,7 +61,17 @@ export async function loadData() {
   return state.data;
 }
 
-const range = () => rangeFor(state.range, state.custom, state.month, { dueDay: dueDayOf() });
+// Today, this pay period (27th to 26th), the one before it, a pay period picked from the list, all time, or dates
+const prevPeriod = (m) => { const [y, mo] = m.split('-').map(Number); return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`; };
+const range = () => {
+  const dueDay = dueDayOf();
+  if (state.range === 'today') return rangeFor('1d', null, null, { dueDay });
+  if (state.range === 'period') return rangeFor('month', null, currentPeriod(), { dueDay });
+  if (state.range === 'lastperiod') return rangeFor('month', null, prevPeriod(currentPeriod()), { dueDay });
+  return rangeFor(state.range, state.custom, state.month, { dueDay });
+};
+export const currentRange = range;
+export { currentPeriod };
 const scoped = () => inRange(state.data.orders, range());
 const prevScoped = () => inRange(state.data.orders, previousRange(range()));
 
@@ -70,12 +83,13 @@ function renderNav() {
     orders: d ? d.orders.filter((o) => o.status === 'awaiting_cost').length : 0,
   };
   const groups = [];
-  for (const p of PAGES) {
+  // Pages switched off in Settings -> Customize dashboard are left out of the menu (the open one always shows)
+  for (const p of PAGES.filter((x) => x.id === state.page || !d || showPage(d.settings, x.id))) {
     let g = groups.find((x) => x.name === p.group);
     if (!g) { g = { name: p.group, pages: [] }; groups.push(g); }
     g.pages.push(p);
   }
-  $('#nav').innerHTML = groups.map((g) => `<div class="nav-label">${g.name}</div>${g.pages.map(navLink).join('')}`).join('');
+  $('#nav').innerHTML = groups.map((g) => `${g.name === 'Main' || g.name === 'Settings' ? '' : `<div class="nav-label">${g.name}</div>`}${g.name === 'Settings' ? '<div class="nav-sep"></div>' : ''}${g.pages.map(navLink).join('')}`).join('');
   function navLink(p) {
     let b = '';
     if (p.id === 'editor' && badges.editor) b = `<span class="badge" title="Suggested matches to review">${badges.editor}</span>`;
@@ -110,13 +124,14 @@ function emailState() {
   if (!m.configured) return { dot: 'warn', line: 'Not connected', action: 'Set up' };
   if (m.running) return { dot: 'spin', line: 'Checking mail…', action: '' };
   const unread = emailFailures(m).length;
-  if (m.last?.ok && unread) return { dot: 'bad', line: `${unread} email${unread === 1 ? '' : 's'} not read`, action: 'Details' };
-  if (m.last?.ok) return { dot: 'ok', line: `Checked ${ago(m.last.at)}`, action: '' };
+  const ok = m.last?.ok || m.last?.connected === true; // the mailbox was read
+  if (ok && unread) return { dot: 'ok', line: `Checked ${ago(m.last.at)} · ${unread} to look at`, action: 'Details' };
+  if (ok) return { dot: 'ok', line: `Checked ${ago(m.last.at)}`, action: '' };
   if (m.last) return { dot: 'bad', line: 'Last check failed', action: 'Details' };
   return { dot: 'warn', line: 'Not checked yet', action: '' };
 }
 
-const RANGES = [['1d', '1D'], ['7d', '7D'], ['30d', '30D'], ['90d', '90D'], ['mtd', 'MTD'], ['ytd', 'YTD'], ['12m', '12M'], ['all', 'All'], ['month', 'Month'], ['custom', 'Custom']];
+const RANGES = [['today', 'Today'], ['period', 'This pay period'], ['lastperiod', 'Last pay period'], ['month', 'Pick a period'], ['all', 'All time'], ['custom', 'Dates']];
 function renderRangeSeg() {
   $('#range-seg').innerHTML = RANGES.map(([k, l]) => `<button data-r="${k}" class="${state.range === k ? 'on' : ''}">${l}</button>`).join('');
   $('#custom-range').classList.toggle('hidden', state.range !== 'custom');
@@ -273,7 +288,7 @@ export function renderPage() {
   el.classList.add('page-in');
   renderDueBar();
   if (!state.data) { el.innerHTML = skeleton(); return; }
-  const fn = { overview, ask: renderAsk, watch: renderWatch, reports: renderReports, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
+  const fn = { overview: renderOverview, promotions: (x) => renderPromotionsPanel(x), ask: renderAsk, watch: renderWatch, reports: renderReports, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
   // A failing sync is shown on every page, not only the Overview, so nobody pays or reads numbers from stale data
   if (p.id !== 'overview') { const loud = setupBanner({ failuresOnly: true }); if (loud) el.insertAdjacentHTML('afterbegin', loud); }
@@ -285,7 +300,7 @@ function renderDueBar() {
   const bar = $('#due-bar');
   const d = state.data;
   if (!bar) return;
-  if (!d) { bar.hidden = true; return; }
+  if (!d || !showAlert(d.settings, 'due')) { bar.hidden = true; return; }
   const A = d.settings.partner_amazon;
   const B = d.settings.partner_ebay;
   const dueDay = d.settings.settlement_day ?? 26;
@@ -447,20 +462,24 @@ function emptyState(el) {
     <div class="t">${has ? 'No eBay sales in this date range' : 'No sales yet'}</div>
     <p>${has ? 'Nothing was sold between these dates. Widen the range or pick another month.' : 'Connect eBay and the Amazon email import, or upload a monthly settlement sheet, and the numbers appear here.'}</p>
     <div class="actions">${has
-      ? '<button class="btn" data-range="30d">Last 30 days</button><button class="btn" data-range="all">All time</button>'
+      ? '<button class="btn" data-range="period">This pay period</button><button class="btn" data-range="all">All time</button>'
       : `<a class="btn primary" href="#/settings">${ICONS.settings} Open Settings</a><a class="btn" href="#/import">${ICONS.sheet} Upload a monthly sheet</a>`}</div>
   </div></div>`;
   $$('[data-range]', el).forEach((b) => b.addEventListener('click', () => { state.range = b.dataset.range; store('dd_range', state.range); renderRangeSeg(); renderPage(); }));
 }
 
 // One compact notice per issue. Soft setup hints get an × (remembered for the session); failures never do.
+// Which Settings -> Customize dashboard switch an alert belongs to
+const alertKind = (key) => (/^(ebay-setup|email-setup|demo|ebay-expiring)$/.test(key) ? 'setup' : key.startsWith('email-unread') ? 'emails' : key === 'refund-unmatched' ? 'refunds'
+  : key.startsWith('ebay-orderless') ? 'charges' : key.startsWith('ebay-holds') ? 'holds' : 'sync');
 function notice({ key, kind = '', icon = ICONS.alert, text, action, href, soft = false }) {
   if (soft && dismissed.has(key)) return '';
+  if (state.data && !showAlert(state.data.settings, alertKind(key))) return '';
   return `<div class="banner ${kind}" data-k="${key}">${icon}<div>${text}</div>${action ? `<a class="btn sm" href="${href}">${action}</a>` : ''}${soft ? `<button class="banner-x" data-k="${key}" aria-label="Dismiss">${ICONS.x}</button>` : ''}</div>`;
 }
 
 // `failuresOnly`: just the loud failures (a sync step or the email import not working), shown on every other page
-function setupBanner({ failuresOnly = false } = {}) {
+export function setupBanner({ failuresOnly = false } = {}) {
   const d = state.data;
   const out = [];
   if (!d.ebay.configured)
@@ -482,10 +501,13 @@ function setupBanner({ failuresOnly = false } = {}) {
     const what = missing.length > 1 ? `${missing.slice(0, -1).join(', ')} and ${missing.at(-1)}` : missing[0];
     out.push(notice({ key: 'ebay-steps', kind: 'bad', text: `<b>eBay sync is incomplete: ${esc(steps.map((i) => i.step).join(' and '))} ${steps.every((i) => i.problem === 'stale') ? 'behind' : 'not working'}.</b> ${esc(what[0].toUpperCase() + what.slice(1))} may be missing, so the numbers (and what is owed) can be wrong until it syncs. <span class="muted">${esc(ebayIssueText(steps))}</span>`, action: 'Details', href: '#/settings' }));
   }
+  // Emails the reader didn't understand: the import itself works, so this is a heads-up, not a failure. The Overview
+  // lists them (with Dismiss) in Needs attention, so the banner is for the other pages.
   const unread = emailFailures(d.email);
-  if (unread.length)
-    out.push(notice({ key: 'email-unread', kind: 'bad', icon: ICONS.mail, text: `<b>${unread.length === 1 ? 'An Amazon email couldn’t be read' : `${unread.length} Amazon emails couldn’t be read`}.</b> Their costs or refunds are not in the numbers until fixed. ${unread.slice(0, 3).map((f) => `<span class="muted">${esc(emailFailureText(f).slice(0, 120))}</span>`).join(' ')}${unread.length > 3 ? ` <span class="muted">and ${unread.length - 3} more</span>` : ''}`, action: 'Details', href: '#/settings?focus=email' }));
-  if (d.email.configured && !d.email.running && d.email.last && !d.email.last.ok)
+  if (unread.length && !(state.page === 'overview'))
+    out.push(notice({ key: `email-unread-${unread.length}`, kind: 'warn', icon: ICONS.mail, soft: true, text: `<b>${unread.length === 1 ? 'An Amazon email couldn’t be read' : `${unread.length} Amazon emails couldn’t be read`}.</b> Email is still working; these are usually multi-item or gift-card orders. If one is for an eBay sale, enter its cost; if not, dismiss it on the Overview.`, action: 'Overview', href: '#/overview' }));
+  // A check that read the mailbox is not failing, even if some emails in it couldn't be understood
+  if (d.email.configured && !d.email.running && d.email.last && !d.email.last.ok && d.email.last.connected !== true)
     out.push(notice({ key: 'email-failing', kind: 'bad', text: `<b>Amazon email check is failing.</b> New Amazon costs are not coming in. <span class="muted">${esc((d.email.last.log || []).join(' ').slice(0, 180))}</span>`, action: 'Details', href: '#/settings?focus=email' }));
   else if (d.email.configured && !d.email.running && d.email.last && stale(d.email.last.at, 3))
     out.push(notice({ key: 'email-stale', text: `<b>Amazon email hasn't been checked since ${fmtDateTime(d.email.last.at)}.</b> It normally runs every 30 minutes.`, action: 'Details', href: '#/settings?focus=email' }));
@@ -509,453 +531,9 @@ function setupBanner({ failuresOnly = false } = {}) {
     out.push(notice({ key: `ebay-holds-${holds.map((h) => h.id).join('|').slice(-120)}`, kind: 'bad', text: `<b>${holds.length === 1 ? 'A return hold has' : `${holds.length} return holds have`} been open over 30 days.</b> eBay held the money and never released or refunded it. Check the case on eBay. ${holds.slice(0, 3).map((h) => `<span class="muted">order ${esc(h.order_id || '?')}: ${money(h.amount, 2)} since ${fmtDate(h.since)}</span>`).join(' ')}`, action: 'Returns', href: '#/returns' }));
   if (d.orders.some((o) => o.order_id.startsWith('DEMO-')))
     out.push(notice({ key: 'demo', kind: 'info', icon: ICONS.info, soft: true, text: "<b>You're looking at demo data.</b> It shows how the dashboard works before your real eBay and Amazon data arrives. Remove it any time.", action: 'Remove demo data', href: '#/settings' }));
-  const loud = /data-k="(ebay-steps|email-unread|ebay-failing|email-failing|ebay-reconnect)"/;
+  const loud = /data-k="(ebay-steps|ebay-failing|email-failing|ebay-reconnect)"/;
   const html = out.filter((h) => h && (!failuresOnly || loud.test(h))).join('');
   return html ? `<div class="banners">${html}</div>` : '';
-}
-
-// Robinhood-style running profit: the line is the running total over the range; drag or hover across it and
-// the headline shows the total up to that point. Operating costs are spread evenly across the period, so the
-// last point always equals the headline. Optional dashed line: the previous period of the same length.
-function heroScrub({ r, all, s, ox, oxPrev, biz, hasPrev, rangeLabel }) {
-  const el = $('#hero-spark');
-  const c = colors();
-  const g = r.start && r.end - r.start <= 1.5 * DAY ? 'hour' : 'day';
-  const run = (bs, total, opex) => {
-    let acc = 0;
-    const out = bs.map((b, i) => { acc += b.net; return Math.round((acc - (opex * (i + 1)) / bs.length) * 100) / 100; });
-    // Guard: whatever the bucketing, the final point is exactly the headline figure
-    if (out.length) out[out.length - 1] = Math.round((total - opex) * 100) / 100;
-    return out;
-  };
-  const bs = buckets(r, all, g);
-  const cur = run(bs, s.net, ox.total);
-  const labels = bs.map((b) => (g === 'hour' ? `${fmtDate(r.start)} · ${bucketLabel(b.key, g)}` : bucketLabel(b.key, g)));
-  const cmp = state.compare && hasPrev ? (() => {
-    const pr = previousRange(r);
-    const pb = buckets(pr, prevScoped(), g).slice(-bs.length);
-    return { run: run(pb, summarize(prevScoped()).net, oxPrev.total), labels: pb.map((b) => bucketLabel(b.key, g)) };
-  })() : null;
-  const up = biz >= 0;
-  const col = up ? c.profit : c.bad;
-  const chart = mount(el, {
-    grid: { left: 0, right: 0, top: 10, bottom: 2 },
-    xAxis: { type: 'category', show: false, boundaryGap: false, data: labels },
-    yAxis: { type: 'value', show: false, scale: true },
-    tooltip: { trigger: 'axis', showContent: false, triggerOn: 'mousemove|click', axisPointer: { type: 'line', snap: true, lineStyle: { color: c.ink3, width: 1 }, label: { show: false } } },
-    series: [
-      ...(cmp ? [{ type: 'line', data: cmp.run, smooth: 0.25, symbol: 'none', silent: true, z: 1, lineStyle: { width: 1.25, type: [4, 4], color: c.ink4 } }] : []),
-      { type: 'line', data: cur, smooth: 0.25, symbol: 'circle', symbolSize: 8, showSymbol: false, z: 3,
-        lineStyle: { width: 2, color: col, cap: 'round', join: 'round' }, itemStyle: { color: col, borderColor: c.surface, borderWidth: 2 },
-        emphasis: { scale: 1.4 }, areaStyle: { color: areaFade(col, 0.22) },
-        markLine: { silent: true, symbol: 'none', label: { show: false }, lineStyle: { color: c.ink4, type: [2, 4], width: 1 }, data: [{ yAxis: 0 }] } },
-    ],
-  });
-  const val = $('#hero-value');
-  const at = $('#hero-at');
-  const idle = () => {
-    val.textContent = money(biz, 2);
-    val.classList.toggle('neg', biz < 0);
-    at.innerHTML = cmp ? `<span class="k-dash"></span>Previous period ended at <b>${money(cmp.run.at(-1) ?? 0, 2)}</b> · drag to compare day by day` : 'Drag across the chart to see the running profit';
-    at.classList.remove('on');
-  };
-  idle();
-  if (!chart) return;
-  chart.on('updateAxisPointer', (e) => {
-    const i = e.axesInfo?.[0]?.value;
-    if (i === undefined || i === null || cur[i] === undefined) return;
-    const v = cur[i];
-    const day = bs[i].net;
-    val.textContent = money(v, 2);
-    val.classList.toggle('neg', v < 0);
-    const vs = cmp && cmp.run[i] !== undefined ? ` · <span class="k-dash"></span>same point last period ${money(cmp.run[i], 2)} <b class="${v - cmp.run[i] >= 0 ? 'pos' : 'neg'}">${v - cmp.run[i] >= 0 ? '+' : '−'}${money(Math.abs(v - cmp.run[i]), 2)}</b>` : '';
-    at.innerHTML = `<b>${esc(labels[i])}</b> · ${day >= 0 ? '+' : '−'}${money(Math.abs(day), 2)} item profit ${g === 'hour' ? 'that hour' : 'that day'} · ${count(bs[i].countedOrders)} sales${vs}`;
-    at.classList.add('on');
-  });
-  chart.getZr().on('globalout', idle);
-  el.addEventListener('touchend', () => setTimeout(idle, 1200), { passive: true });
-  void rangeLabel;
-}
-
-// ---------------------------------------------------------------- OVERVIEW
-function overview(el) {
-  const r = range();
-  const all = scoped();
-  if (!all.length) { el.innerHTML = setupBanner(); const d = document.createElement('div'); el.appendChild(d); emptyState(d); return; }
-  const s = summarize(all);
-  const p = summarize(prevScoped());
-  const hasPrev = Boolean(r.start) && prevScoped().length > 0;
-  const gran = state.gran || autoGran(r, all);
-  const series = buckets(r, all, gran);
-  const dailyForSpark = buckets(r, all, autoGran(r, all));
-  const c = colors();
-  const expenses = state.data.books.expenses;
-  const ox = opexFor(r, expenses, { dueDay: dueDayOf() });
-  const oxPrev = r.start ? opexFor(previousRange(r), expenses, { dueDay: dueDayOf() }) : { total: 0 };
-  // A payment picked in the range bar shows that payment's own numbers, to the cent of the Settlement page
-  const rangeSettle = r.month ? settleMonth({ month: r.month, orders: state.data.orders, expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) }) : null;
-  // The period's own numbers (what a sheet kept for the period shows); corrections for an earlier paid period that
-  // ride on this payment are shown under the headline, not in it
-  const rangeOwn = rangeSettle?.own ? { ...rangeSettle, ...rangeSettle.own } : rangeSettle;
-  const biz = rangeOwn ? rangeOwn.businessProfit : s.net - ox.total;
-  const bizPrev = p.net - oxPrev.total;
-  // Monthly-sheet rows are eBay payouts after fees, and their refund rows carry eBay's refund fee, not a buyer refund
-  const split = refundSplit(all.filter((o) => o.counted));
-  const refundFees = split.fee;
-  const sheetRows = all.some((o) => o.counted && o.source === 'ledger');
-  const adPart = `ad fees ${money(s.adFees, 2)}`;
-  const feeFoot = s.fees < 0.005 && sheetRows
-    ? `sheet rows are already net of eBay fees · ${adPart}`
-    : `${pct(s.revenue ? s.fees / s.revenue : null)} of revenue${sheetRows ? ' · sheet rows already net' : ''} · ${adPart}`;
-
-  // goal + run rate, for the payment being built now (Arizona time): the card and the settlement use the same rows
-  const curMonth = currentPeriod();
-  const curRange = settlePeriodRange(curMonth, dueDayOf());
-  const thisSettle = settleMonth({ month: curMonth, orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) });
-  const cur = thisSettle.own ? { ...thisSettle, ...thisSettle.own } : thisSettle; // the period's own numbers
-  const ms = summarize(state.data.orders.filter((o) => periodMonth(o) === curMonth));
-  const periodDays = daysBetween(curRange.from, curRange.to) + 1;
-  const dayOfPeriod = Math.min(periodDays, Math.max(0, daysBetween(curRange.from, azDay()) + azHour(Date.now()) / 24));
-  const projected = dayOfPeriod > 0.5 ? (cur.orderProfit / dayOfPeriod) * periodDays : null;
-  const goal = Number(state.data.settings.monthly_goal) || 0;
-
-  const top = byProduct(all, state.data.orders).filter((x) => x.countedRows > 0).sort((a, b) => b.net - a.net).slice(0, 8);
-  const allTime = summarize(state.data.orders);
-  const oldAwaiting = state.data.orders.filter((o) => o.status === 'awaiting_cost' && Date.now() - new Date(o.created_at) > 3 * DAY);
-  // Sales the server holds back because an Amazon email couldn't be read (only sent by servers that have that status)
-  const needsReview = state.data.orders.filter((o) => o.status === 'needs_review');
-  const openReturns = state.data.orders.filter((o) => o.returns.some((x) => !/CLOSED/i.test(x.state || '')));
-
-  // what we owe each other: this month's settlement + the running balance across every month
-  const A = state.data.settings.partner_amazon;
-  const B = state.data.settings.partner_ebay;
-  const settleArgs = { orders: state.data.orders, expenses: state.data.books.expenses, settlements: state.data.books.settlements, splitAmazon: Number(state.data.settings.split_amazon) };
-  const dueDay = state.data.settings.settlement_day ?? 26;
-  const allSettled = allMonths(state.data.orders, state.data.books.expenses).map((m) => settleMonth({ month: m, ...settleArgs }));
-  const view = (x) => settleView(x, A, B);
-  // Net position across every month: > 0 means B owes A, < 0 means A owes B (a loss month can flip the direction)
-  const owedAll = Math.round(allSettled.reduce((t, x) => t + view(x).signedOwed, 0) * 100) / 100;
-  // The card shows the payment picked in the range bar (Month range), otherwise the one being built now. From the
-  // 27th that is next month's payment: the one due on the 26th is already closed.
-  const pickedMonth = state.range === 'month' && /^\d{4}-\d{2}$/.test(state.month || '') ? state.month : null;
-  const cardMonth = pickedMonth || curMonth;
-  const cardSettle = cardMonth === curMonth ? thisSettle : settleMonth({ month: cardMonth, ...settleArgs });
-  const cv = view(cardSettle);
-  const cardDue = dueStatus(settlementDueDate(cardMonth, dueDay), { paid: cv.fullyPaid });
-  const settleStatus = (() => {
-    if (cv.paid === null) {
-      if (cv.nothingDue) return { cls: '', icon: ICONS.info, t: cardMonth === curMonth ? 'Nothing due yet' : 'Nothing to send', s: cardMonth === curMonth ? 'No settled sales in this pay period so far' : 'No amount due for this payment' };
-      if (cardDue.kind === 'overdue') return { cls: 'bad', icon: ICONS.alert, t: cardDue.text, s: `${esc(cv.from)} sends ${esc(cv.to)} · was due ${cardDue.label}` };
-      return { cls: 'warn', icon: ICONS.clock, t: cardDue.kind === 'soon' ? cardDue.text : 'Not paid yet', s: `${esc(cv.from)} sends by ${cardDue.label}` };
-    }
-    if (cv.fullyPaid) return { cls: 'good', icon: ICONS.check, t: 'Paid in full', s: cardSettle.paidAt ? `on ${fmtDate(cardSettle.paidAt)}` : 'Recorded on the monthly sheet' };
-    if (cv.outstanding > 0) return { cls: cardDue.kind === 'overdue' ? 'bad' : 'warn', icon: ICONS.clock, t: `${money(cv.outstanding, 2)} still owed`, s: `${money(cv.paid, 2)} paid so far · ${cardDue.text.toLowerCase()}` };
-    return { cls: 'info', icon: ICONS.info, t: `Overpaid by ${money(-cv.outstanding, 2)}`, s: `${money(cv.paid, 2)} paid by ${esc(cv.from)}` };
-  })();
-
-  // "What we owe each other": the most recent month still owed, plus anything older that is also outstanding
-  const unpaid = allSettled.filter((x) => view(x).outstanding > 0.009 && !view(x).nothingDue);
-  const latestUnpaid = unpaid[unpaid.length - 1];
-  const olderUnpaid = unpaid.slice(0, -1);
-  const settleCallout = (() => {
-    if (!latestUnpaid) return '';
-    const lv = view(latestUnpaid);
-    const due = dueStatus(settlementDueDate(latestUnpaid.month, dueDay));
-    // Older months can point either way, so describe them by their net direction
-    const olderNet = Math.round(olderUnpaid.reduce((t, x) => t + view(x).signedOwed, 0) * 100) / 100;
-    const olderDir = olderNet > 0 ? `${esc(B)} → ${esc(A)}` : `${esc(A)} → ${esc(B)}`;
-    const older = olderUnpaid.length ? ` <span class="muted">plus ${Math.abs(olderNet) >= 0.01 ? `${money(Math.abs(olderNet), 2)}${(olderNet > 0) !== !lv.reverse ? ` (${olderDir})` : ''} ` : ''}from ${olderUnpaid.length} earlier month${olderUnpaid.length > 1 ? 's' : ''}${olderUnpaid.some((x) => dueStatus(settlementDueDate(x.month, dueDay)).kind === 'overdue') ? ', overdue' : ''}</span>` : '';
-    return `<a class="callout ${due.kind}" href="#/settlement">
-      <span class="callout-ic">${ICONS.wallet}</span>
-      <span class="callout-body"><b>${esc(lv.from)} ${ICONS.arrow.replace('<svg', '<svg class="arr"')} ${esc(lv.to)}</b> <span class="callout-amt num">${money(lv.outstanding, 2)}</span> <span class="muted">for ${monthLabel(latestUnpaid.month, 'long')}</span>${older}</span>
-      <span class="pill ${due.kind === 'overdue' ? 'bad' : due.kind === 'soon' ? 'warn' : 'info'}">${due.kind === 'later' ? `Due ${fmtDate(settlementDueDate(latestUnpaid.month, dueDay))}` : due.text}</span>
-      <span class="callout-go">Open settlement ${ICONS.chevron}</span>
-    </a>`;
-  })();
-
-  // Settlement state block: one loud, unambiguous label (SETTLED / DUE / OVERDUE …) plus the day count
-  const stateLabel = settleStatus.cls === 'good' ? 'Settled' : settleStatus.cls === 'bad' ? 'Overdue'
-    : settleStatus.cls === 'warn' ? (cv.paid !== null ? 'Partly paid' : 'Due') : settleStatus.cls === 'info' ? 'Overpaid' : 'Nothing due';
-  const stateIcon = settleStatus.cls === 'good' ? ICONS.circleCheck : settleStatus.cls === 'bad' ? ICONS.alert : settleStatus.cls === 'warn' ? ICONS.clock : settleStatus.cls === 'info' ? ICONS.info : ICONS.minus;
-  const stateSide = (() => {
-    if (cv.nothingDue || cv.settled || cardDue.kind === 'paid') return '';
-    const d = cardDue.days;
-    if (d < 0) return `<div class="side"><div class="big num">${-d}</div><div class="sm">${-d === 1 ? 'day' : 'days'} overdue</div></div>`;
-    if (d === 0) return '<div class="side"><div class="big">Today</div><div class="sm">due date</div></div>';
-    return `<div class="side"><div class="big num">${d}</div><div class="sm">${d === 1 ? 'day' : 'days'} left</div></div>`;
-  })();
-  const avatar = (name) => `<span class="avatar ${name === A ? '' : 'b'}" aria-hidden="true">${esc(String(name || '?').trim().charAt(0).toUpperCase())}</span>`;
-  const rangeLabel = r.start ? rangeText(r) : 'All time';
-  const hstat = ({ label, sw, value, raw, fmt, deltaHtml = '', foot = '', tip = '', id = '' }) => `<div class="hstat" ${tip ? `title="${esc(tip)}"` : ''}>
-      <div class="k">${sw ? `<span class="sw" style="background:var(${sw})"></span>` : ''}${esc(label)}</div>
-      <div class="v num" ${countable(raw, fmt)}>${value}</div>
-      <div class="f">${deltaHtml}<span>${foot}</span></div>
-      ${id ? `<div class="mini" id="${id}"></div>` : ''}
-    </div>`;
-  const marginNow = s.revenue ? biz / s.revenue : null;
-  const roiNow = s.cost ? biz / s.cost : null;
-
-  el.innerHTML = `${setupBanner()}${settleCallout}
-  <div class="grid g-12">
-    <div class="card hero c-8 ${biz < 0 ? 'loss' : ''}">
-      <div class="hero-top">
-        <span class="hero-eyebrow"><span class="sw" style="background:var(${biz < 0 ? '--bad' : '--s-profit'})"></span>Net business profit</span>
-        <span class="muted" style="font-size:12px">${esc(rangeLabel)}</span>
-        ${hasPrev ? delta(biz, bizPrev) : ''}
-        ${r.start ? `<button class="chip-toggle ${state.compare ? 'on' : ''}" id="hero-compare" type="button" aria-pressed="${Boolean(state.compare)}" title="Overlay the previous period of the same length">${ICONS.history} Compare</button>` : ''}
-      </div>
-      <div class="hero-value num ${biz < 0 ? 'neg' : ''}" id="hero-value">${money(biz, 2)}</div>
-      <div class="hero-meta">
-        <span>Item profit <b>${money(rangeOwn ? rangeOwn.orderProfit : s.net, 2)}</b></span>
-        <span>− operating costs <b>${money(rangeSettle ? rangeSettle.opex : ox.total, 2)}</b></span>
-        <span><b>${count(s.countedOrders)}</b> costed of <b>${count(s.orders)}</b> sales</span>
-      </div>
-      ${rangeSettle?.corrections ? `<div class="muted" style="font-size:12.5px;margin-top:6px">Not in this profit: ${money(rangeSettle.corrections.profit, 2)} for the ${rangeSettle.corrections.rows.map((x) => monthLabel(x.correction_for, 'long')).filter((v, i, a) => a.indexOf(v) === i).join(' and ')} payment, which missed it (${rangeSettle.corrections.rows.map((x) => esc(String(x.title || '').replace(/^Refund · /, '').slice(0, 40))).join(', ')}). It is settled on this payment: <a href="#/settlement">Settlement</a>.</div>` : ''}
-      ${(() => { const later = r.month ? state.data.orders.filter((o) => o.counted && o.correction_for === r.month) : []; if (!later.length) return ''; const tot = later.reduce((t, o) => t + (Number(o.net) || 0), 0); return `<div class="muted" style="font-size:12.5px;margin-top:6px">Found after this payment was made: ${money(tot, 2)} (${later.map((o) => esc(String(o.title || '').replace(/^Refund · /, '').slice(0, 40))).join(', ')}). This payment stays as paid; the correction is on the ${[...new Set(later.map((o) => monthLabel(rowMonth(o), 'long')))].join(' and ')} payment.</div>`; })()}
-      <div class="scrub-at" id="hero-at" aria-live="polite">Drag across the chart to see the running profit</div>
-      <div class="spark scrub" id="hero-spark" title=""></div>
-      <div class="hero-stats">
-        ${hstat({ label: 'Revenue', sw: '--s-revenue', value: moneyShort(s.revenueAll), raw: s.revenueAll, fmt: moneyShort, deltaHtml: hasPrev ? delta(s.revenueAll, p.revenueAll) : '', foot: 'buyer paid, excl. tax', id: 'k-rev' })}
-        ${hstat({ label: 'Orders', value: count(s.orders), raw: s.orders, fmt: count, deltaHtml: hasPrev ? delta(s.orders, p.orders) : '', foot: `${count(s.units)} units`, id: 'k-ord' })}
-        ${hstat({ label: 'Profit margin', value: pct(marginNow), raw: marginNow, fmt: pct, deltaHtml: hasPrev && p.revenue ? delta(biz / s.revenue, bizPrev / p.revenue, { isPct: true }) : '', foot: `item ${pct(s.margin)}`, tip: 'After operating costs. Item margin (before operating costs) shown underneath.' })}
-        ${hstat({ label: 'ROI', value: pct(roiNow), raw: roiNow, fmt: pct, deltaHtml: hasPrev && p.cost ? delta(biz / s.cost, bizPrev / p.cost, { isPct: true }) : '', foot: `item ${pct(s.roi)}`, tip: 'Business profit ÷ Amazon cost. Item ROI (before operating costs) shown underneath.' })}
-      </div>
-    </div>
-
-    <div class="card settle-card c-4">
-      <div class="settle-head">
-        <span class="eyebrow">${ICONS.wallet} Partner settlement</span>
-        <span class="pill">${ICONS.calendar} ${monthLabel(cardMonth, 'long')}</span>
-      </div>
-      <div class="settle-who">${avatar(cv.from)}<b>${esc(cv.from)}</b><span class="muted">sends</span>${ICONS.arrowRight.replace('<svg', '<svg class="arrow"')}${avatar(cv.to)}<b>${esc(cv.to)}</b></div>
-      <div class="settle-amt num" id="settle-value">${money(cv.amount, 2)}</div>
-      <div class="settle-math"><span>Reimbursement <b>${money(cardSettle.cogs + cardSettle.opexAmazon, 2)}</b></span><span>${cardSettle.shareAmazon < 0 ? '−' : '+'} ${esc(A)}'s share <b>${money(Math.abs(cardSettle.shareAmazon), 2)}</b></span></div>
-      <div class="settle-hint">${pickedMonth ? 'The payment picked in the range bar' : `This pay period so far (${fmtDate(curRange.from)} – ${fmtDate(curRange.to)}) · pick <b>Month</b> in the range bar to see another`}</div>
-      <div class="state ${settleStatus.cls}" role="status" title="${!cv.nothingDue ? esc(`Settlements are due on the ${dueDay}th of each month`) : ''}">
-        <div class="ic">${stateIcon}</div>
-        <div><div class="lbl"><span class="live"></span>${stateLabel}</div><div class="t">${settleStatus.t}</div><div class="s">${settleStatus.s}</div></div>
-        ${stateSide}
-      </div>
-      <div class="settle-track-h"><span>Month by month</span><span>${allSettled.length > 6 ? `latest 6 of ${allSettled.length}` : ''}</span></div>
-      <div class="settle-track" role="list" aria-label="Settlement by month">${[...allSettled].reverse().slice(0, 6).map((x) => {
-        const xv = view(x);
-        const d = dueStatus(settlementDueDate(x.month, dueDay));
-        const badge = xv.settled
-          ? `<span class="pill good">${ICONS.check} Settled</span>`
-          : d.kind === 'overdue' ? `<span class="pill bad">${ICONS.alert} Overdue</span>`
-          : `<span class="pill warn">${ICONS.clock} Due ${fmtDate(settlementDueDate(x.month, dueDay))}</span>`;
-        return `<a class="settle-row ${xv.settled ? 'ok' : d.kind}${x.month === cardMonth ? ' sel' : ''}" role="listitem" href="#/settlement" data-month="${x.month}" title="${esc(`${xv.from} sends ${xv.to} ${money(xv.amount, 2)}`)}">
-          <span class="m">${monthLabel(x.month)}</span>
-          <span class="amt num">${xv.reverse ? `<span class="dir">${esc(xv.from)} → ${esc(xv.to)}</span>` : ''}${money(xv.amount, 2)}</span>
-          ${badge}
-        </a>`;
-      }).join('')}</div>
-      <div class="stat-row" style="margin-top:10px"><span class="k">Owed across all months</span><span class="v ${Math.abs(owedAll) > 0.009 ? 'neg' : 'pos'}">${owedAll > 0.009 ? `${esc(B)} owes ${esc(A)} ${money(owedAll, 2)}` : owedAll < -0.009 ? `${esc(A)} owes ${esc(B)} ${money(-owedAll, 2)}` : `${ICONS.check.replace('<svg', '<svg style="width:13px;height:13px"')} All settled`}</span></div>
-      <div style="margin-top:12px"><a class="btn sm" href="#/settlement">Open settlement ${ICONS.arrow}</a></div>
-    </div>
-  </div>
-
-  <div class="grid g-12 mt">
-    ${card('This pay period', `${monthLabel(curMonth, 'long')} payment · ${fmtDate(curRange.from)} – ${fmtDate(curRange.to)}`, `
-      <div class="row" style="align-items:baseline;gap:8px"><div class="hero-value num" style="font-size:32px;margin-top:0" ${countable(cur.orderProfit, (v) => money(v, 0))}>${money(cur.orderProfit, 0)}</div><span class="muted" style="font-size:12.5px">item profit</span></div>
-      <div class="muted" style="font-size:12.5px;margin-top:2px">${goal ? `${pct(Math.max(0, cur.orderProfit / goal), 0)} of the ${money(goal, 0)} goal` : 'Set a monthly goal in <a href="#/settings">Settings</a>'}</div>
-      ${goal ? `<div class="goal-bar"><div style="width:${Math.min(100, Math.max(0, (cur.orderProfit / goal) * 100)).toFixed(1)}%"></div></div>` : '<div style="height:10px"></div>'}
-      <div class="stat-row"><span class="k">After operating expenses</span><span class="v ${cur.businessProfit < 0 ? 'neg' : ''}">${money(cur.businessProfit, 2)}</span></div>
-      <div class="stat-row"><span class="k">Projected for the period</span><span class="v">${projected !== null ? money(projected, 0) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Daily run-rate</span><span class="v">${dayOfPeriod > 0.5 ? money(cur.orderProfit / dayOfPeriod) : '—'}</span></div>
-      <div class="stat-row"><span class="k">Sales this period</span><span class="v">${count(ms.orders)}</span></div>
-      <div class="stat-row"><span class="k">All-time item profit</span><span class="v">${money(allTime.net, 0)}</span></div>`, { cls: 'c-4' })}
-    ${card('Needs attention', 'Click an item to jump there', `<div class="alert-list">
-      ${alertItem('bad', ICONS.alert, 'Loss-making orders', `${money(s.lossTotal)} lost in this range`, s.lossCount, '#/orders?f=loss')}
-      ${alertItem('info', ICONS.mail, 'Sales awaiting the Amazon email', `${oldAwaiting.length} older than 3 days · open one and press Check email now`, state.data.orders.filter((o) => o.status === 'awaiting_cost').length, '#/orders?f=awaiting_cost')}
-      ${needsReview.length ? alertItem('bad', ICONS.alert, 'Sales held for review', 'An Amazon email that may hold their cost couldn’t be read', needsReview.length, '#/orders?f=needs_review') : ''}
-      ${alertItem('warn', ICONS.link, 'Suggested matches to review', 'Title-only matches need a human yes/no', state.data.amazon.suggestions || 0, '#/editor?tab=matches')}
-      ${alertItem('warn', ICONS.return, 'Open returns', 'Returns not closed yet', openReturns.length, '#/returns')}
-      ${alertItem('good', ICONS.users, 'Repeat buyers', `${count(s.uniqueBuyers)} unique buyers in range`, s.repeatBuyers, '#/trends')}
-    </div>`, { cls: 'c-4' })}
-    ${card('Where every dollar goes', 'Revenue broken into costs and what you keep', '<div class="chart tall" id="ch-waterfall"></div>', { cls: 'c-4' })}
-  </div>
-
-  <div class="grid g-12 mt">
-    ${card('Revenue, cost &amp; item profit', `${granLabel[gran]} · item profit before operating costs · red = loss period`, `${legend([['--s-revenue', 'Revenue', 1], ['--s-cost', 'Amazon cost', 1], ['--s-profit', 'Item profit']])}<div class="chart tall" id="ch-main"></div>`, { cls: 'c-8 fill', right: granSeg() })}
-    <div class="c-4 kpis two kpi-block">
-      ${kpi({ label: 'Amazon cost', sw: '--s-cost', value: moneyShort(s.cost), raw: s.cost, fmt: moneyShort, deltaHtml: hasPrev ? delta(s.cost, p.cost, { invert: true }) : '', foot: `avg ${money(s.avgCost)}` })}
-      ${kpi({ label: 'eBay fees', sw: '--s-fees', value: moneyShort(s.fees), raw: s.fees, fmt: moneyShort, deltaHtml: hasPrev && p.fees ? delta(s.fees, p.fees, { invert: true }) : '', foot: feeFoot,
-        tip: 'Final value fees on synced eBay orders (the waterfall’s “eBay fees” bar). Monthly-sheet rows record the eBay payout after fees, so their fees are already out of revenue. Promoted-listing (ad) fees are counted separately.' })}
-      ${kpi({ label: 'Operating costs', sw: '--s-ops', value: money(ox.total, 2), raw: ox.total, fmt: (v) => money(v, 2), deltaHtml: hasPrev ? delta(ox.total, oxPrev.total, { invert: true }) : '', foot: `subscriptions, tools, proxies · ${count(ox.byCategory.size)} items`, tip: 'Monthly operating costs from the sheets / Editor → Operating expenses. Partly covered months are prorated by day.' })}
-      ${kpi({ label: 'Refunds', sw: '--s-refunds', value: moneyShort(s.refunds), raw: s.refunds, fmt: moneyShort, foot: [refundFees ? (split.buyer ? `${money(split.buyer, 2)} to buyers · ${money(refundFees, 2)} eBay refund fees` : 'eBay refund fees on sheet refund rows') : 'to buyers', s.amazonRefund ? `${money(s.amazonRefund)} recovered` : ''].filter(Boolean).join(' · '), tip: 'Money refunded to buyers on eBay orders, plus the eBay refund fee recorded on monthly-sheet refund rows.' })}
-      ${kpi({ label: 'Avg order value', value: money(s.aov), raw: s.aov, fmt: money, deltaHtml: hasPrev ? delta(s.aov, p.aov) : '' })}
-      ${kpi({ label: 'Item profit / order', value: money(s.profitPerOrder), raw: s.profitPerOrder, fmt: money, deltaHtml: hasPrev ? delta(s.profitPerOrder, p.profitPerOrder) : '', foot: 'before operating costs' })}
-      ${kpi({ label: 'Return rate', value: pct(s.returnRate), raw: s.returnRate, fmt: pct, deltaHtml: hasPrev ? delta(s.returnRate, p.returnRate, { invert: true, isPct: true }) : '', foot: `${count(s.returnCount)} orders` })}
-      ${kpi({ label: 'Awaiting email', value: count(s.awaitingCount), raw: s.awaitingCount, fmt: count, foot: `${moneyShort(s.awaitingRevenue)} in sales not in profit yet`, tip: 'eBay sales with no linked Amazon purchase yet. Excluded from profit until linked.' })}
-    </div>
-  </div>
-
-  <div class="grid g-12 mt">
-    ${card('Cumulative profit', 'Running total: item profit, minus each month’s operating costs', '<div class="chart" id="ch-cum"></div>', { cls: 'c-5' })}
-    ${card('Order outcomes', 'Share of eBay orders in the range', '<div class="chart" id="ch-outcomes"></div>', { cls: 'c-3' })}
-    ${card('Operating costs', `${money(ox.total, 2)} in this range · the sheets' section 2`, `<div class="chart" id="ch-opex"></div>`, { cls: 'c-4', right: '<a class="btn sm" href="#/costs">Edit</a>' })}
-  </div>
-
-  <div class="grid g-12 mt">
-    ${card('Top products by profit', 'Net item profit in range', '<div class="chart" id="ch-top" style="height:320px"></div>', { cls: 'c-7' })}
-    ${card('Operating costs by month', 'Full month totals from the sheets and the Editor', `<div class="table-wrap" id="opex-months"></div>`, { cls: 'c-5' })}
-  </div>`;
-
-  countUp($('#hero-value'), biz, (v) => money(v, 2));
-  countUp($('#settle-value'), cv.amount, (v) => money(v, 2), 700);
-  flushCounts();
-
-  // hero spark
-  heroScrub({ r, all, s, ox, oxPrev, biz, hasPrev, rangeLabel });
-  $('#hero-compare')?.addEventListener('click', () => { state.compare = !state.compare; store('dd_compare', state.compare); renderPage(); });
-  sparkline($('#k-rev'), dailyForSpark.map((b) => b.revenueAll), c.revenue);
-  sparkline($('#k-ord'), dailyForSpark.map((b) => b.orders), c.accent);
-
-  // main chart
-  const labels = series.map((b) => bucketLabel(b.key, gran));
-  mount($('#ch-main'), {
-    grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
-    tooltip: {
-      ...tooltipBase(), trigger: 'axis', axisPointer: crosshair(),
-      formatter: (ps) => {
-        const b = series[ps[0].dataIndex];
-        return ttHead(labels[ps[0].dataIndex]) + ttRow(c.revenue, 'Revenue', money(b.revenueAll)) + ttRow(c.cost, 'Amazon cost', money(b.cost)) +
-          ttRow(c.fees, 'Fees + ads', money(b.fees + b.adFees)) + ttRow(c.refunds, 'Refunds', money(b.refunds)) +
-          ttRow(b.net < 0 ? c.bad : c.profit, 'Item profit', money(b.net), true) + `<div style="opacity:.6;margin-top:4px">${count(b.orders)} orders · ${pct(b.margin)} margin</div>`;
-      },
-    },
-    xAxis: { type: 'category', data: labels, ...axisBase({ splitLine: { show: false } }) },
-    yAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: moneyShort }, axisLine: { show: false } },
-    series: [
-      { name: 'Net profit', type: 'bar', data: series.map((b) => ({ value: +b.net.toFixed(2), itemStyle: { color: b.net < 0 ? c.bad : c.profit, borderRadius: b.net < 0 ? [0, 0, 4, 4] : [4, 4, 0, 0] } })), barMaxWidth: 22, z: 2 },
-      { name: 'Revenue', type: 'line', data: series.map((b) => +b.revenueAll.toFixed(2)), smooth: 0.3, symbol: 'circle', symbolSize: 6, showSymbol: false, lineStyle: { width: 1.75, color: c.revenue }, itemStyle: { color: c.revenue, borderColor: c.surface, borderWidth: 2 },
-        areaStyle: { color: areaFade(c.revenue, 0.16) } },
-      { name: 'Amazon cost', type: 'line', data: series.map((b) => +b.cost.toFixed(2)), smooth: 0.3, symbol: 'circle', symbolSize: 6, showSymbol: false, lineStyle: { width: 1.75, color: c.cost }, itemStyle: { color: c.cost, borderColor: c.surface, borderWidth: 2 } },
-    ],
-  });
-  bindGran(el);
-
-  // waterfall
-  const steps = [
-    ['Revenue', s.revenue, c.revenue],
-    ['Amazon cost', -s.cost, c.cost],
-    ['eBay fees', -s.fees, c.fees],
-    ['Ad fees', -s.adFees, c.ads],
-    ['Refunds', -(s.refunds - s.amazonRefund), c.refunds],
-    ['Other costs', -s.extra, c.ink3],
-    ['Operating costs', -ox.total, c.ops],
-  ];
-  let run = 0;
-  const base = [];
-  const vals = [];
-  for (const [name, v, col] of steps) {
-    if (name === 'Revenue') { base.push(0); vals.push({ value: v, itemStyle: { color: col } }); run = v; continue; }
-    run += v;
-    base.push(Math.min(run, run - v));
-    vals.push({ value: Math.abs(v), itemStyle: { color: col } });
-  }
-  base.push(0);
-  vals.push({ value: biz, itemStyle: { color: biz < 0 ? c.bad : c.profit } });
-  const wfLabels = [...steps.map((x) => x[0]), 'Business profit'];
-  mount($('#ch-waterfall'), {
-    grid: { left: 8, right: 16, top: 10, bottom: 4, containLabel: true },
-    tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } },
-      formatter: (ps) => { const i = ps[0].dataIndex; const raw = i < steps.length ? steps[i][1] : biz; return ttHead(wfLabels[i]) + `<div>${money(raw)}${s.revenue && i > 0 ? ` <span style="opacity:.6">(${pct(Math.abs(raw) / s.revenue)} of revenue)</span>` : ''}</div>`; } },
-    xAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: moneyShort } },
-    yAxis: { type: 'category', inverse: true, data: wfLabels, ...axisBase({ splitLine: { show: false } }), axisLabel: { color: c.ink2, fontSize: 12 } },
-    series: [
-      { type: 'bar', stack: 'w', data: base, itemStyle: { color: 'transparent' }, emphasis: { disabled: true }, tooltip: { show: false } },
-      { type: 'bar', stack: 'w', data: vals, barWidth: 18, itemStyle: { borderRadius: 4 },
-        label: { show: true, position: 'right', color: c.ink2, fontSize: 11, formatter: (p) => moneyShort(p.dataIndex === 0 || p.dataIndex === wfLabels.length - 1 ? p.value : -p.value) } },
-    ],
-  });
-
-  // cumulative
-  const cumGran = autoGran(r, all);
-  const opexPerBucket = dailyForSpark.map((b) => {
-    // Bucket keys are Arizona days ('YYYY-MM-DD', 'YYYY-MM-DDTHH' for hours, 'YYYY-MM' for months)
-    const [y, mo] = b.key.split('-').map(Number);
-    const bStart = cumGran === 'hour' ? new Date(azStart(b.key.slice(0, 10)).getTime() + Number(b.key.slice(11, 13)) * 3600_000)
-      : azStart(cumGran === 'month' ? `${b.key}-01` : b.key);
-    const bEnd = cumGran === 'month' ? new Date(azStart(new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 10)).getTime() - 1)
-      : new Date(bStart.getTime() + (cumGran === 'week' ? 7 * DAY : cumGran === 'hour' ? 3600_000 : DAY) - 1);
-    const clip = { start: r.start && r.start > bStart ? r.start : bStart, end: r.end < bEnd ? r.end : bEnd };
-    return opexFor(clip, expenses, { dueDay: dueDayOf() }).total;
-  });
-  let acc = 0;
-  const cum = dailyForSpark.map((b, i) => (acc += b.net - opexPerBucket[i]));
-  const cumLabels = dailyForSpark.map((b) => bucketLabel(b.key, autoGran(r, all)));
-  mount($('#ch-cum'), {
-    grid: { left: 8, right: 12, top: 12, bottom: 4, containLabel: true },
-    tooltip: { ...tooltipBase(), trigger: 'axis', formatter: (ps) => ttHead(cumLabels[ps[0].dataIndex]) + ttRow(c.profit, 'Business profit to date', money(ps[0].value), true) },
-    xAxis: { type: 'category', data: cumLabels, boundaryGap: false, ...axisBase({ splitLine: { show: false } }) },
-    yAxis: { type: 'value', ...axisBase(), axisLine: { show: false }, axisLabel: { ...axisBase().axisLabel, formatter: moneyShort } },
-    series: [{ type: 'line', data: cum.map((v) => +v.toFixed(2)), smooth: 0.25, showSymbol: false, lineStyle: { width: 1.75, color: c.profit }, itemStyle: { color: c.profit, borderColor: c.surface, borderWidth: 2 },
-      areaStyle: { color: areaFade(c.profit, 0.24) } }],
-  });
-
-  // outcomes donut (status colors + labels)
-  // Sales only: a refund line is money on a later payment, not an order of its own
-  const outSales = all.filter(isSale);
-  const outcome = [
-    ['Profitable', outSales.filter((o) => o.status === 'profitable').length, c.good],
-    ['Loss', outSales.filter((o) => o.status === 'loss' || o.status === 'cancelled_after_purchase').length, c.bad],
-    ['Returned', outSales.filter((o) => o.status === 'returned' || o.status === 'return_open').length, c.warn],
-    ['Awaiting email', outSales.filter((o) => o.status === 'awaiting_cost').length, c.accent],
-    ['Cancelled', outSales.filter((o) => o.status === 'cancelled').length, c.ink3],
-  ].filter((x) => x[1] > 0);
-  if (!outcome.length) $('#ch-outcomes').outerHTML = `<div class="empty"><div class="ic">${ICONS.orders}</div><div class="t">No orders to chart</div>Order outcomes appear once sales land in this range.</div>`;
-  else mount($('#ch-outcomes'), {
-    tooltip: { ...tooltipBase(), trigger: 'item', formatter: (p) => ttHead(p.name) + `${count(p.value)} orders · ${p.percent.toFixed(1)}%` },
-    legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: c.ink2, fontSize: 11.5 } },
-    series: [{ type: 'pie', radius: ['52%', '76%'], center: ['50%', '42%'], padAngle: 2, itemStyle: { borderRadius: 5, borderColor: c.surface, borderWidth: 2 },
-      label: { show: true, position: 'center', formatter: () => `{a|${pct(outSales.length ? outSales.filter((o) => o.status === 'profitable').length / outSales.length : 0, 0)}}\n{b|profitable}`,
-        rich: { a: { fontSize: 22, fontWeight: 700, color: c.ink }, b: { fontSize: 11, color: c.ink3, padding: [4, 0, 0, 0] } } },
-      emphasis: { scale: true, scaleSize: 4, label: { show: true } },
-      data: outcome.map(([name, value, color]) => ({ name, value, itemStyle: { color } })) }],
-  });
-
-  // top products
-  const tp = [...top].reverse();
-  // Refund note for product tooltips: refunds are part of this product's net, so say so
-  const refundNote = productRefundNote;
-  mount($('#ch-top'), {
-    grid: { left: 8, right: 70, top: 4, bottom: 4, containLabel: true },
-    tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } },
-      formatter: (ps) => { const x = tp[ps[0].dataIndex]; return ttHead(x.title) + ttRow(c.profit, 'Net profit', money(x.net), true) + ttRow(c.revenue, 'Revenue', money(x.revenueAll)) + `<div style="opacity:.6;margin-top:4px">${count(x.orders)} orders · ${pct(x.margin)} margin</div>` + refundNote(x); } },
-    xAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: moneyShort } },
-    yAxis: { type: 'category', data: tp.map((x) => x.title), ...axisBase({ splitLine: { show: false } }),
-      axisLabel: { color: c.ink2, fontSize: 11.5, width: 190, overflow: 'truncate' } },
-    series: [{ type: 'bar', data: tp.map((x) => ({ value: +x.net.toFixed(2), itemStyle: { color: x.net < 0 ? c.bad : c.profit } })), barWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0] },
-      label: { show: true, position: 'right', color: c.ink2, fontSize: 11, formatter: (p) => moneyShort(p.value) } }],
-  });
-
-  // operating costs by category (range) + by month (full months)
-  const cats = [...ox.byCategory.entries()].sort((x, y) => x[1] - y[1]);
-  if (cats.length) {
-    mount($('#ch-opex'), {
-      grid: { left: 8, right: 64, top: 4, bottom: 4, containLabel: true },
-      tooltip: { ...tooltipBase(), trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(127,127,127,.08)' } }, formatter: (ps) => ttHead(cats[ps[0].dataIndex][0]) + ttRow(c.ops, 'In this range', money(cats[ps[0].dataIndex][1], 2), true) },
-      xAxis: { type: 'value', ...axisBase(), axisLabel: { ...axisBase().axisLabel, formatter: moneyShort } },
-      yAxis: { type: 'category', data: cats.map((x) => x[0]), ...axisBase({ splitLine: { show: false } }), axisLabel: { color: c.ink2, fontSize: 11.5, width: 170, overflow: 'truncate' } },
-      series: [{ type: 'bar', data: cats.map((x) => +x[1].toFixed(2)), barWidth: 14, itemStyle: { color: c.ops, borderRadius: [0, 4, 4, 0] }, label: { show: true, position: 'right', color: c.ink2, fontSize: 11, formatter: (p) => money(p.value, 2) } }],
-    });
-  } else $('#ch-opex').outerHTML = '<div class="empty">No operating costs in this range. Add them in Editor → Operating expenses.</div>';
-  const months = [...new Set(expenses.map((e) => e.month))].sort().reverse();
-  $('#opex-months').innerHTML = months.length ? `<table class="simple"><thead><tr><th>Month</th><th>Items</th><th class="r">Total</th></tr></thead><tbody>${months.map((mo) => {
-    const list = expenses.filter((e) => e.month === mo);
-    return `<tr><td>${monthLabel(mo)}</td><td class="muted" style="font-size:12px">${list.map((e) => esc(e.category)).join(', ')}</td><td class="r"><b>${money(list.reduce((t, e) => t + e.amount, 0), 2)}</b></td></tr>`;
-  }).join('')}</tbody></table>` : '<div class="empty">None yet</div>';
-
-  $$('.alert', el).forEach((a) => {
-    a.addEventListener('click', () => { location.hash = a.dataset.href; });
-    a.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); location.hash = a.dataset.href; } });
-  });
-}
-
-function alertItem(kind, icon, title, sub, n, href) {
-  return `<div class="alert" data-href="${href}" role="link" tabindex="0"><div class="alert-ic ${n ? kind : 'zero'}">${icon}</div><div><div class="alert-t">${title}</div><div class="alert-s">${sub}</div></div><div class="n ${n ? '' : 'zero'}">${count(n)}</div>${ICONS.chevron.replace('<svg', '<svg class="chev"')}</div>`;
 }
 
 // ---------------------------------------------------------------- ANALYTICS
@@ -1697,7 +1275,9 @@ async function settings(el) {
   const focus = new URLSearchParams(location.hash.split('?')[1] || '').get('focus');
   el.innerHTML = `<div class="grid g-12">
     <div class="c-7 stack">
-      <div class="section-h" style="margin-top:0"><h2>Data sources</h2><span class="sub">where sales and costs come from</span></div>
+      <div class="section-h" style="margin-top:0" id="dashboard-sec"><h2>Customize dashboard</h2><span class="sub">what everyone sees · saved for both partners</span></div>
+      ${dashboardCard(d.settings)}
+      <div class="section-h"><h2>Data sources</h2><span class="sub">where sales and costs come from</span></div>
       ${emailCard(em, mails)}
       ${ebayCard(e, log)}
       ${card('Matching rules', 'Controls how Amazon purchases link to eBay sales', `
@@ -1725,6 +1305,8 @@ async function settings(el) {
         <div class="row mt"><button class="btn" id="export-all">${ICONS.down} Export all orders (CSV)</button>
         ${demo ? `<button class="btn danger" id="clear-demo">Remove ${count(demo)} demo orders</button>` : ''}</div>`, { cls: 'set-card' })}
     </div></div>`;
+  bindDashboardCard();
+  if (focus === 'dashboard') requestAnimationFrame(() => $('#dashboard-sec')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   if (focus === 'email') {
     const target = $('#email-card');
     if (target) {
@@ -1757,6 +1339,29 @@ async function settings(el) {
     await loadData();
     renderPage();
   });
+}
+
+// On/off switches for menu pages, Overview cards and alerts (dash-prefs.js)
+function dashboardCard(settings) {
+  const p = dashPrefs(settings);
+  const group = (g, title, list) => `<div class="dash-group"><div class="field-h">${title}</div>${list.map((o) => `<label class="dash-opt ${o.locked ? 'locked' : ''}"><input type="checkbox" data-g="${g}" data-k="${o.id}" ${p[g][o.id] ? 'checked' : ''} ${o.locked ? 'disabled' : ''} /><span><b>${esc(o.label)}</b><span class="muted">${esc(o.note)}</span></span></label>`).join('')}</div>`;
+  return card('What the dashboard shows', 'Turn things off to keep it simple. Hidden pages still open from links.', `<div class="dash-groups">
+    ${group('pages', 'Pages in the menu', PAGE_OPTIONS)}
+    ${group('cards', 'Overview cards', CARD_OPTIONS)}
+    ${group('alerts', 'Alerts', ALERT_OPTIONS)}
+    </div>
+    <div class="row mt"><button class="btn primary" id="dash-save">${ICONS.save} Save</button><button class="btn" id="dash-reset">Back to the defaults</button></div>`, { cls: 'set-card', id: 'dash-card' });
+}
+function bindDashboardCard() {
+  const save = async (prefs) => {
+    try { await api('/api/settings/dashboard', { method: 'POST', body: prefs }); toast('Dashboard saved', 'good'); await loadData(); renderPage(); } catch (e) { toast(e.message, 'bad'); }
+  };
+  $('#dash-save')?.addEventListener('click', () => {
+    const prefs = { pages: {}, cards: {}, alerts: {} };
+    for (const box of $('#dash-card input[type=checkbox]')) prefs[box.dataset.g][box.dataset.k] = box.checked;
+    save(prefs);
+  });
+  $('#dash-reset')?.addEventListener('click', () => { if (confirm('Put every page, card and alert back to the default?')) save(defaultPrefs()); });
 }
 
 function ebayCard(e, log) {

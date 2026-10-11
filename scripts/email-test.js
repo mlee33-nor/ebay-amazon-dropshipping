@@ -576,9 +576,11 @@ await check('a sync with unsorted failed emails is not "ok", and names them; a d
   const r = await syncEmail();
   assert.equal(r.ok, false);
   assert.ok(r.log.some((l) => /could not be read/.test(l)));
+  // The mailbox was read, so the import is working (no 'check is failing' alarm); the unreadable ones are counted apart
   const last = (await emailStatus()).last;
-  assert.equal(last.ok, false);
+  assert.equal(last.ok, true);
   assert.equal(last.connected, true);
+  assert.ok(last.failed > 0);
   for (const f of (await emailStatus()).failed) await dismissFailedEmail(f.message_id);
   assert.equal((await emailStatus()).failed.length, 0);
   assert.equal((await syncEmail()).ok, true);

@@ -590,7 +590,9 @@ export async function syncEmail() {
       // without its cost, so the sync is not "ok" until they are sorted out or dismissed
       const failed = await failedEmails();
       if (failed.length) log.push(fmtFailed(failed));
-      await setSetting('email_last_result', { ok: failed.length === 0, connected: true, failed: failed.length, at: startedAt, log });
+      // ok = the mailbox was read; emails that couldn't be understood are counted apart (they are listed for a look, but
+      // the import itself worked and new costs keep coming in)
+      await setSetting('email_last_result', { ok: true, connected: true, failed: failed.length, at: startedAt, log });
       return { ok: failed.length === 0, log };
     } catch (e) {
       const msg = e.config ? e.message
@@ -668,7 +670,9 @@ export async function reprocessEmail() {
       const failed = await failedEmails();
       const log = [`reprocessed ${staged.length} emails: ${counts.ok} read, ${counts.failed} need review, ${counts.seen} skipped`];
       if (failed.length) log.push(fmtFailed(failed));
-      await setSetting('email_last_result', { ok: failed.length === 0, connected: true, failed: failed.length, at: startedAt, log });
+      // ok = the mailbox was read; emails that couldn't be understood are counted apart (they are listed for a look, but
+      // the import itself worked and new costs keep coming in)
+      await setSetting('email_last_result', { ok: true, connected: true, failed: failed.length, at: startedAt, log });
       return { ok: failed.length === 0, log };
     } finally {
       running = null;

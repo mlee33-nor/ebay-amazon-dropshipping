@@ -138,6 +138,7 @@ async function getAllSettings() {
     split_amazon: (await getSetting('split_amazon')) ?? 50,
     settlement_day: (await getSetting('settlement_day')) ?? 26,
     business_start: (await getSetting('business_start')) || null,
+    dashboard: (await getSetting('dashboard')) || {},
   };
 }
 
@@ -294,6 +295,20 @@ app.post('/api/settings', wrap(async (req, res) => {
   if ('settlement_day' in b) await setSetting('settlement_day', Math.min(28, Math.max(1, Math.round(Number(b.settlement_day) || 26))));
   if (money.length) { const after = await getAllSettings(); await logMoney(req, 'settings', money.join(','), Object.fromEntries(money.map((k) => [k, before[k]])), Object.fromEntries(money.map((k) => [k, after[k]]))); }
   await runMatcher();
+  res.json({ ok: true, settings: await getAllSettings() });
+}));
+
+// What the dashboard shows (pages in the menu, Overview cards, alerts): shared by everyone who signs in.
+// Only known on/off switches are kept.
+app.post('/api/settings/dashboard', wrap(async (req, res) => {
+  const b = req.body || {};
+  const clean = {};
+  for (const group of ['pages', 'cards', 'alerts']) {
+    if (!b[group] || typeof b[group] !== 'object') continue;
+    clean[group] = {};
+    for (const [k, v] of Object.entries(b[group])) if (/^[a-z][a-z0-9_-]{0,40}$/.test(k)) clean[group][k] = Boolean(v);
+  }
+  await setSetting('dashboard', clean);
   res.json({ ok: true, settings: await getAllSettings() });
 }));
 
