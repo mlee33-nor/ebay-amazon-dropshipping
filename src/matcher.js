@@ -33,10 +33,16 @@ const trackingTokens = (s) =>
     .toUpperCase()
     .match(/[A-Z0-9]{10,}/g) || [];
 
-const nameParts = (n) =>
-  String(n || '')
+// Names and cities compared as plain letters: "José" = "Jose", "O’Fallon" = "O'Fallon" = "OFallon"
+const plain = (s) =>
+  String(s || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-z ]/g, ' ')
+    .replace(/['’`]/g, '')
+    .replace(/[^a-z ]/g, ' ');
+const nameParts = (n) =>
+  plain(n)
     .split(/\s+/)
     .filter((t) => t.length > 1);
 
@@ -69,7 +75,7 @@ export function scorePair(az, eb, windowBefore = 1, windowAfter = 7) {
     reasons.push('zip match');
   }
   const parts = nameParts(eb.ship_name);
-  const hay = ` ${String(az.shipText || '').toLowerCase().replace(/[^a-z ]/g, ' ')} `;
+  const hay = ` ${plain(az.shipText)} `;
   if (parts.length) {
     const last = parts[parts.length - 1];
     if (last.length > 2 && hay.includes(` ${last} `)) {
@@ -82,7 +88,7 @@ export function scorePair(az, eb, windowBefore = 1, windowAfter = 7) {
       }
     }
   }
-  const city = String(eb.ship_city || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const city = plain(eb.ship_city).replace(/\s+/g, ' ').trim();
   const cityMatch = city.length > 2 && hay.replace(/\s+/g, ' ').includes(` ${city} `);
   const stateMatch = !az.state || !eb.ship_state || az.state === String(eb.ship_state).toUpperCase();
   if (cityMatch && evidence) {
@@ -115,23 +121,32 @@ export function scorePair(az, eb, windowBefore = 1, windowAfter = 7) {
 // Unlinked Amazon orders in the shape scorePair expects (also used by the dataset to avoid assuming a refunded
 // sale had no purchase when an unlinked Amazon order could belong to it)
 export async function loadUnlinkedAmazon() {
-  return (await loadCandidatesAmazon()).amazon;
+  return loadAmazon({ linked: false });
 }
 
-async function loadCandidatesAmazon() {
+// Amazon orders in the shape scorePair expects. A fully cancelled (or ignored) order is never anyone's purchase, so
+// it is never a candidate or a rival: SEALIGHT's cancelled first order must not block its replacement.
+async function loadAmazon({ linked }) {
   const homeZips = ((await getSetting('home_zips')) || []).map((z) => String(z).slice(0, 5));
   const azRows = await q(
     `select l.amazon_order_id, min(l.order_date) as order_date,
             string_agg(coalesce(l.ship_name,'') || ' ' || coalesce(l.ship_address,''), ' ') as ship_text,
             max(l.ship_zip) as zip, max(l.ship_state) as state, sum(l.line_total) as total,
+            -- what the books count as this order's cost: lines still bought (not ignored or cancelled), a typed-in
+            -- cost first; unknown when any such line has no cost yet
+            case when bool_or(coalesce(l.cost_override, l.line_total) is null) filter (where not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel') then null
+                 else sum(coalesce(l.cost_override, l.line_total)) filter (where not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel') end as cost,
             string_agg(coalesce(l.tracking,''), ' ') as tracking,
-            array_agg(l.title) as titles, bool_and(l.ignored) as all_ignored
-     from amazon_lines l
-     where not exists (select 1 from order_links k where k.amazon_order_id = l.amazon_order_id)
+            array_agg(l.title) as titles, bool_and(l.ignored) as all_ignored,
+            bool_and(coalesce(l.order_status, '') ~* 'cancel') as all_cancelled,
+            coalesce(sum(coalesce(l.quantity, 1)) filter (where not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel'), 0)::int as units,
+            max(k.ebay_order_id) as linked_to
+     from amazon_lines l left join order_links k on k.amazon_order_id = l.amazon_order_id
+     where ${linked ? 'k.amazon_order_id is not null' : 'k.amazon_order_id is null'}
      group by l.amazon_order_id`
   );
-  const amazon = azRows
-    .filter((r) => !r.all_ignored && !(r.zip && homeZips.includes(r.zip)))
+  return azRows
+    .filter((r) => !r.all_ignored && !r.all_cancelled && !(r.zip && homeZips.includes(r.zip)))
     .map((r) => ({
       amazon_order_id: r.amazon_order_id,
       order_date: r.order_date instanceof Date ? r.order_date.toISOString().slice(0, 10) : r.order_date,
@@ -139,38 +154,16 @@ async function loadCandidatesAmazon() {
       zip: r.zip,
       state: r.state ? String(r.state).toUpperCase() : null,
       total: r.total === null ? null : Number(r.total),
-      tracking: trackingTokens(r.tracking),
-      titles: (r.titles || []).filter((t) => t && !/title not in email/i.test(t)),
-    }));
-  return { amazon };
-}
-
-async function loadCandidates() {
-  const homeZips = ((await getSetting('home_zips')) || []).map((z) => String(z).slice(0, 5));
-  const azRows = await q(
-    `select l.amazon_order_id, min(l.order_date) as order_date,
-            string_agg(coalesce(l.ship_name,'') || ' ' || coalesce(l.ship_address,''), ' ') as ship_text,
-            max(l.ship_zip) as zip, max(l.ship_state) as state, sum(l.line_total) as total,
-            string_agg(coalesce(l.tracking,''), ' ') as tracking,
-            array_agg(l.title) as titles, bool_and(l.ignored) as all_ignored
-     from amazon_lines l
-     where not exists (select 1 from order_links k where k.amazon_order_id = l.amazon_order_id)
-     group by l.amazon_order_id`
-  );
-  const amazon = azRows
-    .filter((r) => !r.all_ignored && !(r.zip && homeZips.includes(r.zip)))
-    .map((r) => ({
-      amazon_order_id: r.amazon_order_id,
-      order_date: r.order_date instanceof Date ? r.order_date.toISOString().slice(0, 10) : r.order_date,
-      shipText: r.ship_text,
-      zip: r.zip,
-      state: r.state ? String(r.state).toUpperCase() : null,
-      total: r.total === null ? null : Number(r.total),
+      cost: r.cost === null ? null : Number(r.cost),
       tracking: trackingTokens(r.tracking),
       // Email-sourced rows only carry a category placeholder, never compare it as a product title
       titles: (r.titles || []).filter((t) => t && !/title not in email/i.test(t)),
+      units: Math.max(1, r.units),
+      linked_to: r.linked_to,
     }));
-  if (!amazon.length) return { amazon, ebay: [], rejections: new Set(), linkCounts: new Map() };
+}
+
+async function loadEbay() {
   const ebRows = await q(
     `select o.order_id, o.created_at, o.ship_name, o.ship_city, o.ship_state, o.ship_zip, o.tracking_numbers, o.revenue,
             coalesce(sum(li.quantity), 1)::int as units, array_agg(li.title) as titles
@@ -178,16 +171,27 @@ async function loadCandidates() {
      where o.created_at >= now() - interval '800 days'
      group by o.order_id`
   );
-  const ebay = ebRows.map((r) => ({ ...r, revenue: Number(r.revenue) || 0, titles: (r.titles || []).filter(Boolean) }));
+  return ebRows.map((r) => ({ ...r, revenue: Number(r.revenue) || 0, titles: (r.titles || []).filter(Boolean) }));
+}
+
+// Units already bought for each eBay sale: the quantities on its linked Amazon orders (not the number of orders, so a
+// 2-unit sale bought as one 2-unit Amazon order is full). A link to a cancelled (or ignored) Amazon order doesn't
+// fill the sale: its replacement order must still link.
+async function loadLinkCounts() {
+  const counts = await q(`select k.ebay_order_id, sum(coalesce(l.quantity, 1))::int as n
+    from order_links k join amazon_lines l on l.amazon_order_id = k.amazon_order_id
+    where not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel'
+    group by k.ebay_order_id`);
+  return new Map(counts.map((r) => [r.ebay_order_id, r.n]));
+}
+
+async function loadCandidates() {
+  const amazon = await loadAmazon({ linked: false });
+  if (!amazon.length) return { amazon, ebay: [], rejections: new Set(), linkCounts: new Map() };
+  const ebay = await loadEbay();
   const rej = await q('select amazon_order_id, ebay_order_id from link_rejections');
   const rejections = new Set(rej.map((r) => `${r.amazon_order_id}|${r.ebay_order_id}`));
-  // A link to a cancelled (or ignored) Amazon order doesn't fill the sale: its replacement order must still link
-  const counts = await q(`select k.ebay_order_id, count(*)::int as n from order_links k
-    where exists (select 1 from amazon_lines l where l.amazon_order_id = k.amazon_order_id
-                  and not coalesce(l.ignored, false) and coalesce(l.order_status, '') !~* 'cancel')
-    group by k.ebay_order_id`);
-  const linkCounts = new Map(counts.map((r) => [r.ebay_order_id, r.n]));
-  return { amazon, ebay, rejections, linkCounts };
+  return { amazon, ebay, rejections, linkCounts: await loadLinkCounts() };
 }
 
 function allPairs({ amazon, ebay, rejections }) {
@@ -273,7 +277,7 @@ async function matcherPass() {
       [p.az.amazon_order_id, p.eb.order_id, p.score, p.reasons]
     );
     takenAmazon.add(p.az.amazon_order_id);
-    ctx.linkCounts.set(p.eb.order_id, existing + 1);
+    ctx.linkCounts.set(p.eb.order_id, existing + p.az.units);
     linked++;
   }
   const suggestions = new Set(pairs.filter((p) => !takenAmazon.has(p.az.amazon_order_id) && p.score >= 35).map((p) => p.az.amazon_order_id)).size;
@@ -323,4 +327,67 @@ export async function getSuggestions(limit = 300) {
     }))
     .sort((a, b) => b.candidates[0].score - a.candidates[0].score)
     .slice(0, limit);
+}
+
+// The last answer and the inputs it was worked out from: the dashboard asks on every load, but the full Amazon x eBay
+// scan only runs again when an order, link, cost or rejection changed
+let sharedCache = { key: null, value: null };
+
+// One Amazon order that looks like the purchase for two or more eBay sales (the same buyer bought twice, Amazon
+// shipped both in one order). order_links holds one sale per Amazon order, so this is never linked automatically: it
+// is listed so the cost can be split by hand. An Amazon order with 2+ units qualifies when 2+ sales from that buyer
+// have address evidence against it and their units fit in it; a linked order qualifies when another such sale fits in
+// its spare units.
+export async function sharedOrderSuggestions() {
+  const amazon = [...(await loadAmazon({ linked: false })), ...(await loadAmazon({ linked: true }))].filter((az) => az.units >= 2);
+  if (!amazon.length) return [];
+  const ebay = await loadEbay();
+  const linkCounts = await loadLinkCounts();
+  const rej = new Set((await q('select amazon_order_id, ebay_order_id from link_rejections')).map((r) => `${r.amazon_order_id}|${r.ebay_order_id}`));
+  const key = JSON.stringify([amazon, ebay, [...linkCounts], [...rej].sort()]);
+  if (sharedCache.key === key) return sharedCache.value;
+  const out = [];
+  for (const az of amazon) {
+    const sales = [];
+    for (const eb of ebay) {
+      if (rej.has(`${az.amazon_order_id}|${eb.order_id}`)) continue;
+      // Any other sale must still be waiting for its purchase; the sale this order is linked to always counts
+      if (eb.order_id !== az.linked_to && (linkCounts.get(eb.order_id) || 0) >= Math.max(1, eb.units)) continue;
+      const s = scorePair(az, eb);
+      if (s && s.evidence && s.score >= 50) sales.push({ eb, s });
+    }
+    if (sales.length < 2 || (az.linked_to && !sales.some((x) => x.eb.order_id === az.linked_to))) continue;
+    // The linked sale first, then the best evidence; as many as the order's units cover
+    sales.sort((a, b) => (b.eb.order_id === az.linked_to) - (a.eb.order_id === az.linked_to) || b.s.score - a.s.score);
+    let room = az.units;
+    const fit = [];
+    for (const x of sales) {
+      const u = Math.max(1, x.eb.units);
+      if (u <= room) { fit.push(x); room -= u; }
+    }
+    if (fit.length < 2) continue;
+    const revenue = fit.reduce((t, x) => t + x.eb.revenue, 0);
+    // Suggested share of the Amazon cost the books count (typed-in costs, cancelled and ignored lines left out), split
+    // by each sale's eBay revenue; the last share takes the rounding so the shares add up to the cost exactly
+    let left = az.cost;
+    const shares = fit.map((x, i) => {
+      if (az.cost === null || !(revenue > 0)) return null;
+      const share = i === fit.length - 1 ? Math.round(left * 100) / 100 : Math.round((az.cost * x.eb.revenue / revenue) * 100) / 100;
+      left -= share;
+      return share;
+    });
+    out.push({
+      amazon_order_id: az.amazon_order_id,
+      order_date: az.order_date,
+      amazon_units: az.units,
+      total: az.cost,
+      linked_to: az.linked_to || null,
+      sales: fit.map((x, i) => ({
+        ebay_order_id: x.eb.order_id, created_at: x.eb.created_at, ship_name: x.eb.ship_name, units: Math.max(1, x.eb.units),
+        revenue: x.eb.revenue, score: x.s.score, reasons: x.s.reasons, cost_share: shares[i],
+      })),
+    });
+  }
+  sharedCache = { key, value: out };
+  return out;
 }

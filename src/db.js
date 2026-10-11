@@ -263,6 +263,11 @@ create table if not exists amazon_emails (
   parsed       jsonb,
   created_at   timestamptz default now()
 );
+-- An email that failed to read is read again on later syncs (attempts, and once more after a parser change);
+-- dismissed = someone has dealt with it, so it stops warning
+alter table amazon_emails add column if not exists attempts int default 1;
+alter table amazon_emails add column if not exists parser_version int;
+alter table amazon_emails add column if not exists dismissed boolean default false;
 create table if not exists amazon_refunds (
   message_id      text not null,
   amazon_order_id text not null,
@@ -272,6 +277,9 @@ create table if not exists amazon_refunds (
 );
 -- the item named in the refund email ("Refund issued for <item>"), used to match refunds for purchases this inbox never saw
 alter table amazon_refunds add column if not exists title text;
+-- the refund the email states; amount is what is counted (capped so an order's refunds never exceed its cost)
+alter table amazon_refunds add column if not exists email_amount numeric(12,2);
+create index if not exists amazon_refunds_order_idx on amazon_refunds(amazon_order_id);
 -- eBay listing analytics (src/listings.js)
 create table if not exists ebay_listings (
   item_id            text primary key,
