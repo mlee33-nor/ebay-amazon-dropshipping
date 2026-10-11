@@ -1,9 +1,10 @@
 // Ask AI: a chat about the business. The AI model (FreeLLMAPI) reads each question, the dashboard works the answer out
-// from the same numbers and settlement math as every other page, and the model writes the reply from those facts. A
-// reply with a number that isn't in the facts is dropped for the dashboard's own wording. While it works, the chat
-// shows each step as it happens, so it's obvious it's thinking.
+// from the same numbers and settlement math as every other page, and that answer is always shown first. The model's
+// friendly line goes under it, and is dropped when a figure in it doesn't match. While it works, the chat shows each
+// step as it happens, so it's obvious it's thinking.
 import { esc, ICONS } from './util.js';
 import { state } from './app.js';
+import { answerParts } from './ask-answer.js';
 
 const chat = []; // { role: 'user'|'assistant', text, answer?, context?, pending?, stage?, started? }
 let busy = false;
@@ -15,17 +16,19 @@ const md = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\n/g, '
 const tableHtml = (t) => `<div class="table-wrap ask-tablewrap"><table class="simple ask-table"><thead><tr>${t.head.map((h, i) => `<th class="${i ? 'r' : ''}">${esc(h)}</th>`).join('')}</tr></thead><tbody>${t.rows.map((r) => `<tr>${r.map((c, i) => `<td class="${i ? 'r num' : ''}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 const bulletsHtml = (b) => `<ul class="ask-bullets">${b.map((x) => `<li>${md(x)}</li>`).join('')}</ul>`;
 
+// The dashboard's answer is the headline; the AI model's line, if any, goes under it (ask-answer.js)
 function answerHtml(a) {
-  const parts = [`<div class="bubble">${md(a.text || '')}</div>`];
-  if (a.bullets?.length) parts.push(bulletsHtml(a.bullets));
-  if (a.table) parts.push(tableHtml(a.table));
-  // The figures the reply was written from, one click away
-  const f = a.facts;
-  if (f && (f.text || f.bullets?.length || f.table)) {
-    parts.push(`<details class="ask-facts"><summary>${ICONS.search}<span>The numbers behind this</span></summary><div class="ask-facts-body">${f.text ? `<p>${md(f.text)}</p>` : ''}${f.bullets?.length ? bulletsHtml(f.bullets) : ''}${f.table ? tableHtml(f.table) : ''}</div></details>`);
+  const p = answerParts(a);
+  const parts = [`<div class="bubble">${md(p.headline || '')}${p.friendly ? `<div class="muted ask-friendly" style="margin-top:6px">${md(p.friendly)}</div>` : ''}</div>`];
+  if (p.bullets?.length) parts.push(bulletsHtml(p.bullets));
+  if (p.table) parts.push(tableHtml(p.table));
+  // The rest of the figures behind the headline, one click away
+  const f = p.folded;
+  if (f && (f.bullets?.length || f.table)) {
+    parts.push(`<details class="ask-facts"><summary>${ICONS.search}<span>The numbers behind this</span></summary><div class="ask-facts-body">${f.bullets?.length ? bulletsHtml(f.bullets) : ''}${f.table ? tableHtml(f.table) : ''}</div></details>`);
   }
   if (a.understood) {
-    const by = a.writtenBy === 'model' ? 'written by FreeLLMAPI from the dashboard’s numbers' : a.writtenBy === 'dashboard' ? 'the dashboard’s own wording (the AI reply didn’t match the numbers)' : a.understood.by === 'model' ? 'read by FreeLLMAPI' : 'built-in reader';
+    const by = p.friendly ? 'the dashboard’s answer, with a line from FreeLLMAPI' : a.writtenBy === 'dashboard' ? 'the dashboard’s own wording (the AI line didn’t match the numbers)' : a.understood.by === 'model' ? 'read by FreeLLMAPI' : 'built-in reader';
     parts.push(`<div class="ask-read" title="How the question was read. If it's wrong, rephrase the question.">${ICONS.search}<span>Answering: <b>${esc(a.understood.label)}</b>${a.understood.period ? ` · ${esc(a.understood.period)}` : ''}${a.understood.product ? ` · “${esc(a.understood.product)}”` : ''} · ${by}</span></div>`);
   }
   return parts.join('');
@@ -69,7 +72,7 @@ const SUGGEST = ['How much did we make this month?', 'Why are we down this month
 
 function statusHtml() {
   const ai = state.data?.ai?.configured;
-  return `<div class="ask-status">${ICONS.check}<div><b>${ai ? 'Answers are written by FreeLLMAPI from your numbers.' : 'Answers come straight from your numbers.'}</b> <span class="muted">${ai ? 'Every figure is checked against the dashboard; if one doesn’t match, you get the dashboard’s own answer.' : 'Every figure is the same one the dashboard shows.'}</span></div></div>`;
+  return `<div class="ask-status">${ICONS.check}<div><b>Answers come straight from your numbers.</b> <span class="muted">${ai ? 'The first line of each answer is the dashboard’s own figure. FreeLLMAPI may add a friendly line under it; that line is dropped when a figure, sign, month or who-pays-whom in it doesn’t match the dashboard, but read the headline for the exact number.' : 'Every figure is the same one the dashboard shows.'}</span></div></div>`;
 }
 
 function paintLog() {

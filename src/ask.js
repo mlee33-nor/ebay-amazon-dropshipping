@@ -5,7 +5,7 @@
 import { buildDataset, buildBooks } from './dataset.js';
 import { getSetting } from './db.js';
 import { businessDay, businessMonth } from './time.js';
-import { settleMonth, allMonths, settlePeriodOf, settlePeriodRange } from '../public/js/settlement.js';
+import { settleMonth, allMonths, settlePeriodOf, settlePeriodRange, CYCLE_START } from '../public/js/settlement.js';
 import { promoMonth } from '../public/js/promo-months.js';
 
 // ---------------------------------------------------------------- money + dates
@@ -30,6 +30,10 @@ const dayLabel = (ymd) => { const [y, m, d] = ymd.split('-').map(Number); return
 // ---------------------------------------------------------------- words
 const norm = (s) => String(s || '').toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9$.%/\s-]/g, ' ').replace(/\s+/g, ' ').trim();
 const tokens = (s) => norm(s).split(/[\s/-]+/).filter(Boolean);
+// One word, singular, for matching names: "lines" -> "line", "proxies" -> "proxy", "boxes" -> "box" ("glass" stays)
+const singular = (w) => (w.length > 4 && w.endsWith('ies') ? `${w.slice(0, -3)}y`
+  : w.length > 4 && /(ss|x|z|ch|sh)es$/.test(w) ? w.slice(0, -2)
+  : w.length > 3 && w.endsWith('s') && !/(ss|us|is)$/.test(w) ? w.slice(0, -1) : w);
 // Optimal-string-alignment distance: catches typos and swapped letters ("profti", "busienss")
 function osa(a, b) {
   if (Math.abs(a.length - b.length) > 1) return 2;
@@ -79,8 +83,9 @@ const fixMonths = (t) => t.split(' ').map((w) => (w.length >= 4 && !MONTH_NAMES.
 const NUM_WORDS = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fourteen: 14, thirty: 30, sixty: 60, ninety: 90 };
 const MONTH_DAY_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*(?:days?|weeks?|months?|sales?|orders?|items?))/g;
 
-// Every time period mentioned in a question, in the order it was mentioned (Arizona business days)
-export function parsePeriods(q, today = businessDay(new Date())) {
+// Every time period mentioned in a question, in the order it was mentioned (Arizona business days). dueDay is the
+// settlement_day setting, so pay cycles here are the same ones the settlement uses.
+export function parsePeriods(q, today = businessDay(new Date()), dueDay = 26) {
   let t = fixMonths(norm(q));
   const curM = today.slice(0, 7);
   const found = [];
@@ -91,20 +96,63 @@ export function parsePeriods(q, today = businessDay(new Date())) {
   // A month name means the latest one so far, or next month ("what's owed for October" at the end of September)
   const yearFor = (mm, y, allowNext = false) => { let key = `${y}-${String(mm).padStart(2, '0')}`; if (key > (allowNext ? shiftMonth(curM, 1) : curM)) key = `${Number(y) - 1}${key.slice(4)}`; return key; };
 
+  // A span that is exactly one pay cycle (or that cycle so far) is that cycle: its payment's rows, refunds booked on
+  // it included ("since Sep 27" on Oct 10 is the October payment)
+  const asCycle = (p) => {
+    const c = settlePeriodOf(p.from, dueDay);
+    const r = settlePeriodRange(c, dueDay);
+    if (c < CYCLE_START || p.from !== r.from || p.to < (r.to < today ? r.to : today) || p.to > r.to) return p;
+    return { ...p, label: `${p.label}, the ${monthName(c).split(' ')[0]} pay cycle (${dayLabel(r.from)}–${dayLabel(r.to)})`, cycle: c, cycleTo: r.to };
+  };
   // Specific days first ("Sep 14", "9/14"), then blank them out so "Sep" isn't also read as the whole month
+  const days = [];
   for (const m of t.matchAll(MONTH_DAY_RE)) {
     const key = yearFor(monthIdx(m[1]) + 1, today.slice(0, 4));
     const day = `${key}-${String(Math.min(Number(m[2]), daysIn(key))).padStart(2, '0')}`;
-    if (Number(m[2]) >= 1 && Number(m[2]) <= 31) add(m.index, span(day, day, dayLabel(day)));
+    if (Number(m[2]) >= 1 && Number(m[2]) <= 31) days.push({ idx: m.index, end: m.index + m[0].length, day });
   }
   for (const m of t.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g)) {
     const mm = Number(m[1]); const dd = Number(m[2]);
     if (mm < 1 || mm > 12 || dd < 1 || dd > 31) continue;
     const key = m[3] ? `${m[3].length === 2 ? `20${m[3]}` : m[3]}-${String(mm).padStart(2, '0')}` : yearFor(mm, today.slice(0, 4));
     const day = `${key}-${String(Math.min(dd, daysIn(key))).padStart(2, '0')}`;
-    add(m.index, span(day, day, dayLabel(day)));
+    days.push({ idx: m.index, end: m.index + m[0].length, day });
   }
+  days.sort((a, b) => a.idx - b.idx);
+  // Ranges are one span: "Sep 27 to Oct 10", "from 9/27 through 10/10", "between 9/27 and 10/10". Two days with "vs"
+  // or "compare" stay two days (a comparison). "since Sep 27", "after Sep 27", "from Sep 27 on" and "Sep 27 to now"
+  // run to today; a bare "from Sep 14" ("orders from Sep 14") is that one day.
+  const comparing = /\b(vs\.?|versus|compare[ds]?|comparison|against|difference)\b/.test(t);
+  const tails = []; // "to now" / "onwards" words used up by a range, blanked below so "today" isn't read again
+  for (let i = 0; i < days.length; i++) {
+    const a = days[i]; const b = days[i + 1];
+    const before = t.slice(0, a.idx);
+    const gap = b ? t.slice(a.end, b.idx) : '';
+    const joined = b && !comparing && (/^\s*(to|through|thru|until|till|-|–)\s*$/.test(gap) || (/^\s*and\s*$/.test(gap) && /\bbetween\s*$/.test(before)));
+    const tail = t.slice(a.end).match(/^\s*(?:(?:to|through|thru|until|till|up to)\s+(?:now|today|date)|onwards?|on(?=\s*$)|and after|and later)\b/);
+    if (joined) {
+      const [from, to] = a.day <= b.day ? [a.day, b.day] : [b.day, a.day];
+      add(a.idx, asCycle(span(from, to, `${dayLabel(from)}–${dayLabel(to)}`, { range: true })));
+      i++;
+    } else if (/\b(since|after)\s*$/.test(before) || tail) {
+      const from = /\bafter\s*$/.test(before) ? addDays(a.day, 1) : a.day;
+      if (tail) tails.push([a.end, a.end + tail[0].length]);
+      add(a.idx, asCycle(span(from, today, `since ${dayLabel(from)}`, { range: true })));
+    } else add(a.idx, span(a.day, a.day, dayLabel(a.day)));
+  }
+  for (const [x, y] of tails) t = t.slice(0, x) + ' '.repeat(y - x) + t.slice(y);
   t = t.replace(MONTH_DAY_RE, (x) => ' '.repeat(x.length)).replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, (x) => ' '.repeat(x.length));
+  // A pay cycle named by its month: "the September pay cycle", "october pay period", "pay cycle for August"
+  const CYC = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\\s+(20\\d\\d))?';
+  const cycleWords = '(?:pay(?:ment)?\\s+(?:cycle|period)|settlement\\s+period|payment\\s+cycle)';
+  for (const re of [new RegExp(`\\b${CYC}\\s+${cycleWords}\\b`, 'g'), new RegExp(`\\b${cycleWords}\\s+(?:for|of|in)\\s+${CYC}\\b`, 'g')]) {
+    for (const m of t.matchAll(re)) {
+      const key = m[2] ? `${m[2]}-${String(monthIdx(m[1]) + 1).padStart(2, '0')}` : yearFor(monthIdx(m[1]) + 1, today.slice(0, 4), true);
+      const r = settlePeriodRange(key, dueDay);
+      add(m.index, span(r.from, r.to, `the ${monthName(key).split(' ')[0]} pay cycle (${dayLabel(r.from)}–${dayLabel(r.to)})`, { cycle: key, cycleTo: r.to }));
+    }
+    t = t.replace(re, (x) => ' '.repeat(x.length));
+  }
 
   add(at(/\btoday\b|\bso far today\b/), span(today, today, 'today'));
   { const y = addDays(today, -1); add(at(/\byesterday\b/), span(y, y, 'yesterday')); }
@@ -114,10 +162,10 @@ export function parsePeriods(q, today = businessDay(new Date())) {
   add(at(/\b(this month|month to date|mtd|so far this month)\b/), month(curM, 'this month'));
   add(at(/\blast month\b/), month(shiftMonth(curM, -1), `last month (${monthName(shiftMonth(curM, -1))})`));
   { // 26th-to-26th pay cycles (the settlement periods): "this cycle", "last pay period"
-    const cur = settlePeriodOf(today);
-    const cyc = (c, label) => { const r = settlePeriodRange(c); return span(r.from, r.to, `${label} (${dayLabel(r.from)}–${dayLabel(r.to)})`, { cycle: c }); };
+    const cur = settlePeriodOf(today, dueDay);
+    const cyc = (c, label) => { const r = settlePeriodRange(c, dueDay); return span(r.from, r.to, `${label} (${dayLabel(r.from)}–${dayLabel(r.to)})`, { cycle: c, cycleTo: r.to }); };
     add(at(/\b(this|current|the current)\s+(pay(ment)?\s+)?(cycle|period|settlement period)\b/), cyc(cur, 'this pay cycle'));
-    const prevC = settlePeriodOf(addDays(settlePeriodRange(cur).from, -1));
+    const prevC = settlePeriodOf(addDays(settlePeriodRange(cur, dueDay).from, -1), dueDay);
     add(at(/\b(last|previous|prior)\s+(pay(ment)?\s+)?(cycle|period|settlement period)\b/), cyc(prevC, 'last pay cycle'));
   }
   add(at(/\b(this year|ytd|year to date)\b/), span(`${today.slice(0, 4)}-01-01`, today, 'this year'));
@@ -133,13 +181,25 @@ export function parsePeriods(q, today = businessDay(new Date())) {
   }
   const q3 = t.match(/\bq([1-4])(?:\s+(20\d\d))?\b/);
   if (q3) { const y = q3[2] || today.slice(0, 4); const s = `${y}-${String((Number(q3[1]) - 1) * 3 + 1).padStart(2, '0')}`; add(t.indexOf(q3[0]), span(monthStart(s), monthEnd(shiftMonth(s, 2)), `Q${q3[1]} ${y}`)); }
+  const months = [];
   for (const m of t.matchAll(MONTH_RE)) {
     const word = m[1];
     // "may" is also an ordinary word: only a month when it looks like one
     if (word === 'may' && !m[2] && !/\b(in|for|of|during|since|from|to|vs|and)\s+may\b/.test(t)) continue;
     const key = m[2] ? `${m[2]}-${String(monthIdx(word) + 1).padStart(2, '0')}` : yearFor(monthIdx(word) + 1, today.slice(0, 4), true); // "December" in September means last December
-    const since = new RegExp(`\\bsince\\s+${word}`).test(t);
-    add(m.index, since ? span(monthStart(key), today, `since ${monthName(key)}`) : month(key));
+    months.push({ idx: m.index, end: m.index + m[0].length, key });
+  }
+  // "from July to September" and "between July and September" are one span; "compare August to September" is two
+  for (let i = 0; i < months.length; i++) {
+    const a = months[i]; const b = months[i + 1];
+    const before = t.slice(0, a.idx);
+    const gap = b ? t.slice(a.end, b.idx) : '';
+    if (b && !comparing && ((/\bfrom\s*$/.test(before) && /^\s*(to|through|thru|until|till|-|–)\s*$/.test(gap)) || (/\bbetween\s*$/.test(before) && /^\s*and\s*$/.test(gap)))) {
+      const [x, y] = a.key <= b.key ? [a.key, b.key] : [b.key, a.key];
+      add(a.idx, span(monthStart(x), monthEnd(y), `${monthName(x)} to ${monthName(y)}`, { range: true }));
+      i++;
+    } else if (/\bsince\s*$/.test(before)) add(a.idx, span(monthStart(a.key), today, `since ${monthName(a.key)}`));
+    else add(a.idx, month(a.key));
   }
   add(at(/\b(all time|alltime|ever|overall|lifetime|since (we )?(start|started|began|opened|launched)|in total|total so far|to date|since the (start|beginning))\b/), { from: null, to: today, label: 'all time', all: true });
   found.sort((a, b) => a.idx - b.idx);
@@ -180,13 +240,26 @@ const rowMoney = (o) => {
   const other = cents(o.extra_cost);
   return { payout, cogs, ads, other, net: payout - cogs - ads - other, refunds: cents(o.refunds) };
 };
+// A refund booked on a later payment ("Refund · …"), or a sheet's refund row for a sale that has its own row in the
+// books (Mozi Wash: sold on the August sheet, refunded on September's), is money on an earlier sale, not a sale: its
+// money counts, but it is never counted as a sale, an order or a unit (counts, averages, per-sale figures). A sheet
+// refund row that is the only record of its sale (sold and refunded in the same month) is that sale.
+const LATER = new WeakSet();
+const sheetRefund = (o) => o.source === 'ledger' && Boolean(o.ledger?.is_refund);
+const isLaterRefund = (o) => o.source === 'refund' || LATER.has(o);
+function markLaterRefunds(orders) {
+  const sold = new Set();
+  for (const o of orders) if (o.counted && o.source !== 'refund' && !sheetRefund(o)) { sold.add(o.order_id); if (o.ebay_order_id) sold.add(o.ebay_order_id); }
+  for (const o of orders) if (sheetRefund(o) && o.ebay_order_id && sold.has(o.ebay_order_id)) LATER.add(o);
+}
 function stats(rows) {
-  const t = { n: rows.length, payout: 0, cogs: 0, ads: 0, other: 0, net: 0, refunds: 0, revenue: 0, refundedSales: 0, losses: [] };
+  const t = { n: 0, payout: 0, cogs: 0, ads: 0, other: 0, net: 0, refunds: 0, revenue: 0, refundedSales: 0, laterRefunds: 0, losses: [] };
   for (const o of rows) {
     const m = rowMoney(o);
     t.payout += m.payout; t.cogs += m.cogs; t.ads += m.ads; t.other += m.other; t.net += m.net; t.refunds += m.refunds;
     t.revenue += cents(o.revenue);
-    if (m.refunds > 0 || o.status === 'returned') t.refundedSales++;
+    if (isLaterRefund(o)) t.laterRefunds++;
+    else { t.n++; if (m.refunds > 0 || o.status === 'returned') t.refundedSales++; }
     if (m.net < 0) t.losses.push({ o, net: m.net });
   }
   t.losses.sort((a, b) => a.net - b.net);
@@ -195,9 +268,9 @@ function stats(rows) {
 }
 // Operating costs in a period: a month fully inside counts in full (the current month through today counts in
 // full, like the settlement); a partly covered month counts by its share of days
-function opexIn(ctx, p) {
+function opexIn(ctx, p, keep = () => true) {
   let total = 0;
-  for (const e of ctx.books.expenses) {
+  for (const e of ctx.books.expenses.filter(keep)) {
     const amt = cents(e.amount);
     if (!p || p.all) { total += amt; continue; }
     if (p.cycle) { if (e.month === p.cycle) total += amt; continue; } // each month's costs go on that month's payment
@@ -213,14 +286,21 @@ function opexIn(ctx, p) {
   return total;
 }
 const settle = (ctx, month) => settleMonth({ month, orders: ctx.orders, expenses: ctx.books.expenses, settlements: ctx.books.settlements, splitAmazon: ctx.s.split });
-// A later refund line counts toward its product, not as a product of its own
-const productKey = (o) => (o.title || '').replace(/^Refund · /, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 48);
-function byProduct(rows) {
+// A later refund line counts toward its product, not as a product of its own: it takes the title of the sale it
+// refunds (refund_of), or its own title without "Refund · " when that sale isn't in the books
+const keyOfTitle = (t) => String(t || '').replace(/^Refund · /, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 48);
+const saleOf = (o, all) => {
+  const ref = o.refund_of || (sheetRefund(o) ? o.ebay_order_id : null);
+  return ref && all ? all.find((x) => x !== o && x.counted && !isLaterRefund(x) && (x.order_id === ref || x.ebay_order_id === ref)) || null : null;
+};
+const titleOf = (o, all) => (isLaterRefund(o) && saleOf(o, all)?.title) || String(o.title || '').replace(/^Refund · /, '');
+const productKey = (o, all) => keyOfTitle(titleOf(o, all));
+function byProduct(rows, all = null) {
   const m = new Map();
   for (const o of rows) {
-    const k = productKey(o);
-    const later = o.source === 'refund'; // a refund booked in a later period: money on the same sale, not another sale
-    if (!m.has(k)) m.set(k, { title: o.title.replace(/^Refund · /, ''), n: 0, net: 0, payout: 0, refunds: 0 });
+    const k = productKey(o, all);
+    const later = isLaterRefund(o); // a refund booked in a later period: money on the same sale, not another sale
+    if (!m.has(k)) m.set(k, { title: titleOf(o, all), n: 0, net: 0, payout: 0, refunds: 0 });
     const p = m.get(k); const r = rowMoney(o);
     if (!later) p.n++;
     p.net += r.net; p.payout += r.payout; if (r.refunds > 0 || later) p.refunds++;
@@ -236,34 +316,46 @@ const NOT_PRODUCT = new Set(['cost', 'costs', 'costing', 'price', 'prices', 'pri
   'worse', 'down', 'up', 'less', 'more', 'most', 'least', 'lot', 'much', 'many', 'big', 'small', 'new', 'old', 'need', 'needs', 'want', 'know', 'tell', 'show',
   'give', 'check', 'see', 'still', 'yet', 'ever', 'right', 'now', 'currently', 'current', 'recently', 'lately', 'our', 'ours', 'team', 'shop', 'store', 'account',
   'something', 'anything', 'everything', 'nothing', 'ones', 'kind', 'type', 'thing', 'stuff', 'why', 'what', 'which', 'when', 'where', 'who', 'how',
-  'impact', 'impacted', 'affect', 'affected', 'affects', 'effect', 'change', 'changed', 'happen', 'happened', 'sheet', 'cycle', 'payment', 'deal', 'work', 'works']);
+  'impact', 'impacted', 'affect', 'affected', 'affects', 'effect', 'change', 'changed', 'happen', 'happened', 'sheet', 'cycle', 'payment', 'deal', 'work', 'works',
+  // Settlement wording: "did Drew pay me back" must not find the "Black" fabric roll, nor "cover the shortfall" the spool cover
+  'back', 'cover', 'covered', 'rest', 'remaining', 'balance', 'difference', 'shortfall', 'transfer', 'zelle', 'venmo', 'paypal', 'cashapp']);
 
 function findProduct(ctx, toks) {
   const cand = toks.filter((t) => t.length >= 3 && !STOP.has(t) && !NOT_PRODUCT.has(t) && !ALL_VOCAB.has(t) && !/^\d+$/.test(t) && !MONTH_NAMES.some((m) => m.startsWith(t.slice(0, 3)) && t.length <= m.length));
   if (!cand.length) return null;
-  const products = byProduct(ctx.orders.filter((o) => o.counted || o.status === 'awaiting_cost'));
+  const asked = [...new Set(cand.map(singular))]; // "fishing lines" is "fishing line"
+  const products = byProduct(ctx.orders.filter((o) => o.counted || o.status === 'awaiting_cost'), ctx.orders);
+  const titleWords = (t) => new Set(tokens(t).map(singular));
   const df = new Map();
-  for (const p of products) for (const w of new Set(tokens(p.title))) df.set(w, (df.get(w) || 0) + 1);
+  for (const p of products) for (const w of titleWords(p.title)) df.set(w, (df.get(w) || 0) + 1);
   let best = null;
   for (const p of products) {
-    const words = new Set(tokens(p.title));
-    let hits = 0;
-    for (const c of cand) if ([...words].some((w) => like(c, w) || (c.length >= 4 && w.startsWith(c)))) hits++;
-    if (!hits) continue;
-    const score = hits / cand.length;
-    if (!best || score > best.score) best = { score, words: cand };
+    const words = [...titleWords(p.title)];
+    const hit = asked.filter((c) => words.some((w) => wordMatch(c, w)));
+    if (!hit.length) continue;
+    const score = hit.length / asked.length;
+    if (!best || score > best.score) best = { score, words: hit, of: asked.length };
   }
-  if (!best || best.score < (best.words.length > 1 ? 0.66 : 0.5)) {
+  if (!best || best.score < (best.of > 1 ? 0.66 : 0.5)) {
     // "how did the govee refund affect us": one distinctive word that is in a product's name (exactly, and in only
-    // a few titles) is enough even among other words
-    const rare = cand.filter((c) => c.length >= 5 && (df.get(c) || 0) >= 1 && df.get(c) <= 3);
-    return rare.length ? rare : null;
+    // a few titles) is enough even among other words, as long as those other words aren't in any product's name.
+    // "fishing lines" with only a "Fishing Reel Holder" in the books keeps both words (and finds no sale), rather
+    // than answering for the reel holder.
+    const rare = asked.filter((c) => c.length >= 5 && (df.get(c) || 0) >= 1 && df.get(c) <= 3);
+    if (!rare.length) return null;
+    const inSomeTitle = (c) => [...df.keys()].some((w) => wordMatch(c, w));
+    return asked.some((c) => !rare.includes(c) && inSomeTitle(c)) ? asked : rare;
   }
-  // Rare-enough words only: a word in most titles ("set", "pack") isn't a product name
-  const words = best.words.filter((w) => [...df.entries()].some(([k, n]) => (like(w, k) || k.startsWith(w)) && n <= Math.max(3, products.length * 0.25)));
-  return words.length ? words : null;
+  // At least one rare-enough word: a word in most titles ("set", "pack") on its own isn't a product name. Every word
+  // that matched the product is kept, so "fishing line" never also picks up the "fishing reel holder".
+  const rareEnough = (w) => [...df.entries()].some(([k, n]) => wordMatch(w, k) && n <= Math.max(3, products.length * 0.25));
+  return best.words.some(rareEnough) ? best.words : null;
 }
-const productFilter = (words) => (o) => { const ts = tokens(o.title); return words.every((w) => ts.some((t) => like(w, t) || (w.length >= 4 && t.startsWith(w)))); };
+// A question word against a title word, both singular: typos allowed, and a word may be the start of a longer one
+const wordMatch = (w, t) => like(w, t) || (w.length >= 4 && t.startsWith(w));
+// Every product word is a word of one sold title exactly (no typo, no prefix): "fishing line" in "…Braided Fishing Line"
+const exactProduct = (ctx, words) => counted(ctx).some((o) => { const ts = new Set(tokens(titleOf(o, ctx.orders)).map(singular)); return words.every((w) => ts.has(singular(w))); });
+const productFilter = (words) => (o) => { const ts = tokens(o.title).map(singular); return words.every((w) => ts.some((t) => wordMatch(w, t))); };
 
 // ---------------------------------------------------------------- intent
 // Phrase rules, checked in this order. The order settles the conflicts between everyday phrasings:
@@ -286,24 +378,26 @@ const RULES = [
   ['aov', /\b(average|avg|typical|mean)\b|\bper (sale|order|item)\b/],
   ['worst', /\b(worst|losing|lose money|lost money|losers?|least profitable|unprofitable|bleeding|stop selling|(should|could) (we )?(drop|cut|stop)|money pits?)\b/],
   ['top', /\b(best|top|most profitable|best[- ]?sell\w*|sells? (the )?best|sell the most|sold the most|most sold|most popular|made the most|most money|highest profit|winners?|biggest earners?)\b/],
-  ['recent', /\b(last|latest|recent|newest|most recent)\s+(\d+\s+)?(sales?|orders?|sold|items?)\b|\bwhat (did we |have we |has |)(sell|sold)\b|\bwhat sold\b|\b(list|show)( me)?( the| all)? (sales|orders)\b|\bwhich (sales|orders|items)\b/],
+  ['recent', /\b(last|latest|recent|newest|most recent)\s+(\d+\s+)?(sales?|orders?|sold|items?)\b|\bwhat (did we |have we |has |)(sell|sold)\b|\bwhat sold\b|\b(list|show)( me)?( the| all)? (sales|orders)\b|\bwhich (sales|orders|items)\b|^(the |our |all )?(sales|orders)\s+(from|since|after|on|between|in)\b/],
   ['count', /\b(how many|number of|count of|# of|any sales|anything sold|did we sell|did we get any|sales count)\b/],
   ['revenue', /\b(revenue|gross|payouts?|turnover|sales (dollars|total|amount)|total sales|in sales|ebay (paid|pay|pays|deposit\w*)|brought in|bring in|collected|sales volume)\b/],
   ['profit', /\b(profits?|net|make|made|making|earn\w*|income|money|doing|clear(ed)?|take home|bottom line|business|p ?& ?l|pnl|up or down)\b/],
 ];
 
+// "what about August?", "and in September?": a follow-up that keeps the topic (and the product, with a new period)
+const FOLLOW_UP = /^(what about|how about|and|same for|what of|now)\b/;
 const DEICTIC = /\b(that|the same) (month|period|time|week|day|year)\b|\bthen\b|\bback then\b/;
 
 function understand(question, ctx, prev) {
   const text = norm(question).replace(/\bhavent\b|\bhaven t\b/g, 'havent');
   const toks = tokens(question);
-  const periods = parsePeriods(question, ctx.today);
+  const periods = parsePeriods(question, ctx.today, ctx.s.dueDay);
   // Product names come from what's left once the topic and time words are taken out ("what did we clear in July"
   // must not find the "Clear Corner Lights" listing)
   let rest = fixMonths(text);
   for (const [, re] of RULES) rest = rest.replace(new RegExp(re.source, 'g'), ' ');
   rest = rest.replace(MONTH_DAY_RE, ' ').replace(MONTH_RE, ' ')
-    .replace(/\b(today|yesterday|this|last|past|previous|week|month|year|days?|weeks?|months?|years?|so far|since|ever|overall|all time|numbers?|stuff|things?|item|items|product|products|sales?|orders?)\b/g, ' ');
+    .replace(/\b(today|yesterday|this|last|past|previous|week|month|year|days?|weeks?|months?|years?|so far|since|ever|overall|all time|numbers?|stuff|things?|item|items|product|products|sales?|orders?|between|through|thru|until|till|after|pay|cycles?|periods?)\b/g, ' ');
   const product = findProduct(ctx, tokens(rest));
   let intent = null;
   for (const [name, re] of RULES) if (re.test(text)) { intent = name; break; }
@@ -334,12 +428,13 @@ function understand(question, ctx, prev) {
   if (!period && prev?.period && intent !== 'help' && (/^(what about|how about|and|same|also)\b/.test(text) || DEICTIC.test(text))) period = prev.period;
   const up = /\b(up|higher|more|better|increase[ds]?|grew|growing|ahead|good|great|rose|jump(ed)?|improv\w*)\b/.test(text);
   const down = /\b(down|lower|less|drop(ped)?|declin\w*|worse|slow(er|ed)?|fell|fallen|bad|decrease[ds]?|behind|struggl\w*|low)\b/.test(text);
-  return { intent, period, periods, product: product || (intent === prev?.intent && !periods.length ? prev?.product : null) || null, direction: up && !down ? 'up' : down && !up ? 'down' : null };
+  return { intent, period, periods, product: product || (intent === prev?.intent && (!periods.length || FOLLOW_UP.test(text)) ? prev?.product : null) || null, ownProduct: Boolean(product), direction: up && !down ? 'up' : down && !up ? 'down' : null };
 }
 
 // ---------------------------------------------------------------- answers
 const defaultPeriod = (ctx) => ({ from: monthStart(ctx.today.slice(0, 7)), to: ctx.today, label: 'this month', month: ctx.today.slice(0, 7), partial: true });
 const allTime = (ctx) => ({ from: null, to: ctx.today, label: 'all time', all: true });
+const currentCycle = (ctx) => { const c = settlePeriodOf(ctx.today, ctx.s.dueDay); const r = settlePeriodRange(c, ctx.s.dueDay); return { from: r.from, to: ctx.today, label: `this pay cycle (${dayLabel(r.from)}–${dayLabel(r.to)})`, cycle: c, cycleTo: r.to }; };
 const rowsFor = (ctx, p, product) => counted(ctx).filter((o) => inPeriod(o, p) && (!product || productFilter(product)(o)));
 const awaitingFor = (ctx, p) => ctx.orders.filter((o) => o.status === 'awaiting_cost' && inPeriod(o, p));
 
@@ -371,7 +466,7 @@ const periodPhrase = (ctx, p) => {
   return `in ${s}`;
 };
 // A period's name for tables and comparisons ("August 2026", "September 2026 so far")
-const shortLabel = (p) => (p.month ? `${monthName(p.month)}${p.partial ? ' so far' : ''}` : p.label);
+const shortLabel = (p) => (p.month ? `${monthName(p.month)}${p.partial ? ' so far' : ''}` : p.cycle && p.cycleTo ? `the ${monthName(p.cycle).split(' ')[0]} pay cycle${p.to < p.cycleTo ? ' so far' : ''}` : p.label);
 const isAre = (n) => (n === 1 ? 'is' : 'are');
 const counts = (n, one, many) => (n === 1 ? one : many);
 
@@ -415,17 +510,17 @@ function answerWhy(ctx, it) {
   // Money lost on refunded sales, then any other sales that lost money
   const refundLoss = (s) => s.losses.filter((x) => cents(x.o.refunds) > 0 || x.o.status === 'returned').reduce((t, x) => t + x.net, 0);
   const rc = refundLoss(cur); const rp = refundLoss(prv);
-  if (rc || rp) bullets.push(`**Refunds:** ${plural(cur.refundedSales, 'refunded sale')} lost ${$(-rc)} vs ${$(-rp)} ${cIn}${rc !== rp ? ` (${effect(rc - rp)})` : ''}.`);
+  if (rc || rp) bullets.push(`**Refunds:** ${plural(cur.refundedSales + cur.laterRefunds, 'refund')} lost ${$(-rc)} vs ${$(-rp)} ${cIn}${rc !== rp ? ` (${effect(rc - rp)})` : ''}.`);
   const otherLoss = cur.losses.filter((x) => !(cents(x.o.refunds) > 0 || x.o.status === 'returned'));
   if (otherLoss.length) bullets.push(`**${plural(otherLoss.length, 'sale')} lost money** without a refund (${$(otherLoss.reduce((t, x) => t + x.net, 0))}): ${otherLoss.slice(0, 3).map((x) => `${short(x.o.title, 34)} ${$(x.net)}`).join(', ')}.`);
 
   // Products that carried the earlier period but didn't this time
-  const pc = new Map(byProduct(rowsFor(ctx, p)).map((x) => [productKey({ title: x.title }), x]));
-  const swings = byProduct(rowsFor(ctx, c)).map((x) => ({ title: x.title, was: x.net, now: pc.get(productKey({ title: x.title }))?.net || 0 }))
+  const pc = new Map(byProduct(rowsFor(ctx, p), ctx.orders).map((x) => [productKey({ title: x.title }), x]));
+  const swings = byProduct(rowsFor(ctx, c), ctx.orders).map((x) => ({ title: x.title, was: x.net, now: pc.get(productKey({ title: x.title }))?.net || 0 }))
     .map((x) => ({ ...x, d: x.now - x.was })).filter((x) => (up ? x.d > 0 : x.d < 0)).sort((a, b) => (up ? b.d - a.d : a.d - b.d)).slice(0, 3);
   if (!up && swings.length && swings[0].d <= -500) bullets.push(`**Products that earned less:** ${swings.map((x) => `${short(x.title, 32)} (${$(x.was)} → ${$(x.now)})`).join('; ')}.`);
   if (up) {
-    const risers = byProduct(rowsFor(ctx, p)).sort((a, b) => b.net - a.net).slice(0, 3);
+    const risers = byProduct(rowsFor(ctx, p), ctx.orders).sort((a, b) => b.net - a.net).slice(0, 3);
     if (risers.length) bullets.push(`**Biggest earners:** ${risers.map((x) => `${short(x.title, 32)} ${$(x.net)}`).join('; ')}.`);
   }
 
@@ -572,7 +667,12 @@ function answerMetric(ctx, it) {
   const p = it.period || (it.product ? allTime(ctx) : defaultPeriod(ctx));
   const rows = rowsFor(ctx, p, it.product);
   const s = stats(rows);
-  const productName = it.product ? (rows[0] ? `“${short(rows[0].title, 50)}”` : `“${it.product.join(' ')}”`) : '';
+  // Per-sale figures are the period's own sales only: a refund line on an earlier sale is money, not a sale, so it
+  // can't be spread over this period's sales (October's 14 sales don't carry September's HHLPRO refund)
+  const own = stats(rows.filter((o) => !isLaterRefund(o)));
+  const laterNote = s.laterRefunds ? ` ${plural(s.laterRefunds, 'refund')} on earlier sales (${$(s.payout - own.payout)} payout, ${$(s.net - own.net)} profit) ${counts(s.laterRefunds, 'is', 'are')} not in this average.` : '';
+  const named = rows.find((o) => !isLaterRefund(o)) || rows[0];
+  const productName = it.product ? (named ? `“${short(titleOf(named, ctx.orders), 50)}”` : `“${it.product.join(' ')}”`) : '';
   const when = periodPhrase(ctx, p);
   const wait = it.product ? [] : waitingIn(ctx, p);
   const waitNote = wait.length ? ` ${plural(wait.length, 'more sale')} ${isAre(wait.length)} awaiting the Amazon email and ${counts(wait.length, 'isn’t', 'aren’t')} counted yet.` : '';
@@ -593,13 +693,13 @@ function answerMetric(ctx, it) {
     case 'count': {
       const total = s.n + wait.length;
       return {
-        text: `**${plural(total, 'sale')}${productName ? ` of ${productName}` : ''} ${when}.**${wait.length ? ` ${s.n} counted in profit, ${wait.length} awaiting the Amazon email.` : ''}${s.refundedSales ? ` ${s.refundedSales} of the counted sales ${counts(s.refundedSales, 'was', 'were')} refunded.` : ''}`,
+        text: `**${plural(total, 'sale')}${productName ? ` of ${productName}` : ''} ${when}.**${wait.length ? ` ${s.n} counted in profit, ${wait.length} awaiting the Amazon email.` : ''}${s.refundedSales ? ` ${s.refundedSales} of the counted sales ${counts(s.refundedSales, 'was', 'were')} refunded.` : ''}${s.laterRefunds ? ` ${plural(s.laterRefunds, 'refund')} on earlier sales ${counts(s.laterRefunds, 'is', 'are')} booked here too (money only, not sales).` : ''}`,
         bullets: wait.slice(0, 5).map((o) => `${dayLabel(businessDay(o.created_at))}: ${short(o.title)}, ${$(cents(o.revenue))} (${waitWord(o)})`),
         chips: [`Profit ${p.label}`, `What sold ${p.label}?`],
       };
     }
     case 'revenue': return { text: `**eBay payouts${productName ? ` for ${productName}` : ''} ${when}: ${$(s.payout)}** from ${plural(s.n, 'sale')}, after eBay's fees and buyer refunds.${waitNote}`, chips: [`Profit ${p.label}`, `Fees ${p.label}`] };
-    case 'cogs': return { text: `**Amazon cost${productName ? ` for ${productName}` : ''} ${when}: ${$(s.cogs)}** for ${plural(s.n, 'sale')}${s.n ? ` (${$(Math.round(s.cogs / s.n))} per sale)` : ''}. ${ctx.s.A} pays this and gets it back in the settlement.${waitNote}`, chips: [`Profit ${p.label}`, `What does ${ctx.s.B} owe?`] };
+    case 'cogs': return { text: `**Amazon cost${productName ? ` for ${productName}` : ''} ${when}: ${$(s.cogs)}** for ${plural(s.n, 'sale')}${s.n ? ` (${$(Math.round(own.cogs / own.n))} per sale)` : ''}. ${ctx.s.A} pays this and gets it back in the settlement.${waitNote}`, chips: [`Profit ${p.label}`, `What does ${ctx.s.B} owe?`] };
     case 'fees': {
       const synced = rows.filter((o) => o.source === 'ebay');
       const fvf = synced.reduce((t, o) => t + cents(o.fees), 0);
@@ -614,7 +714,7 @@ function answerMetric(ctx, it) {
       };
     }
     case 'margin': return { text: `**Margin ${when}: ${pct(s.payout ? s.net / s.payout : null)}** of payouts (${$(s.net)} item profit on ${$(s.payout)}).`, bullets: [`Return on Amazon spend: ${pct(s.cogs ? s.net / s.cogs : null)} (${$(s.net)} profit on ${$(s.cogs)} spent).`], chips: [`Worst products ${p.label}`, `Profit ${p.label}`] };
-    case 'aov': return { text: `**Average sale ${when}: ${$(s.n ? Math.round(s.payout / s.n) : 0)} payout, ${$(s.n ? Math.round(s.net / s.n) : 0)} profit**, across ${plural(s.n, 'sale')}.`, chips: [`Top products ${p.label}`] };
+    case 'aov': return { text: `**Average sale ${when}: ${$(own.n ? Math.round(own.payout / own.n) : 0)} payout, ${$(own.n ? Math.round(own.net / own.n) : 0)} profit**, across ${plural(own.n, 'sale')}.${laterNote}`, chips: [`Top products ${p.label}`] };
     case 'refunds': {
       const ref = rows.filter((o) => cents(o.refunds) > 0 || o.status === 'returned');
       const cancelled = ctx.orders.filter((o) => o.cancelled && o.source === 'ebay' && inPeriod(o, p) && (!it.product || productFilter(it.product)(o)));
@@ -644,7 +744,7 @@ function answerMetric(ctx, it) {
 
 function answerProducts(ctx, it, worst) {
   const p = it.period || allTime(ctx);
-  const all = byProduct(rowsFor(ctx, p));
+  const all = byProduct(rowsFor(ctx, p), ctx.orders);
   const byUnits = !worst && /\b(sold|selling|seller|sells|units|popular|most sold|sell the most)\b/.test(it.raw || '') && !/profit|money|earn/.test(it.raw || '');
   if (worst) {
     const losers = all.filter((x) => x.net < 0).sort((a, b) => a.net - b.net);
@@ -664,7 +764,7 @@ function answerProducts(ctx, it, worst) {
     text: byUnits
       ? `**Best seller ${periodPhrase(ctx, p)}: ${short(lead.title, 50)}, ${plural(lead.n, 'sale')} (${$(lead.net)} profit).**`
       : `**Most profitable ${periodPhrase(ctx, p)}: ${short(lead.title, 50)}, ${$(lead.net)} from ${plural(lead.n, 'sale')}.**`,
-    table: { head: ['Product', 'Sold', 'Profit', 'Per sale'], rows: list.map((x) => [short(x.title, 44), String(x.n), $(x.net), $(Math.round(x.net / x.n))]) },
+    table: { head: ['Product', 'Sold', 'Profit', 'Per sale'], rows: list.map((x) => [short(x.title, 44), String(x.n), $(x.net), x.n ? $(Math.round(x.net / x.n)) : '—']) },
     chips: [`Worst products ${p.label}`, `Why are we down ${p.label === 'all time' ? 'this month' : p.label}?`],
   };
 }
@@ -683,6 +783,105 @@ function answerSettlement(ctx, it) {
   // Each payment covers the sales between two due days, so name it with its dates
   const payName = (m) => { const r = settlePeriodRange(m, ctx.s.dueDay); return `${monthName(m).split(' ')[0]} payment (sales ${dayLabel(r.from)}–${dayLabel(r.to)})`; };
 
+  const raw = it.raw || '';
+  // "Did Drew pay?" / "has he sent it" / "Drew paid me for X" (not "how much does he owe")
+  const paidQ = (/\b(paid|sent|received|gotten|got|covered|settled)\b/.test(raw) || /\b(did|has|have)\b.*\b(pay|send|cover|settle)\b/.test(raw)) && !/\bowe/.test(raw);
+  // Where one payment stands, as a plain answer first: Yes (in full), Partly, No, Not yet, or overpaid
+  const standing = (x) => {
+    const sends = cents(x.sellerSends);
+    const paid = x.paid !== null ? cents(x.paid) : 0;
+    const o = owedOf(x);
+    const on = x.paidAt ? ` on ${dayLabel(x.paidAt)}` : '';
+    if (paid && o === 0) return { lead: 'Yes, in full', line: `${B} paid ${$(paid)}${on}, exactly what it came to.` };
+    if (paid && o < 0) return { lead: `Yes, and overpaid by ${$(-o)}`, line: `It came to ${$(sends)} and ${B} paid ${$(paid)}${on}, ${$(-o)} more than it came to.` };
+    if (paid) return { lead: `Partly: ${$(o)} still owed`, line: `${B} paid ${$(paid)}${on} of the ${$(sends)} it came to, so ${$(o)} is still owed, ${whenDue(x.month)}.` };
+    // A payment that comes to less than nothing (a big loss): under the split, Myles owes Drew the difference
+    if (sends < 0) return { lead: `No payment due from ${B}`, line: daysTo(x.month) > 0 ? `It comes to ${$(sends)} so far, so as things stand ${A} would owe ${B} ${$(-sends)} on it, ${whenDue(x.month)}.` : `It came to ${$(sends)}, so ${A} owes ${B} ${$(-sends)} on it.` };
+    if (sends === 0) return { lead: 'Nothing to pay', line: `It came to ${$(0)}, so nobody owes anything on it.` };
+    if (daysTo(x.month) > 0) return { lead: 'Not yet', line: `It comes to ${$(sends)} so far and isn't due until ${dayLabel(due(x.month))} (in ${plural(daysTo(x.month), 'day')}); sales until then still add to it.` };
+    return { lead: 'No', line: `Nothing is recorded as paid on it yet: ${$(sends)} owed, ${whenDue(x.month)}.` };
+  };
+  const RECORD = `If ${B} has paid since, record it on the Settle page (Add a payment) and this answer updates.`;
+  const unpaid = (st) => /^(Partly|No\b|Not yet)/.test(st.lead);
+  // Where a payment stands, in a few words for a sentence
+  const brief = (x) => {
+    const o = owedOf(x); const sends = cents(x.sellerSends);
+    if (x.paid !== null && cents(x.paid)) return o === 0 ? 'paid in full' : o < 0 ? `paid, ${$(-o)} over` : `${$(o)} still owed`;
+    if (daysTo(x.month) > 0) return 'not due yet';
+    return sends > 0 ? `not paid, ${$(sends)} owed` : 'nothing to pay';
+  };
+
+  // A named product: which payment it's on, what it adds to that payment, and where that payment stands. Settlement
+  // wording is easily read as a product ("pay me back" typo-matches "Black"), so the product is only used when its
+  // words are a sold title's words exactly, the model named it, a "for <item>" phrase names it ("paid me for that
+  // fisihing line"), or it carries over from a follow-up ("and the ukulele?")
+  const forPhrase = (words) => words.some((w) => new RegExp(`\\bfor\\s+(?:[a-z0-9]+\\s+){0,3}?${w.replace(/[^a-z0-9]/g, '')}[a-z]*\\b`).test(raw));
+  const named = it.product && it.ownProduct && (it.modelProduct || exactProduct(ctx, it.product) || forPhrase(it.product));
+  const product = named || (it.product && /^(what about|how about|and)\b/.test(raw)) ? it.product : null;
+  if (product) {
+    const pm = it.period?.cycle || it.period?.month || null;
+    const everyRow = counted(ctx).filter(productFilter(product)).sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+    // "did Drew pay me for the fishing line in October": only what's on that payment
+    const rows = pm ? everyRow.filter((o) => (o.settle_month || o.business_month) === pm) : everyRow;
+    if (!everyRow.length) return { text: `**No sales matching “${product.join(' ')}” are counted in the books yet**, so they aren't on any payment.`, chips: [`What does ${B} owe?`] };
+    if (!rows.length) {
+      const on = [...new Set(everyRow.map((o) => o.settle_month || o.business_month))].map((gm) => `the ${payName(gm)}`);
+      return { text: `**Nothing of “${short(titleOf(everyRow.at(-1), ctx.orders), 50)}” is on the ${payName(pm)}.** It is on ${on.join(' and ')}.`, chips: [`What does ${B} owe?`] };
+    }
+    // What rows add to what Drew sends: their Amazon cost (net of Amazon refunds) + Myles's share of their profit
+    const adds = (rs) => {
+      const cogs = rs.reduce((t, o) => t + rowMoney(o).cogs, 0);
+      const net = rs.reduce((t, o) => t + rowMoney(o).net, 0);
+      const share = Math.round((net * ctx.s.split) / 100);
+      return { cogs, net, share, total: cogs + share };
+    };
+    const monthOf = (o) => o.settle_month || o.business_month;
+    const sales = rows.filter((o) => !isLaterRefund(o));
+    const lead = sales.at(-1) || rows.at(-1); // the latest sale of it
+    const m = monthOf(lead);
+    const x = all.find((y) => y.month === m);
+    const a = adds([lead]);
+    const st = x ? standing(x) : { lead: 'No', line: '' };
+    const id = lead.source === 'ebay' ? lead.order_id : lead.ebay_order_id;
+    const sold = `sold ${dayLabel(businessDay(lead.created_at))}`;
+    const others = [...new Set(rows.filter((o) => o !== lead).map(monthOf))].map((gm) => ({ gm, rs: rows.filter((o) => o !== lead && monthOf(o) === gm) }));
+    const title = `“${short(titleOf(lead, ctx.orders), 50)}”`;
+    const detail = `${id ? `order ${id}, ` : ''}${sold}`;
+    const what = (rs) => (rs.every(isLaterRefund) ? (rs.length === 1 ? 'its refund' : `${plural(rs.length, 'refund')} of it`) : plural(rs.length, 'other sale'));
+    const moves = (ga) => `${ga.total < 0 ? 'takes off' : 'adds'} ${$(Math.abs(ga.total))}`;
+    const otherLines = others.map((g) => {
+      const y = all.find((z) => z.month === g.gm);
+      return `${what(g.rs)[0].toUpperCase()}${what(g.rs).slice(1)} on the ${payName(g.gm)}: ${moves(adds(g.rs))}${y ? `; that payment: ${standing(y).lead.toLowerCase()}` : ''}.`;
+    });
+    const anyUnpaid = unpaid(st) || others.some((g) => { const y = all.find((z) => z.month === g.gm); return y && unpaid(standing(y)); });
+    const how = `its ${$(a.cogs)} Amazon cost ${a.share < 0 ? '−' : '+'} ${A}'s ${ctx.s.split}% of its ${$(a.net)} profit`;
+    // "Did Drew pay me for X?" answers yes / partly / no first. Any other question ("what does Drew owe me for the
+    // Govee") leads with every payment the item is on and where each stands, refunds on later payments included.
+    if (!paidQ) {
+      const groups = [...new Set(rows.map(monthOf))].sort().map((gm) => ({ gm, rs: rows.filter((o) => monthOf(o) === gm) }));
+      const desc = (rs) => {
+        if (rs.length === 1 && rs[0] === lead) return '';
+        const n = rs.filter((o) => !isLaterRefund(o)).length;
+        return `${[n ? plural(n, 'sale') : null, rs.length - n ? plural(rs.length - n, 'refund') : null].filter(Boolean).join(' and ')} `;
+      };
+      const on = groups.map((g) => { const y = all.find((z) => z.month === g.gm); return `the ${monthName(g.gm).split(' ')[0]} payment (${desc(g.rs)}${moves(adds(g.rs))}${y ? `; ${brief(y)}` : ''})`; });
+      return {
+        text: `**${title} is on ${on.join(' and ')}.** The sale (${detail}) is on the ${payName(m)}, where it adds **${$(a.total)}**: ${how}. ${st.line}`,
+        bullets: ['A payment covers its whole pay period, not single items, so an item is paid once the payment it is on is paid.', ...otherLines, anyUnpaid ? RECORD : null].filter(Boolean),
+        chips: [`What does ${B} owe?`, `Did ${B} pay for ${monthName(m).split(' ')[0]}?`],
+      };
+    }
+    return {
+      text: `**${st.lead}.** ${title} (${detail}) is on the ${payName(m)}, where it adds **${$(a.total)}**: ${how}. ${st.line}`,
+      bullets: [
+        'A payment covers its whole pay period, not single items, so an item is paid once the payment it is on is paid.',
+        ...otherLines,
+        anyUnpaid ? RECORD : null,
+      ].filter(Boolean),
+      chips: [`What does ${B} owe?`, `Did ${B} pay for ${monthName(m).split(' ')[0]}?`],
+    };
+  }
+
   const pm = it.period?.cycle || it.period?.month;
   if (pm) {
     const x = all.find((m) => m.month === pm);
@@ -691,12 +890,20 @@ function answerSettlement(ctx, it) {
     const state = x.paid !== null && o < 0 ? `${B} paid ${$(cents(x.paid))}${x.paidAt ? ` on ${dayLabel(x.paidAt)}` : ''}, ${$(-o)} more than it came to.`
       : x.paid !== null && o === 0 ? `Paid in full${x.paidAt ? ` on ${dayLabel(x.paidAt)}` : ''}.`
       : x.paid !== null ? `${$(cents(x.paid))} paid, ${$(o)} still owed, ${whenDue(x.month)}.`
+      : cents(x.sellerSends) <= 0 ? standing(x).line
       : daysTo(x.month) > 0 ? `Not due yet: ${whenDue(x.month)}, and sales until then still add to it.`
       : `Not paid yet, ${whenDue(x.month)}.`;
     const share = cents(x.shareAmazon);
+    const st = standing(x);
     return {
-      text: `**${payName(x.month)}: ${B} sends ${A} ${$(cents(x.sellerSends))}.** ${state}`,
-      bullets: [`Amazon cost ${A} paid: ${$(cents(x.cogs))}`, `${A}'s ${ctx.s.split}% share of the ${$(cents(x.businessProfit))} business profit: ${$(share)}`, `${$(cents(x.cogs))} ${share < 0 ? '−' : '+'} ${$(Math.abs(share))} = ${$(cents(x.sellerSends))}`],
+      // "Did Drew pay for September?" answers that question first
+      text: paidQ ? `**${st.lead}.** ${payName(x.month)}: ${B} sends ${A} ${$(cents(x.sellerSends))}. ${st.line}` : `**${payName(x.month)}: ${B} sends ${A} ${$(cents(x.sellerSends))}.** ${state}`,
+      bullets: [
+        `Amazon cost ${A} paid: ${$(cents(x.cogs))}`,
+        `${A}'s ${ctx.s.split}% share of the ${$(cents(x.businessProfit))} business profit: ${$(share)}`,
+        `${$(cents(x.cogs))} ${share < 0 ? '−' : '+'} ${$(Math.abs(share))} = ${$(cents(x.sellerSends))}`,
+        paidQ && unpaid(st) ? RECORD : null,
+      ].filter(Boolean),
       chips: [`What does ${B} owe?`, `Profit ${monthName(x.month).split(' ')[0]}`],
     };
   }
@@ -705,29 +912,38 @@ function answerSettlement(ctx, it) {
   // building up (not due yet; later sales and refunds still change it)
   const settled = all.filter((x) => daysTo(x.month) <= 0);
   const owed = settled.filter((x) => owedOf(x) > 0);
-  const over = settled.filter((x) => owedOf(x) < 0);
+  // A payment that came to less than nothing, with nothing paid on it, is money Myles owes Drew, not an overpayment
+  const below = settled.filter((x) => cents(x.sellerSends) < 0 && !cents(x.paid || 0));
+  const over = settled.filter((x) => owedOf(x) < 0 && !below.includes(x));
   const building = all.filter((x) => daysTo(x.month) > 0 && (cents(x.sellerSends) || x.orders));
   const owedTotal = owed.reduce((t, x) => t + owedOf(x), 0);
   const overTotal = -over.reduce((t, x) => t + owedOf(x), 0);
   const lines = [
     ...owed.map((x) => `${payName(x.month)}: ${$(owedOf(x))} still owed, ${whenDue(x.month)}.`),
     ...over.map((x) => `${payName(x.month)}: came to ${$(cents(x.sellerSends))}, ${B} paid ${$(cents(x.paid))}, so ${B} overpaid ${$(-owedOf(x))}.`),
+    ...below.map((x) => `${payName(x.month)}: came to ${$(cents(x.sellerSends))}, so ${A} owes ${B} ${$(-cents(x.sellerSends))} on it.`),
     ...building.map((x) => `${payName(x.month)}: ${$(cents(x.sellerSends))} so far, ${whenDue(x.month)}.`),
     over.length && building.length ? `After the ${$(overTotal)} overpayment, ${B} would send ${$(cents(building.at(-1).sellerSends) - overTotal)} for ${monthName(building.at(-1).month).split(' ')[0]} so far.` : null,
     // Returns still open: nothing refunded yet, so they're a heads-up, not part of any amount above
     ...ctx.orders.filter((o) => o.counted && o.return_open).map((o) => `Return open on ${short(o.title, 40)}: ${$(cents(o.return_open.amount))} on hold since ${dayLabel(businessDay(o.return_open.since))}, not refunded yet. If it is, about ${$(cents(o.return_open.profit_hit))} comes off the profit, so ${B} sends about ${$(Math.round(cents(o.return_open.profit_hit) * ctx.s.split / 100))} less, on the payment for the day of the refund.`),
   ].filter(Boolean);
   // "Did Drew pay?" / "how much has he paid me" leads with the payments
-  if ((/\b(paid|sent|received|gotten|got)\b/.test(it.raw || '') || /\bdid\b.*\b(pay|send)\b/.test(it.raw || '')) && !/\bowe/.test(it.raw || '')) {
-    const last = paidList.at(-1);
-    if (!last) return { text: `**Nothing has been recorded as paid yet.**`, bullets: lines, chips: ['Profit this month'] };
-    // "How much has he paid (in total)?" is the running total; "did he pay?" is the latest payment
-    if (/\b(how much|total|so far|all)\b/.test(it.raw || '')) return { text: `**${B} has paid ${A} ${$(paidTotal)} so far** (${paidDetail}).`, bullets: lines, chips: ['Profit this month'] };
-    const o = owedOf(last);
+  if (paidQ) {
+    // "How much has he paid (in total)?" is the running total
+    if (/\b(how much|total|so far|all)\b/.test(raw)) return { text: paidList.length ? `**${B} has paid ${A} ${$(paidTotal)} so far** (${paidDetail}).` : '**Nothing has been recorded as paid yet.**', bullets: lines, chips: ['Profit this month'] };
+    // "Did he pay?" is the latest payment that has come due (or the one building up, when none has)
+    const x = settled.at(-1) || building[0];
+    if (!x) return { text: '**Nothing has been recorded as paid yet.**', bullets: lines, chips: ['Profit this month'] };
+    const st = standing(x);
     return {
-      text: `**Yes: ${B} paid ${$(cents(last.paid))}${last.paidAt ? ` on ${dayLabel(last.paidAt)}` : ''} for the ${payName(last.month)}.** ${o === 0 ? 'That covers it exactly.' : o < 0 ? `It came to ${$(cents(last.sellerSends))}, so that's ${$(-o)} more than owed.` : `It came to ${$(cents(last.sellerSends))}, so ${$(o)} is still owed.`}`,
-      bullets: [...lines.filter((l) => !l.startsWith(payName(last.month))), `Paid so far: ${$(paidTotal)} (${paidDetail}).`],
-      chips: ['Profit this month'],
+      text: `**${st.lead}.** ${payName(x.month)}: ${st.line}`,
+      bullets: [
+        ...lines.filter((l) => !l.startsWith(payName(x.month))),
+        owed.some((y) => y !== x) ? `In all, ${B} owes ${A} ${$(owedTotal)} on payments that have come due.` : null,
+        paidList.length ? `Paid so far: ${$(paidTotal)} (${paidDetail}).` : null,
+        unpaid(st) ? RECORD : null,
+      ].filter(Boolean),
+      chips: ['Profit this month', `What does ${B} owe?`],
     };
   }
   const head = owed.length ? `**${B} owes ${A} ${$(owedTotal)} now.**` : `**Nothing is due right now.**${building.length ? ` The next payment is ${whenDue(building[0].month).replace(/^due /, 'due ')}.` : ''}`;
@@ -756,7 +972,9 @@ function answerCompare(ctx, it) {
   const bx = x.net - ox;
   const by = y.net - oy;
   const dir = (d) => (d > 0 ? 'up' : d < 0 ? 'down' : 'unchanged');
-  const perSale = (s) => (s.n ? Math.round(s.avg) : 0);
+  // Profit per sale is each period's own sales only (a refund line on an earlier sale isn't spread over them)
+  const ownOf = new Map([[x, stats(rowsFor(ctx, a).filter((o) => !isLaterRefund(o)))], [y, stats(rowsFor(ctx, b).filter((o) => !isLaterRefund(o)))]]);
+  const perSale = (s) => { const o = ownOf.get(s); return o.n ? Math.round(o.avg) : 0; };
   let lead = '';
   if (/\b(better|worse|beat|beating|ahead|behind|more|less)\b/.test(it.raw || '') && subject) {
     const subjIsB = subject === b || (subject.from === b.from && subject.to === b.to);
@@ -785,7 +1003,8 @@ function answerRecent(ctx, it) {
   const asked = Number(raw.match(/\b(\d{1,2})\s+(sales?|orders?|items?)\b/)?.[1]);
   const single = !asked && /\b(last|latest|most recent|newest)\s+(sale|order)\b/.test(raw);
   const n = Math.min(20, asked || (single ? 1 : it.period ? 20 : 5));
-  const pool = ctx.orders.filter((o) => (o.counted || o.status === 'awaiting_cost') && !(o.source === 'ebay' && o.in_sheet) && (!it.period || inPeriod(o, it.period)));
+  // Sales only: a refund booked on a later payment is not something that sold
+  const pool = ctx.orders.filter((o) => (o.counted || o.status === 'awaiting_cost') && !isLaterRefund(o) && !(o.source === 'ebay' && o.in_sheet) && (!it.period || inPeriod(o, it.period)));
   const rows = pool.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, n);
   if (!rows.length) return { text: `**No sales ${it.period ? periodPhrase(ctx, it.period) : 'yet'}.**`, chips: ['Last 5 sales', 'Profit this month'] };
   const cell = (o) => (o.counted ? $(rowMoney(o).net) : waitWord(o));
@@ -845,23 +1064,47 @@ function answerBestPeriod(ctx, it) {
   };
 }
 
+// Operating costs go on the payment named by their month, so "this month" with no period named is the pay cycle
+// running now, and a pay cycle lists exactly its own month's costs. Who paid each one matters: Drew's come out of what
+// he collected, Myles's are paid back to him in the settlement.
+const EXPENSE_NOT_NAMES = new Set(['operating', 'expense', 'costs', 'cost', 'costing', 'monthly', 'much', 'spend', 'spending', 'spent', 'what', 'this', 'that',
+  'month', 'cycle', 'period', 'total', 'paid', 'pays', 'paying', 'have', 'does', 'were', 'many', 'about', 'since', 'last', 'from', 'between', 'through']);
 function answerExpenses(ctx, it) {
-  const p = it.period || defaultPeriod(ctx);
-  let list = ctx.books.expenses.filter((e) => (p.month ? e.month === p.month : p.all || (monthEnd(e.month) >= (p.from || '0') && monthStart(e.month) <= p.to)));
+  const { A, B } = ctx.s;
+  const p = it.period || currentCycle(ctx);
+  const list = ctx.books.expenses.filter((e) => (p.cycle ? e.month === p.cycle : p.month ? e.month === p.month : p.all || (monthEnd(e.month) >= (p.from || '0') && monthStart(e.month) <= p.to)));
+  const byA = (e) => e.paid_by === 'amazon';
+  const who = (e) => (byA(e) ? A : B);
+  const head = ['Month', 'Expense', 'Paid by', 'Amount'];
+  const row = (e) => [monthName(e.month, true), e.category, who(e), $(cents(e.amount))];
+  // Who paid, in one sentence: Myles's costs are added to what Drew sends him
+  const payers = (a, b, n) => (a && b ? `${B} paid ${$(b)} and ${A} paid ${$(a)} (${B} pays that back in the settlement).` : a ? `${A} paid ${counts(n, 'it', 'these')}, and ${B} pays ${$(a)} back in the settlement.` : `${B} paid ${counts(n, 'it', 'these')}.`);
   // "how much are proxies costing us": just the matching expense lines
-  const words = tokens(it.raw || '').filter((w) => w.length >= 4 && !['operating', 'expense', 'expenses', 'costs', 'cost', 'costing', 'monthly', 'much', 'spend', 'what', 'much', 'this', 'month'].includes(w));
-  const hit = list.filter((e) => words.some((w) => tokens(e.category).some((c) => like(w, c) || c.startsWith(w.slice(0, 5)) || w.startsWith(c.slice(0, 5)))));
+  const words = tokens(it.raw || '').map(singular).filter((w) => w.length >= 4 && !EXPENSE_NOT_NAMES.has(w) && !MONTH_NAMES.some((m) => m.startsWith(w.slice(0, 3)) && w.length <= m.length));
+  const named = (e) => words.some((w) => tokens(e.category).map(singular).some((c) => like(w, c) || c.startsWith(w.slice(0, 5)) || w.startsWith(c.slice(0, 5))));
+  const hit = list.filter(named);
+  // A cost asked for by name that isn't in this period ("proxies in the September pay cycle" when the proxy is an
+  // October cost): say so, never answer with the period's total as if it were that cost
+  const elsewhere = hit.length ? [] : ctx.books.expenses.filter(named);
+  if (elsewhere.length) {
+    const cat = [...elsewhere].sort((x, y) => (x.month < y.month ? 1 : -1))[0].category; // its latest name
+    const where = p.cycle ? `on the ${monthName(p.cycle).split(' ')[0]} payment` : periodPhrase(ctx, p);
+    const months = [...new Set(elsewhere.map((e) => e.month))].sort();
+    return { text: `**No ${cat} cost ${where}.** Matching costs are recorded for ${months.map((m) => monthName(m)).join(', ')} (below).`, table: { head, rows: elsewhere.map(row) }, chips: ['What are our operating costs?'] };
+  }
   if (hit.length) {
     const sum = hit.reduce((t, e) => t + cents(e.amount), 0);
-    return { text: `**${[...new Set(hit.map((e) => e.category))].join(', ')} ${periodPhrase(ctx, p)}: ${$(sum)}.**`, table: { head: ['Month', 'Expense', 'Amount'], rows: hit.map((e) => [monthName(e.month, true), e.category, $(cents(e.amount))]) }, chips: ['What are our operating costs?'] };
+    const a = hit.filter(byA).reduce((t, e) => t + cents(e.amount), 0);
+    return { text: `**${[...new Set(hit.map((e) => e.category))].join(', ')} ${periodPhrase(ctx, p)}: ${$(sum)}.** ${payers(a, sum - a, hit.length)}`, table: { head, rows: hit.map(row) }, chips: ['What are our operating costs?'] };
   }
   const total = opexIn(ctx, p);
   if (!list.length) return { text: `No operating costs recorded ${periodPhrase(ctx, p)}.`, chips: ['Operating costs last month'] };
+  const a = opexIn(ctx, p, byA);
   return {
-    text: `**Operating costs ${periodPhrase(ctx, p)}: ${$(total)}.** ${ctx.s.B} pays these, and they come out of profit before the split.`,
-    table: { head: ['Month', 'Expense', 'Amount'], rows: list.map((e) => [monthName(e.month, true), e.category, $(cents(e.amount))]) },
+    text: `**Operating costs ${periodPhrase(ctx, p)}: ${$(total)}.** ${payers(a, total - a, list.length)} They come out of profit before the split.`,
+    table: { head, rows: list.map(row) },
     bullets: opexSplit(ctx, p) ? ['Months only partly inside the period count by their share of days.'] : [],
-    chips: [`Profit ${p.label}`],
+    chips: [`Profit ${p.label.replace(/ \(.*$/, '')}`],
   };
 }
 
@@ -927,10 +1170,17 @@ function answerProduct(ctx, it) {
   const rows = rowsFor(ctx, p, it.product);
   if (!rows.length) return { text: `No costed sales matching “${it.product.join(' ')}” ${periodTitle(ctx, p)}.`, chips: ['Top products all time'] };
   const s = stats(rows);
-  const titles = [...new Set(rows.map((o) => o.title))];
+  const sales = rows.filter((o) => !isLaterRefund(o));
+  const own = stats(sales);
+  const titles = [...new Set(rows.map((o) => titleOf(o, ctx.orders)))];
+  const refunds = s.refundedSales + s.laterRefunds;
   return {
     text: `**“${short(titles[0], 60)}”${titles.length > 1 ? ` (+${titles.length - 1} similar)` : ''}: ${plural(s.n, 'sale')}, ${$(s.net)} profit ${periodTitle(ctx, p)}.**`,
-    bullets: [`Per sale: ${$(Math.round(s.payout / s.n))} payout, ${$(Math.round(s.cogs / s.n))} Amazon cost, ${$(Math.round(s.avg))} profit`, s.refundedSales ? plural(s.refundedSales, 'refund') : 'No refunds', `Last sold ${dayLabel(businessDay(rows.map((o) => o.created_at).sort().at(-1)))}`],
+    bullets: [
+      own.n ? `Per sale: ${$(Math.round(own.payout / own.n))} payout, ${$(Math.round(own.cogs / own.n))} Amazon cost, ${$(Math.round(own.avg))} profit${s.laterRefunds ? ' (refunds booked on a later payment not included)' : ''}` : null,
+      refunds ? `${plural(refunds, 'refund')}${s.laterRefunds ? ` (${s.laterRefunds} booked on a later payment)` : ''}` : 'No refunds',
+      sales.length ? `Last sold ${dayLabel(businessDay(sales.map((o) => o.created_at).sort().at(-1)))}` : null,
+    ].filter(Boolean),
     chips: ['Top products all time'],
   };
 }
@@ -955,15 +1205,19 @@ export const TOPICS = {
   amazon_cost: 'cogs', fees: 'fees', margin: 'margin', average_order: 'aov', refunds: 'refunds', expenses: 'expenses', settlement: 'settlement',
   top_products: 'top', worst_products: 'worst', product: 'product', compare: 'compare', recent_sales: 'recent', awaiting_amazon: 'awaiting', best_period: 'best_period', promotions: 'promotions',
 };
-function fromRoute(route, ctx, question) {
+// `parsed` is the built-in reader's reading (with the previous question): when the model gives no period or product,
+// a follow-up ("what about refunds" after a September question) keeps the one being talked about
+function fromRoute(route, ctx, question, parsed = null) {
   const intent = TOPICS[route?.topic];
   if (!intent) return null;
   // Periods written in the question itself always win over the model's reading of them
-  const own = parsePeriods(question, ctx.today);
-  const periods = own.length ? own : [...parsePeriods(route.period || '', ctx.today), ...parsePeriods(route.compare_to || '', ctx.today)];
-  const product = route.product ? findProduct(ctx, tokens(route.product)) : null;
+  const own = parsePeriods(question, ctx.today, ctx.s.dueDay);
+  let periods = own.length ? own : [...parsePeriods(route.period || '', ctx.today, ctx.s.dueDay), ...parsePeriods(route.compare_to || '', ctx.today, ctx.s.dueDay)];
+  if (!periods.length && parsed?.period) periods = [parsed.period];
+  const named = route.product ? findProduct(ctx, tokens(route.product)) : null;
+  const product = named || parsed?.product || null;
   if (intent === 'product' && !product) return null;
-  return { intent, period: periods[0] || null, periods, product, direction: null };
+  return { intent, period: periods[0] || null, periods, product, ownProduct: Boolean(named || parsed?.ownProduct), modelProduct: Boolean(named), direction: null };
 }
 
 // route: optional { topic, period, compare_to, product } from the local AI model. The built-in reader decides whenever it
@@ -973,16 +1227,21 @@ const NO_PERIOD = new Set(['settlement', 'listings', 'listings_vs_sales', 'await
 
 // route: the AI model's reading of the question. With { modelFirst: true } it decides the topic whenever it has one;
 // otherwise it is only used for a question the built-in reader couldn't place.
-export async function ask(question, prev = null, route = null, { modelFirst = false } = {}) {
-  const ctx = await load();
+// `data` ({ orders, books, today, s }) answers from those numbers instead of the database (tests)
+export async function ask(question, prev = null, route = null, { modelFirst = false, data = null } = {}) {
+  const ctx = data ? { listings: null, promotions: null, today: businessDay(new Date()), ...data, s: { A: 'Myles', B: 'Drew', split: 50, dueDay: 26, ...(data.s || {}) } } : await load();
+  markLaterRefunds(ctx.orders);
   const parsed = understand(question, ctx, prev);
-  const modelRead = fromRoute(route, ctx, question);
+  const modelRead = fromRoute(route, ctx, question, parsed);
   // An explicit comparison ("vs August", "compared to July") is always a comparison, whatever the model picked
   const routed = (modelFirst && !(parsed.intent === 'compare' && modelRead?.intent !== 'compare')) || parsed.intent === 'help' ? modelRead : null;
   const it = { ...(routed || parsed), raw: norm(question) };
   // "that month" with no earlier context: the model's reading of the conversation supplies the period
   if (!routed && !it.period && modelRead?.period && DEICTIC.test(it.raw)) { it.period = modelRead.period; it.periods = modelRead.periods; }
   // The period an answer covers when the question didn't name one: products and records all time, everything else this month
+  // Operating costs are booked on a payment, so with no period they are the pay cycle running now
+  if (it.intent === 'product' && !it.product) it.intent = 'top'; // "one product" with none named: the top ones
+  if (!it.period && it.intent === 'expenses') { it.period = currentCycle(ctx); it.defaulted = true; }
   if (!it.period && !NO_PERIOD.has(it.intent)) { it.period = DEFAULT_ALL.has(it.intent) || it.product ? allTime(ctx) : defaultPeriod(ctx); it.defaulted = true; }
   if (routed && !it.direction) it.direction = parsed.direction;
   let ans;
@@ -1010,7 +1269,7 @@ export async function ask(question, prev = null, route = null, { modelFirst = fa
     period: it.intent === 'compare' ? it.periods.map((x) => x.label).join(' vs ') || null : it.period ? periodTitle(ctx, it.period) : null,
     product: it.product?.join(' ') || null,
   };
-  return { ...ans, understood, context };
+  return { ...ans, understood, context, partners: [ctx.s.A, ctx.s.B] };
 }
 
 export const _test = { parsePeriods, understand: (q, ctx, prev) => understand(q, ctx, prev), osa, listingsVsSales: (listings) => answerListingsVsSales({ listings }) };

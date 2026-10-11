@@ -92,11 +92,12 @@ const CASES = [
   ['how much have we lost to returns', 'refunds', 'this month'],
   ['any cancellations this month', 'refunds', 'this month'],
   // operating costs
-  ['what are our operating costs', 'expenses', 'this month'],
-  ['how much do we spend on software', 'expenses', 'this month'],
-  ['what subscriptions do we pay for', 'expenses', 'this month'],
+  // (operating costs go on a payment, so with no period named they are the pay cycle running now)
+  ['what are our operating costs', 'expenses', 'this pay cycle'],
+  ['how much do we spend on software', 'expenses', 'this pay cycle'],
+  ['what subscriptions do we pay for', 'expenses', 'this pay cycle'],
   ['expenses in august', 'expenses', 'August 2026'],
-  ['how much are proxies costing us', 'expenses', 'this month'],
+  ['how much are proxies costing us', 'expenses', 'this pay cycle'],
   // products
   ['best selling product', 'top', 'all time'],
   ['whats our most profitable item', 'top', 'all time'],
@@ -191,7 +192,7 @@ await must('is september better than august', /^\*\*No: September 2026( so far)?
 await must('last sale', /^\*\*Latest sale: /, '"last sale" is one sale');
 await must('worst products', /lost money/, 'worst products only lists products that lost money');
 await must('how many sales did we get today', / counted in profit, 1 awaiting the Amazon email[\s\S]*Zirconia[\s\S]*awaiting the Amazon email/, 'the new sale is counted as waiting');
-await must('did drew pay for august', /Paid in full/, 'August shows paid in full');
+await must('did drew pay for august', /^\*\*Yes, in full\./, 'August: Yes, in full');
 await must('how much did ebay pay us in august', /eBay payouts/, 'eBay payouts, not the settlement');
 await must('how much money did we make in august', /\$129\.49/, 'August business profit equals the sheet');
 await must('did promotion pay off in august', /7 of 43 sales in August 2026 came through promoted ads \(16%\), costing \$9\.74 in ad fees/, 'August promotion: 7 of 43 sales, $9.74 fees (from the sheet)');
