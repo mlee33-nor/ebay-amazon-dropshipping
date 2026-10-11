@@ -4,7 +4,7 @@
 OFF=${TEST_PG_OFFSET:-0}
 export TEST_PG_OFFSET=$OFF
 fail=0
-run() { out=$("$@" 2>&1 | tail -1); echo "$out"; case "$out" in *FAIL*|*Error*|*error*) fail=1;; esac; }
+run() { out=$("$@" 2>&1 | tail -1); echo "$out"; case "$out" in *FAIL*|*Error*|*error*|Node.js*|*Exception*) fail=1;; esac; }
 node --test test/*.test.js 2>&1 | grep -E "^ℹ (pass|fail)" ; node --test test/*.test.js >/dev/null 2>&1 || fail=1
 for t in audit-regression-test core-test sheet-reconcile-test ask-test ask-battery-test llm-test listings-test promotions-test; do run node scripts/$t.js; done
 run node scripts/ask-audit-test.js
