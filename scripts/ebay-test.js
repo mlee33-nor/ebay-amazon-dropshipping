@@ -69,7 +69,14 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/sell/fulfillment/v1/order') return mock.ordersStatus ? fail(mock.ordersStatus) : send({ orders: mock.orders, total: mock.orders.length });
   if (url.pathname.endsWith('/shipping_fulfillment')) return send({ fulfillments: [] });
-  if (url.pathname === '/sell/finances/v1/transaction') return mock.financesStatus ? fail(mock.financesStatus) : send({ transactions: mock.finances, total: mock.finances.length });
+  if (url.pathname === '/sell/finances/v1/transaction') {
+    if (mock.financesStatus) return fail(mock.financesStatus);
+    // Like eBay: only records dated inside the filter's window (transactionDate:[from..to])
+    const [, from, to] = /transactionDate:\[(.*?)\.\.(.*?)\]/.exec(url.searchParams.get('filter') || '') || [];
+    mock.financeFrom = from || null;
+    const transactions = mock.finances.filter((t) => (!from || t.transactionDate >= from) && (!to || t.transactionDate <= to));
+    return send({ transactions, total: transactions.length });
+  }
   if (url.pathname === '/post-order/v2/return/search') {
     if (mock.returnsStatus) return fail(mock.returnsStatus);
     const from = new Date(url.searchParams.get('creation_date_range_from')).getTime();
@@ -152,8 +159,10 @@ const money = (v) => ({ value: String(v), currency: 'USD' });
 const KALA = '22-15174-90160';
 const HELD = '03-15158-63035';
 const CASE = '22-14846-46758';
-mock.orders = [ebayOrder(KALA, iso(now - 2 * DAY), 114.0, 13.22), ebayOrder(HELD, iso(now - 3 * DAY), 26.59, 3.9), ebayOrder(CASE, iso(now - 4 * DAY), 100, 13)];
-// Every kind of Finances record (shapes copied from production records)
+const AIR = '03-15001-96796'; // Cordless Airbrush Compressor Kit: sale, ad fee and seller-paid label, as in production
+mock.orders = [ebayOrder(KALA, iso(now - 2 * DAY), 114.0, 13.22), ebayOrder(HELD, iso(now - 3 * DAY), 26.59, 3.9), ebayOrder(CASE, iso(now - 4 * DAY), 100, 13),
+  ebayOrder(AIR, iso(now - 66 * DAY), 22.99, 3.58)];
+// Every kind of Finances record (shapes modelled on production records; the ids sharing a SALE's id are hypothetical)
 mock.finances = [
   { transactionId: KALA, orderId: KALA, transactionType: 'SALE', bookingEntry: 'CREDIT', amount: money(100.78), totalFeeAmount: money(13.22), transactionDate: iso(now - 2 * DAY), transactionStatus: 'FUNDS_AVAILABLE_FOR_PAYOUT' },
   { transactionId: 'FEE-7822416951916_11', transactionType: 'NON_SALE_CHARGE', feeType: 'AD_FEE', bookingEntry: 'DEBIT', amount: money(2.85), references: [{ referenceId: KALA, referenceType: 'ORDER_ID' }], transactionDate: iso(now - 2 * DAY) },
@@ -163,7 +172,8 @@ mock.finances = [
   // A case hold (CASE_ID) and a payment dispute debit with no hold id
   { transactionId: 'DISPUTE_HOLD-6728705848', orderId: CASE, transactionType: 'DISPUTE', bookingEntry: 'DEBIT', amount: money(100), references: [{ referenceId: '5091234567', referenceType: 'CASE_ID' }], transactionDate: iso(now - 2 * DAY) },
   { transactionId: 'PD-5000123456', transactionType: 'DISPUTE', bookingEntry: 'DEBIT', amount: money(100), references: [{ referenceId: CASE, referenceType: 'ORDER_ID' }, { referenceId: '5000123456', referenceType: 'PAYMENT_DISPUTE_ID' }], transactionDate: iso(now - 1 * DAY) },
-  // Seller return label; its id happens to equal the Kala sale's id (eBay ids are only unique per type)
+  // Hypothetical: a seller return label whose id equals the Kala sale's id (eBay ids are only unique per type; none of
+  // the 7 production labels does this, but nothing guarantees it)
   { transactionId: KALA, orderId: KALA, transactionType: 'SHIPPING_LABEL', bookingEntry: 'DEBIT', amount: money(9.69), transactionMemo: 'Shipping label purchased', transactionDate: iso(now - 1 * DAY) },
   // Account-level records with no order at all
   { transactionId: 'FEE-SUB-2026-10', transactionType: 'NON_SALE_CHARGE', feeType: 'SUBSCRIPTION_FEE', bookingEntry: 'DEBIT', amount: money(74.95), transactionDate: iso(now - 1 * DAY) },
@@ -171,6 +181,10 @@ mock.finances = [
   { transactionId: 'TR-881', transactionType: 'TRANSFER', bookingEntry: 'DEBIT', amount: money(50), transactionDate: iso(now - 1 * DAY) },
   { transactionId: 'ADJ-42', transactionType: 'ADJUSTMENT', bookingEntry: 'CREDIT', amount: money(5), transactionDate: iso(now - 1 * DAY) },
   { transactionId: 'MYST-1', transactionType: 'MYSTERY_TYPE', bookingEntry: 'DEBIT', amount: money(1.23), transactionDate: iso(now - 1 * DAY) },
+  // The real shape (production): the label has its own id in the order-number format, not the sale's
+  { transactionId: AIR, orderId: AIR, transactionType: 'SALE', bookingEntry: 'CREDIT', amount: money(19.41), totalFeeAmount: money(3.58), transactionDate: iso(now - 66 * DAY), transactionStatus: 'PAYOUT' },
+  { transactionId: 'FEE-7917432595816_11', transactionType: 'NON_SALE_CHARGE', feeType: 'AD_FEE', bookingEntry: 'DEBIT', amount: money(3.01), references: [{ referenceId: AIR, referenceType: 'ORDER_ID' }], transactionDate: iso(now - 66 * DAY + 60_000) },
+  { transactionId: '10-14989-77336', orderId: AIR, transactionType: 'SHIPPING_LABEL', bookingEntry: 'DEBIT', amount: money(9.69), payoutId: '7663482354', transactionMemo: 'Shipping label purchased', transactionDate: iso(now - 66 * DAY + 3 * 3600_000), transactionStatus: 'PAYOUT' },
 ];
 const ret = (returnId, orderId, createdMs, state) => ({
   returnId, orderId, state, status: state, currentType: 'MONEY_BACK',
@@ -241,12 +255,28 @@ await check('a record sharing a SALE id never overwrites the sale: Kala fees sta
   assert.equal(Number(h.ad_fees), 0);
   assert.equal(Number(h.refund_total), 0);
 });
+await check('a production-shaped label (own id 10-14989-77336 on order 03-15001-96796) is stored under its plain id; fees 3.58 + 3.01 ad', async () => {
+  const rows = await q('select transaction_id, type, amount from ebay_transactions where order_id = $1 order by transaction_id', [AIR]);
+  assert.deepEqual(rows.map((x) => [x.transaction_id, x.type]),
+    [[AIR, 'SALE'], ['10-14989-77336', 'SHIPPING_LABEL'], ['FEE-7917432595816_11', 'NON_SALE_CHARGE']]);
+  assert.deepEqual((await q("select transaction_id from ebay_transactions where transaction_id like '%:%'")).map((x) => x.transaction_id),
+    [`SHIPPING_LABEL:${KALA}`], 'only the hypothetical collision gets a TYPE: id');
+  const o = await one('select ebay_fees, ad_fees from ebay_orders where order_id = $1', [AIR]);
+  assert.equal(Number(o.ebay_fees), 3.58);
+  assert.equal(Number(o.ad_fees), 3.01);
+});
 await check('the sync log names order-less records, what is not yet in the books, and unknown types', async () => {
   const msg = r.log.find((l) => l.startsWith('finances:'));
-  assert.match(msg, /12 records on 3 orders, 5 with no order/);
-  assert.match(msg, /not yet in the books: .*DISPUTE 3.*SHIPPING_LABEL 1/);
+  assert.match(msg, /15 records on 4 orders, 5 with no order/);
+  assert.match(msg, /not yet in the books: .*DISPUTE 3.*SHIPPING_LABEL 2/);
   assert.match(msg, /NON_SALE_CHARGE\/SUBSCRIPTION_FEE 1/);
   assert.match(msg, /WARNING unknown Finances type MYSTERY_TYPE/);
+});
+await check('an unknown Finances type is a note on the page (the sync is still ok)', async () => {
+  assert.deepEqual(r.steps.finances.warnings, ['unknown Finances type MYSTERY_TYPE']);
+  const st = await ebayStatus();
+  assert.ok(st.notes.some((n) => /unknown Finances type MYSTERY_TYPE/.test(n)), st.notes.join(' / '));
+  assert.deepEqual(st.warnings, []);
 });
 await check('re-syncing the same window stores nothing twice (records without an id get a stable one)', async () => {
   const before = (await one('select count(*)::int n from ebay_transactions')).n;
@@ -255,6 +285,7 @@ await check('re-syncing the same window stores nothing twice (records without an
   assert.equal((await one('select count(*)::int n from ebay_transactions')).n, before);
   assert.equal(normalizeTransaction(mock.finances[8]).transaction_id, normalizeTransaction(structuredClone(mock.finances[8])).transaction_id);
 });
+mock.finances = mock.finances.filter((t) => t.transactionId !== 'MYST-1'); // the later checks expect no notes
 
 // ================= 2. returns: open ones are rechecked by id however old =================
 await check('first sync stored all three returns; the old open one is still open', async () => {
@@ -520,6 +551,18 @@ await check('the same ad fee after payout (payoutId, status, memo added) is the 
   assert.equal(rows[0].payout_id, '7760000001', 'updated in place');
   assert.equal(rows[0].transaction_status, 'PAYOUT');
   assert.equal(Number((await one('select ad_fees from ebay_orders where order_id = $1', [ADS])).ad_fees), 4.27);
+  assert.ok((await ebayStatus()).notes.some((n) => /1 NON_SALE_CHARGE record without transactionId/.test(n)), 'an in-books record with no id is a note');
+});
+// eBay later sends the same ad fee WITH its transactionId: the NOID- copy goes, the fee is not counted twice
+adFee.transactionId = 'FEE-7900000000001_11';
+r = await sync();
+await check('the same ad fee, now with transactionId FEE-7900000000001_11: one row under the real id, ad fees 4.27 not 8.54', async () => {
+  assert.equal(r.ok, true, r.log.join(' | '));
+  const rows = await q("select transaction_id from ebay_transactions where order_id = $1 and fee_type = 'AD_FEE'", [ADS]);
+  assert.deepEqual(rows.map((x) => x.transaction_id), ['FEE-7900000000001_11']);
+  assert.equal(Number((await one('select ad_fees from ebay_orders where order_id = $1', [ADS])).ad_fees), 4.27);
+  assert.ok(r.log.some((l) => /1 stored without an id now came with one/.test(l)), r.log.join(' | '));
+  assert.equal(r.steps.finances.warnings, undefined, 'no "without transactionId" note any more');
 });
 // Two separate insertion fees with exactly the same contents: both kept, and still two after a re-sync
 const twinAt = iso(now - 5 * 3600_000);
@@ -534,6 +577,62 @@ await check('two identical records with no id are both kept (#2), and a re-sync 
   assert.ok(r.log.some((l) => /1 record with no id identical to another/.test(l)), r.log.join(' | '));
   await sync();
   assert.deepEqual((await twins()).map((x) => x.transaction_id), first);
+});
+await check('one of two identical id-less records later sent with an id: the id one and one NOID- copy remain (still two)', async () => {
+  mock.finances[mock.finances.length - 1].transactionId = 'FEE-INS-2';
+  const res = await sync();
+  assert.equal(res.ok, true, res.log.join(' | '));
+  const rows = await q("select transaction_id from ebay_transactions where fee_type = 'INSERTION_FEE' and transaction_at = $1 order by transaction_id", [twinAt]);
+  assert.equal(rows.length, 2, rows.map((x) => x.transaction_id).join(', '));
+  assert.equal(rows[0].transaction_id, 'FEE-INS-2');
+  assert.match(rows[1].transaction_id, /^NOID-[0-9a-f]+$/);
+});
+
+// ================= 9. records the old code dropped are fetched once from the whole history =================
+// Production already has ebay_last_finance_sync: without the one-time full read, only the last 7 days would be fetched
+// and an older store subscription (no order) would never be stored.
+await q("delete from settings where key = 'ebay_finances_all_records_since'");
+await setSetting('ebay_last_finance_sync', iso(Date.now()));
+mock.finances.push({ transactionId: 'FEE-SUB-2026-09', transactionType: 'NON_SALE_CHARGE', feeType: 'SUBSCRIPTION_FEE', bookingEntry: 'DEBIT', amount: money(74.95), transactionDate: iso(now - 20 * DAY) });
+const feesNow = () => q('select order_id, ebay_fees, ad_fees, fee_credit, refund_total from ebay_orders order by order_id');
+const feesBefore = await feesNow();
+r = await sync();
+await check('first sync after the change reads the whole history: a 74.95 subscription from 20 days ago is stored', async () => {
+  assert.equal(r.ok, true, r.log.join(' | '));
+  assert.ok(mock.financeFrom, 'the request had a date filter');
+  assert.ok(Date.now() - new Date(mock.financeFrom).getTime() > 300 * DAY, `filter from ${mock.financeFrom}`);
+  const sub = await one("select amount, order_id from ebay_transactions where transaction_id = 'FEE-SUB-2026-09'");
+  assert.equal(Number(sub.amount), 74.95);
+  assert.equal(sub.order_id, null);
+  assert.ok(await getSetting('ebay_finances_all_records_since'));
+});
+await check('...re-reading the history leaves every order\'s fees, ad fees, fee credits and refunds unchanged', async () => {
+  assert.deepEqual(await feesNow(), feesBefore);
+});
+const lastFinance = await getSetting('ebay_last_finance_sync');
+r = await sync();
+await check('the next sync is back to the 7-day look-back', async () => {
+  assert.equal(r.ok, true, r.log.join(' | '));
+  assert.equal(new Date(mock.financeFrom).getTime(), new Date(lastFinance).getTime() - 7 * DAY);
+});
+
+// ================= 10. unknown fee type; an id held by two other types =================
+mock.finances.push({ transactionId: 'FEE-NEW-1', transactionType: 'NON_SALE_CHARGE', feeType: 'NEW_FEE_X', bookingEntry: 'DEBIT', amount: money(2.5), transactionDate: iso(now - DAY) });
+r = await sync();
+await check('a NON_SALE_CHARGE with an unknown fee type NEW_FEE_X: stored, sync ok, named in the page notes', async () => {
+  assert.equal(r.status, 'ok', r.log.join(' | '));
+  assert.ok(await one("select 1 from ebay_transactions where transaction_id = 'FEE-NEW-1'"));
+  assert.ok(r.log.some((l) => /WARNING unknown fee type NEW_FEE_X/.test(l)));
+  assert.ok((await ebayStatus()).notes.some((n) => /unknown fee type NEW_FEE_X/.test(n)));
+});
+mock.finances.pop();
+await check('a record whose id and TYPE:id are both held by other types fails loudly instead of being dropped', async () => {
+  const { upsertTransaction } = await import('../src/ebay.js');
+  const rec = (type) => normalizeTransaction({ transactionId: 'X-1', transactionType: type, bookingEntry: 'DEBIT', amount: money(1), transactionDate: iso(now - DAY) });
+  await upsertTransaction(rec('SALE'));
+  await upsertTransaction(normalizeTransaction({ transactionId: 'SHIPPING_LABEL:X-1', transactionType: 'TRANSFER', bookingEntry: 'DEBIT', amount: money(1), transactionDate: iso(now - DAY) }));
+  await assert.rejects(() => upsertTransaction(rec('SHIPPING_LABEL')), /X-1 \(SHIPPING_LABEL\) collides/);
+  await q("delete from ebay_transactions where transaction_id in ('X-1', 'SHIPPING_LABEL:X-1')");
 });
 
 await closeDb();

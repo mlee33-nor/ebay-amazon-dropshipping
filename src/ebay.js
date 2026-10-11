@@ -360,6 +360,12 @@ async function syncTracking(log) {
 // Every transaction type the Finances API documents. Anything else is still stored, and named in the sync log.
 const KNOWN_TX_TYPES = new Set(['SALE', 'REFUND', 'CREDIT', 'DISPUTE', 'NON_SALE_CHARGE', 'SHIPPING_LABEL', 'TRANSFER',
   'ADJUSTMENT', 'WITHDRAWAL', 'LOAN_REPAYMENT', 'PURCHASE']);
+// Fee types eBay documents for Finances records (FeeTypeEnum). A record with any other feeType is still stored, and
+// named as a warning: a new kind of eBay charge should be looked at, not pass unnoticed.
+const KNOWN_FEE_TYPES = new Set(['AD_FEE', 'BELOW_STANDARD_FEE', 'BOLD_FEE', 'FINAL_VALUE_FEE', 'FINAL_VALUE_FEE_FIXED_PER_ORDER',
+  'FINAL_VALUE_SHIPPING_FEE', 'GALLERY_PLUS_FEE', 'HIGH_ITEM_NOT_AS_DESCRIBED_FEE', 'INSERTION_FEE', 'INTERNATIONAL_FEE',
+  'OTHER_FEES', 'PAYMENT_DISPUTE_FEE', 'PRIVATE_LISTING_FEE', 'REGULATORY_OPERATING_FEE', 'RESERVE_PRICE_FEE', 'SCHEDULING_FEE',
+  'SUBSCRIPTION_FEE', 'SUBTITLE_FEE', 'TAX_DEDUCTION_AT_SOURCE', 'INCOME_TAX_WITHHOLDING', 'VALUE_PACK_FEE']);
 // What the books read today (src/dataset.js): SALE fees, REFUNDs and AD_FEE charges/credits. The rest is stored for the
 // books to use (disputes, return labels, store fees, payouts) and counted in the sync log so nothing is silently skipped.
 const inBooks = (r) => r.type === 'SALE' || r.type === 'REFUND' || (r.type === 'NON_SALE_CHARGE' && /AD_FEE/i.test(r.fee_type || ''));
@@ -376,6 +382,8 @@ const inBooks = (r) => r.type === 'SALE' || r.type === 'REFUND' || (r.type === '
 // are filled in or changed when the record is paid out, and the 7-day look-back re-reads it after that, so hashing them
 // would store the same record twice (an ad fee counted double). Two records with exactly the same contents are told
 // apart by `seen` (one Map per sync): the second one gets #2, the third #3, in the order eBay lists them.
+// A record WITH a transactionId carries the same key (noid): if eBay first sent it without an id and later with one,
+// syncFinances removes the NOID- copy so the record is never counted twice.
 function noIdKey(t, orderId, refs) {
   const refKey = refs.map((r) => [r.referenceType, r.referenceId]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   return crypto.createHash('sha1').update(JSON.stringify([t.transactionType, t.transactionDate, t.bookingEntry, t.amount?.value,
@@ -389,9 +397,9 @@ export function normalizeTransaction(t, seen = null) {
   const fee = money(t.totalFeeAmount) || lineFees;
   let id;
   let repeat = 0;
+  const key = noIdKey(t, orderId, refs);
   if (t.transactionId) id = String(t.transactionId);
   else {
-    const key = noIdKey(t, orderId, refs);
     repeat = seen ? (seen.get(key) || 0) + 1 : 1;
     if (seen) seen.set(key, repeat);
     id = repeat > 1 ? `NOID-${key}#${repeat}` : `NOID-${key}`;
@@ -411,6 +419,7 @@ export function normalizeTransaction(t, seen = null) {
     payout_id: t.payoutId || null,
     memo: t.transactionMemo || null,
     repeat, // > 1: the n-th record with exactly the same contents in this sync (no transactionId)
+    noid: t.transactionId ? key : null, // the key its NOID- id would have had, had eBay sent it without the transactionId
     raw: t,
   };
 }
@@ -432,8 +441,10 @@ export async function upsertTransaction(r) {
   if (rows.length) return rows[0].transaction_id;
   // Same id already held by a record of another type (eBay ids are only unique per type, e.g. a SALE's id is its order
   // number): keep both, the later one as TYPE:id, instead of letting one overwrite the other.
+  // If TYPE:id is itself held by a record of yet another type, nothing was stored: fail the step rather than lose it.
   const alt = `${r.type}:${r.transaction_id}`;
-  await q(sql, [alt, ...vals]);
+  const altRows = await q(sql, [alt, ...vals]);
+  if (!altRows.length) throw new Error(`Finances record ${r.transaction_id} (${r.type}) collides with stored records of other types`);
   return alt;
 }
 
@@ -446,10 +457,14 @@ async function syncFinances(log) {
     log.push(`finances: skipped (${why})`);
     return { skipped: why };
   }
-  // First run with the transactions table (or an empty one) backfills the whole history
+  // First run with the transactions table (or an empty one) backfills the whole history. So does the first run that
+  // stores every record (ebay_finances_all_records_since unset): the code before it dropped records with no order or no
+  // transactionId (store subscription, insertion fees, payouts), and only a full re-read brings back the ones older than
+  // the 7-day look-back. Safe to repeat: every record is upserted by its id, and order totals come from all stored records.
   const hasAny = (await q('select 1 from ebay_transactions limit 1')).length > 0;
   const last = hasAny ? await getSetting('ebay_last_finance_sync') : null;
-  const from = last
+  const allRecords = await getSetting('ebay_finances_all_records_since');
+  const from = last && allRecords
     ? new Date(new Date(last).getTime() - 7 * 86400_000)
     : new Date(Date.now() - Number(process.env.EBAY_BACKFILL_DAYS || 365) * 86400_000);
   const startedAt = new Date().toISOString();
@@ -458,7 +473,10 @@ async function syncFinances(log) {
   let orderless = 0;
   const notInBooks = new Map(); // "TYPE" or "NON_SALE_CHARGE/FEE_TYPE" -> count, for the sync log
   const unknown = new Set();
+  const unknownFee = new Set();
+  const noIdInBooks = new Map(); // records the books read that came without a transactionId, by type
   const seen = new Map(); // records without a transactionId: how many with the same contents so far
+  const withId = new Map(); // content key -> order id, for records that came with a transactionId
   let twins = 0;
   let offset = 0;
   while (true) {
@@ -468,6 +486,8 @@ async function syncFinances(log) {
     for (const t of page.transactions || []) {
       const r = normalizeTransaction(t, seen);
       if (r.repeat > 1) twins++;
+      if (r.noid) withId.set(r.noid, r.order_id);
+      else if (inBooks(r)) noIdInBooks.set(r.type, (noIdInBooks.get(r.type) || 0) + 1);
       await upsertTransaction(r);
       if (r.order_id) touched.add(r.order_id);
       else orderless++;
@@ -476,20 +496,43 @@ async function syncFinances(log) {
         notInBooks.set(k, (notInBooks.get(k) || 0) + 1);
       }
       if (!KNOWN_TX_TYPES.has(r.type)) unknown.add(r.type || 'no type');
+      if (r.fee_type && !KNOWN_FEE_TYPES.has(r.fee_type)) unknownFee.add(r.fee_type);
       stored++;
     }
     offset += 1000;
     if (!page.next || offset >= (page.total || 0)) break;
   }
+  // A record stored earlier without a transactionId (NOID-<key>) that eBay now sends with one: the NOID- copy goes, or
+  // the record would count twice. Copies still sent without an id in this same read (seen) are the ones to keep:
+  // NOID-<key> stays if one was, #2 too if two were, and so on.
+  let replaced = 0;
+  for (const [key, orderId] of withId) {
+    const keep = seen.get(key) || 0;
+    const rows = await q('select transaction_id from ebay_transactions where transaction_id = $1 or transaction_id like $2',
+      [`NOID-${key}`, `NOID-${key}#%`]);
+    const drop = rows.map((x) => x.transaction_id).filter((tid) => Number(tid.split('#')[1] || 1) > keep);
+    if (!drop.length) continue;
+    await q('delete from ebay_transactions where transaction_id = any($1)', [drop]);
+    replaced += drop.length;
+    if (orderId) touched.add(orderId);
+  }
   await applyFinanceTotals([...touched]);
   await setSetting('ebay_last_finance_sync', startedAt);
+  await setSetting('ebay_finances_all_records_since', allRecords || startedAt);
   let msg = `finances: ${stored} records on ${touched.size} orders`;
   if (orderless) msg += `, ${orderless} with no order`;
   if (notInBooks.size) msg += ` (stored, not yet in the books: ${[...notInBooks].map(([k, n]) => `${k} ${n}`).join(', ')})`;
-  if (unknown.size) msg += ` · WARNING unknown Finances type ${[...unknown].join(', ')}`;
   if (twins) msg += ` · ${twins} ${twins === 1 ? 'record' : 'records'} with no id identical to another (each kept, numbered #2, #3, ...)`;
+  if (replaced) msg += ` · ${replaced} stored without an id now came with one (the copy without the id removed)`;
+  // Warnings also go on the step, so the page shows them (ebayStatus().notes) on an ok sync too
+  const warnings = [
+    ...[...unknown].map((t) => `unknown Finances type ${t}`),
+    ...[...unknownFee].map((fee) => `unknown fee type ${fee}`),
+    ...[...noIdInBooks].map(([t, n]) => `${n} ${t} ${n === 1 ? 'record' : 'records'} without transactionId`),
+  ];
+  for (const w of warnings) msg += ` · WARNING ${w}`;
   log.push(msg);
-  return { stored, orders: touched.size, orderless };
+  return { stored, orders: touched.size, orderless, warnings };
 }
 
 // Per-order totals from ALL stored Finances records: sale fees, ad fees net of ad credits, buyer refunds,
