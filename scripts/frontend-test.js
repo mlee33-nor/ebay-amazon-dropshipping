@@ -522,6 +522,8 @@ await check('a pay period shows its own profit; a correction for an earlier paid
   const r = { month: '2026-10', start: new Date('2026-09-27T07:00:00Z'), end: new Date('2026-10-27T06:59:59Z') };
   assert.deepEqual(M.inRange([sale, mozi], r).map((o) => o.order_id), ['S1'], 'the pay-period view is the period alone');
   assert.deepEqual(M.inRange([sale, mozi], { start: new Date('2026-09-01T07:00:00Z'), end: new Date('2026-10-27T06:59:59Z') }).length, 2, 'a date range has both');
+  const st = RM.statementFor({ orders: [sale, mozi], books: { expenses: [{ month: '2026-10', amount: 20, paid_by: 'seller' }], settlements: [] }, settings: { split_amazon: 50 } }, '2026-10');
+  assert.deepEqual([st.lines.map((l) => l.o.order_id), st.fixLines.map((l) => l.o.order_id), st.matches], [['S1'], ['REFUND:M:2026-10'], true], 'the statement lists the correction apart and still adds up');
 });
 
 await closeDb();

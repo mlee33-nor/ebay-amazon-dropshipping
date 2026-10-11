@@ -30,7 +30,10 @@ export function renderReports(el) {
   const years = [...new Set(d.orders.filter((o) => o.counted && o.business_month).map((o) => o.business_month.slice(0, 4)).concat(months.map((m) => m.slice(0, 4))))].sort();
   if (!pickedYear || !years.includes(pickedYear)) pickedYear = years[years.length - 1];
 
-  const { s, lines, tot, matches, sales, refundLines } = statementFor(pickedMonth);
+  const { s, so, lines, tot, fixLines, fixTot, matches, sales, refundLines } = statementFor(pickedMonth);
+  const fix = s.corrections;
+  const fixNames = fixLines.map((l) => `${String(l.o.title || '').replace(/^Refund · /, '').slice(0, 45)} (${monthLabel(l.o.correction_for, 'long')})`).join(', ');
+  const later = d.orders.filter((o) => o.counted && o.correction_for === pickedMonth);
   const v = settleView(s, A, B);
   const dueDate = settlementDueDate(pickedMonth, dueDay);
   const due = dueStatus(dueDate, { paid: v.fullyPaid });
@@ -59,18 +62,19 @@ export function renderReports(el) {
           <div>
             <h4>Summary</h4>
             ${row('Sales counted', salesWord)}
-            ${row(`eBay payouts (collected by ${esc(B)})`, money(s.collected, 2))}
-            ${row(`Amazon cost (paid by ${esc(A)})`, `−${money(s.cogs, 2)}`)}
-            ${row('eBay ad fees', `−${money(s.adFees, 2)}`)}
-            ${s.otherCosts ? row('Other per-order costs', `−${money(s.otherCosts, 2)}`) : ''}
+            ${row(`eBay payouts (collected by ${esc(B)})`, money(so.collected, 2))}
+            ${row(`Amazon cost (paid by ${esc(A)})`, `−${money(so.cogs, 2)}`)}
+            ${row('eBay ad fees', `−${money(so.adFees, 2)}`)}
+            ${so.otherCosts ? row('Other per-order costs', `−${money(so.otherCosts, 2)}`) : ''}
             ${row('Operating costs', `−${money(s.opex, 2)}`)}
-            ${row('Net business profit', money(s.businessProfit, 2), 'total')}
+            ${row('Net business profit', money(so.businessProfit, 2), 'total')}
           </div>
           <div>
             <h4>Settlement</h4>
-            ${row(`${esc(A)}'s reimbursement (Amazon cost${s.opexAmazon ? ' + expenses' : ''})`, money(s.cogs + s.opexAmazon, 2))}
-            ${row(`${esc(A)}'s ${split}% share`, money(s.shareAmazon, 2))}
-            ${row(`${esc(B)}'s ${100 - split}% share`, money(s.shareSeller, 2))}
+            ${row(`${esc(A)}'s reimbursement (Amazon cost${s.opexAmazon ? ' + expenses' : ''})`, money(so.cogs + s.opexAmazon, 2))}
+            ${row(`${esc(A)}'s ${split}% share`, money(so.shareAmazon, 2))}
+            ${row(`${esc(B)}'s ${100 - split}% share`, money(so.shareSeller, 2))}
+            ${fix ? row('Corrections for earlier payments that missed them', `${fix.sellerSends < 0 ? '−' : '+'}${money(Math.abs(fix.sellerSends), 2)}`, fix.sellerSends < 0 ? 'neg' : '') : ''}
             ${row(`${esc(v.from)} sends ${esc(v.to)}`, money(v.amount, 2), 'total')}
             <div class="st-check ${matches ? 'ok' : 'bad'}">${matches ? `${ICONS.check} Line items below add up to the settlement exactly` : `${ICONS.alert} Line items don’t add up to the settlement. Check the Editor.`}</div>
           </div>
@@ -80,6 +84,12 @@ export function renderReports(el) {
         <div class="table-wrap"><table class="simple st-table"><thead><tr><th>Date</th><th>Item</th><th class="r">Payout</th><th class="r">Amazon</th><th class="r">Ads</th><th class="r">Profit</th></tr></thead><tbody>
           ${lines.map((l) => `<tr><td style="white-space:nowrap">${fmtDate(l.o.created_at)}${l.o.approx_date ? '<span class="muted">*</span>' : ''}</td><td>${esc(l.o.title.slice(0, 70))}</td><td class="r num">${money(d2(l.payout), 2)}</td><td class="r num">${money(d2(l.cogs), 2)}</td><td class="r num">${l.ads ? money(d2(l.ads), 2) : '—'}</td><td class="r num ${l.net < 0 ? 'neg' : ''}">${money(d2(l.net), 2)}</td></tr>`).join('')}
         </tbody><tfoot><tr class="total"><td></td><td><b>Total</b></td><td class="r num"><b>${money(d2(tot.payout), 2)}</b></td><td class="r num"><b>${money(d2(tot.cogs), 2)}</b></td><td class="r num"><b>${money(d2(tot.ads), 2)}</b></td><td class="r num"><b>${money(d2(tot.net), 2)}</b></td></tr></tfoot></table></div>
+        ${fixLines.length ? `<h4>Corrections for earlier payments (${count(fixLines.length)})</h4>
+        <div class="muted" style="font-size:12px;margin-bottom:6px">These belong to an earlier pay period, but that payment was made without them. They are not in this period's profit above; they are settled on this payment: ${esc(A)} gets ${money(Math.abs(fix.sellerSends), 2)} ${fix.sellerSends < 0 ? 'less' : 'more'} (${esc(A)}'s reimbursement ${money(fix.cogs, 2)} and ${split}% of ${money(fix.profit, 2)} profit).</div>
+        <div class="table-wrap"><table class="simple st-table"><thead><tr><th>Date</th><th>Item</th><th>Missed by the payment of</th><th class="r">Payout</th><th class="r">Amazon</th><th class="r">Ads</th><th class="r">Profit</th></tr></thead><tbody>
+          ${fixLines.map((l) => `<tr><td style="white-space:nowrap">${fmtDate(l.o.created_at)}</td><td>${esc(l.o.title.slice(0, 70))}</td><td style="white-space:nowrap">${monthLabel(l.o.correction_for, 'long')}</td><td class="r num">${money(d2(l.payout), 2)}</td><td class="r num">${money(d2(l.cogs), 2)}</td><td class="r num">${l.ads ? money(d2(l.ads), 2) : '—'}</td><td class="r num ${l.net < 0 ? 'neg' : ''}">${money(d2(l.net), 2)}</td></tr>`).join('')}
+        </tbody><tfoot><tr class="total"><td></td><td><b>Total</b></td><td></td><td class="r num"><b>${money(d2(fixTot.payout), 2)}</b></td><td class="r num"><b>${money(d2(fixTot.cogs), 2)}</b></td><td class="r num"><b>${money(d2(fixTot.ads), 2)}</b></td><td class="r num"><b>${money(d2(fixTot.net), 2)}</b></td></tr></tfoot></table></div>` : ''}
+        ${later.length ? `<div class="muted" style="font-size:12px;margin-top:8px">Found after this payment was made: ${later.map((o) => `${esc(String(o.title || '').replace(/^Refund · /, '').slice(0, 45))} (profit ${money(o.net, 2)})`).join(', ')}. This payment stays as paid; the correction is on the ${[...new Set(later.map((o) => monthLabel(o.settle_month, 'long')))].join(' and ')} payment.</div>` : ''}
         ${lines.some((l) => l.o.approx_date) ? '<div class="muted" style="font-size:11.5px;margin-top:6px">* date within the month from the monthly sheet</div>' : ''}
         ${refundLines ? '<div class="muted" style="font-size:11.5px;margin-top:6px">“Refund ·” lines are refunds of earlier sales, booked on this payment because they happened in its period or after an earlier payment was made.</div>' : ''}
         <div class="st-foot muted">Generated ${fmtDate(new Date(), { month: 'short', day: 'numeric', year: 'numeric' })} · each payment is due on the ${dueDay}th (Arizona time)</div>
@@ -103,17 +113,18 @@ export function renderReports(el) {
       `Sales: ${salesWord} · eBay payouts ${money(s.collected, 2)}`,
       `Amazon cost (${A} paid): ${money(s.cogs, 2)}`,
       `Ad fees: ${money(s.adFees, 2)} · Operating costs: ${money(s.opex, 2)}`,
-      `Net business profit: ${money(s.businessProfit, 2)}`,
-      `${A} ${split}%: ${money(s.shareAmazon, 2)} · ${B} ${100 - split}%: ${money(s.shareSeller, 2)}`,
-      `${v.from} sends ${v.to}: ${money(v.amount, 2)} (Amazon cost ${money(s.cogs + s.opexAmazon, 2)} + ${A}'s share ${money(s.shareAmazon, 2)})`,
+      `Net business profit: ${money(so.businessProfit, 2)}`,
+      `${A} ${split}%: ${money(so.shareAmazon, 2)} · ${B} ${100 - split}%: ${money(so.shareSeller, 2)}`,
+      fix ? `Corrections for earlier payments that missed them (${fixNames}): ${fix.sellerSends < 0 ? '−' : '+'}${money(Math.abs(fix.sellerSends), 2)}` : null,
+      `${v.from} sends ${v.to}: ${money(v.amount, 2)} (Amazon cost ${money(so.cogs + s.opexAmazon, 2)} + ${A}'s share ${money(so.shareAmazon, 2)}${fix ? ` ${fix.sellerSends < 0 ? '−' : '+'} corrections ${money(Math.abs(fix.sellerSends), 2)}` : ''})`,
       `Due ${fmtDate(dueDate, { weekday: 'short', month: 'short', day: 'numeric' })}${v.paid !== null ? ` · paid ${money(v.paid, 2)}` : ''}`,
-    ].join('\n');
+    ].filter((x) => x !== null).join('\n');
     try { await navigator.clipboard.writeText(text); toast('Summary copied: paste it into a text or email', 'good'); } catch { toast('Couldn’t copy. Select the statement text instead.', 'bad'); }
   };
-  $('#rp-csv').onclick = () => downloadCsv(`statement-${pickedMonth}.csv`, lines, [
+  $('#rp-csv').onclick = () => downloadCsv(`statement-${pickedMonth}.csv`, [...lines, ...fixLines], [
     { title: 'Date', get: (l) => azDay(l.o.created_at) }, { title: 'Item', get: (l) => l.o.title },
     { title: 'eBay order', get: (l) => (l.o.source === 'refund' ? l.o.refund_of : l.o.ebay_order_id || (l.o.source === 'ebay' ? l.o.order_id : '')) },
-    { title: 'Line', get: (l) => (l.o.source === 'refund' ? 'refund of an earlier sale' : l.o.ledger?.is_refund ? 'sheet refund' : 'sale') },
+    { title: 'Line', get: (l) => (l.o.correction_for ? `correction for the ${monthLabel(l.o.correction_for, 'long')} payment` : l.o.source === 'refund' ? 'refund of an earlier sale' : l.o.ledger?.is_refund ? 'sheet refund' : 'sale') },
     { title: 'eBay payout', get: (l) => d2(l.payout) }, { title: 'Amazon cost', get: (l) => d2(l.cogs) }, { title: 'Ad fees', get: (l) => d2(l.ads) }, { title: 'Other costs', get: (l) => d2(l.other) }, { title: 'Profit', get: (l) => d2(l.net) },
   ]);
 

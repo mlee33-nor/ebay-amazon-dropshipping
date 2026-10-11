@@ -20,12 +20,19 @@ export function lineOf(o) {
 // statement, and a refund line booked on a later payment is on that payment's statement.
 export function statementFor({ orders, books, settings }, month) {
   const s = settleMonth({ month, orders, expenses: books.expenses, settlements: books.settlements, splitAmazon: Number(settings.split_amazon) });
-  const lines = orders.filter((o) => o.counted && rowMonth(o) === month).map(lineOf).sort((a, b) => (a.o.created_at < b.o.created_at ? -1 : 1));
-  const sum = (k) => lines.reduce((t, l) => t + l[k], 0);
-  const tot = { payout: sum('payout'), cogs: sum('cogs'), ads: sum('ads'), other: sum('other'), net: sum('net') };
-  const matches = lines.length === s.orders && tot.net === cents(s.orderProfit) && tot.payout === cents(s.collected) && tot.cogs === cents(s.cogs);
+  const all = orders.filter((o) => o.counted && rowMonth(o) === month).map(lineOf).sort((a, b) => (a.o.created_at < b.o.created_at ? -1 : 1));
+  // The period's own lines (what a sheet kept for the period shows) and, apart, corrections for an earlier payment
+  // that missed them (o.correction_for, e.g. a refund dated in a period that was already paid)
+  const lines = all.filter((l) => !l.o.correction_for);
+  const fixLines = all.filter((l) => l.o.correction_for);
+  const totOf = (list) => { const sum = (k) => list.reduce((t, l) => t + l[k], 0); return { payout: sum('payout'), cogs: sum('cogs'), ads: sum('ads'), other: sum('other'), net: sum('net') }; };
+  const tot = totOf(lines);
+  const fixTot = totOf(fixLines);
+  const so = s.own ? { ...s, ...s.own } : s;
+  const matches = lines.filter((l) => !l.o.adjustment).length === so.orders && tot.net === cents(so.orderProfit) && tot.payout === cents(so.collected) && tot.cogs === cents(so.cogs)
+    && (!fixLines.length || (fixTot.net === cents(s.orderProfit) - cents(so.orderProfit) && fixTot.cogs === cents(s.cogs) - cents(so.cogs)));
   const sales = lines.filter((l) => isSale(l.o)).length;
-  return { s, lines, tot, matches, sales, refundLines: lines.length - sales };
+  return { s, so, lines, tot, fixLines, fixTot, matches, sales, refundLines: lines.length - sales };
 }
 
 // ---------------------------------------------------------------- taxes
