@@ -6,7 +6,7 @@ export const PAGE_OPTIONS = [
   { id: 'overview', label: 'Overview', on: true, locked: true, note: 'The home page' },
   { id: 'review', label: 'Review', on: true, note: 'Things to look at, in one list (with a count in the menu)' },
   { id: 'orders', label: 'Orders', on: true, note: 'Every sale and what it made' },
-  { id: 'settlement', label: 'Payments', on: true, note: 'What Drew sends Myles each pay period' },
+  { id: 'settlement', label: 'Settlement', on: true, locked: true, note: 'What Drew sends Myles each pay period (always shown)' },
   { id: 'reports', label: 'Statements', on: true, note: 'A printable statement for each payment, and the tax export' },
   { id: 'costs', label: 'Monthly costs', on: true, note: 'Subscriptions and tools that come out of profit' },
   { id: 'promotions', label: 'Promotions', on: true, note: 'Promoted listings: ad fees and what they sold' },
@@ -22,7 +22,8 @@ export const PAGE_OPTIONS = [
 
 export const CARD_OPTIONS = [
   { id: 'profit', label: 'Profit', on: true, note: 'Profit for the time picked, and how it adds up' },
-  { id: 'owed', label: 'What Drew owes Myles', on: true, note: 'This payment, when it is due and whether it is paid' },
+  { id: 'owed', label: 'Settlement', on: true, note: 'What Drew sends Myles, when it is due, and each pay period' },
+  { id: 'breakdown', label: 'How the profit adds up', on: true, note: 'Sales money, Amazon costs, ad fees and monthly costs' },
   { id: 'attention', label: 'Needs attention', on: true, note: 'How many things are on the Review page' },
   { id: 'chart', label: 'Profit by day', on: true, note: 'A simple bar chart' },
   { id: 'recent', label: 'Latest sales', on: true, note: 'The newest sales and what each made' },

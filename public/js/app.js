@@ -40,7 +40,7 @@ const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', sub: 'Profit and what is owed, at a glance', group: 'Main' },
   { id: 'review', label: 'Review', icon: 'alert', sub: 'Things to look at: sales waiting for a cost, emails, eBay charges', noRange: true, group: 'Main' },
   { id: 'orders', label: 'Orders', icon: 'orders', sub: 'Every sale and what it made', group: 'Main' },
-  { id: 'settlement', label: 'Payments', icon: 'settle', sub: 'What Drew sends Myles each pay period', noRange: true, group: 'Main' },
+  { id: 'settlement', label: 'Settlement', icon: 'settle', sub: 'What Drew sends Myles each pay period, and the payments made', noRange: true, group: 'Main' },
   { id: 'reports', label: 'Statements', icon: 'receipt', sub: 'A statement for each payment, and the year-end export for taxes', noRange: true, group: 'Main' },
   { id: 'costs', label: 'Monthly costs', icon: 'wallet', sub: 'Subscriptions and tools that come out of profit before the split', noRange: true, group: 'Main' },
   { id: 'promotions', label: 'Promotions', icon: 'target', sub: 'Promoted listings: ad fees and what they sold', noRange: true, group: 'Main' },
@@ -268,6 +268,8 @@ window.addEventListener('hashchange', route);
 function route() {
   const id = (location.hash.replace('#/', '') || 'overview').split('?')[0];
   state.page = PAGES.some((p) => p.id === id) ? id : 'overview';
+  // Orders opened from the menu (no ?f=) always starts on All, so a filter picked earlier can't hide a sale
+  if (state.page === 'orders' && !new URLSearchParams(location.hash.split('?')[1] || '').get('f')) state.ordersFilter = 'all';
   renderNav();
   renderPage();
 }
