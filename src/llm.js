@@ -140,18 +140,58 @@ function figuresIn(s) {
   }
   return out;
 }
-// Who pays whom in a text, as "payer>payee" ("Drew owes Myles", "for Drew to send Myles", "Myles gets $5 from Drew")
+// Who pays whom in a text, as "payer>payee" ("Drew owes Myles", "for Drew to send Myles", "Myles owes $15.15 to Drew",
+// "Myles gets $5 from Drew", "Drew is owed $15.15 by Myles"). "you" is a party too: replies are written to the reader.
 function directionsIn(s, names) {
-  const who = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const who = [...names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'you'].join('|');
   const verb = '(?:still\\s+|also\\s+|already\\s+|now\\s+)?(?:(?:needs?|has|have|had|should|will|would|must|is going)\\s+(?:to\\s+)?)?(?:to\\s+)?(?:owes?|owed|owing|sends?|sent|sending|pays?|paid|paying|transfers?|transferred|gives?|gave|reimburses?|reimbursed)';
   const pairs = new Set();
-  for (const m of String(s).matchAll(new RegExp(`\\b(${who})\\b(?:'s)?\\s+${verb}\\s+(?:back\\s+)?(?:to\\s+)?(${who})\\b`, 'gi'))) pairs.add(`${m[1].toLowerCase()}>${m[2].toLowerCase()}`);
-  for (const m of String(s).matchAll(new RegExp(`\\b(${who})\\b\\s+(?:is owed|gets|got|receives|received|will get|is getting|should get)\\b.{0,60}?\\bfrom\\s+(${who})\\b`, 'gi'))) pairs.add(`${m[2].toLowerCase()}>${m[1].toLowerCase()}`);
+  // "X owes Y", "X owes $5 to Y" (an amount or a few words may sit between the verb and "to Y")
+  for (const m of String(s).matchAll(new RegExp(`\\b(${who})\\b(?:'s)?\\s+${verb}\\s+(?:back\\s+)?(?:(?:to\\s+)?(${who})\\b|.{0,40}?\\bto\\s+(${who})\\b)`, 'gi'))) pairs.add(`${m[1].toLowerCase()}>${(m[2] || m[3]).toLowerCase()}`);
+  // "Y gets $5 from X", "Y is owed $5 by X"
+  for (const m of String(s).matchAll(new RegExp(`\\b(${who})\\b\\s+(?:(?:is|are|was|were)\\s+owed\\b.{0,60}?\\b(?:by|from)|(?:gets|got|receives|received|will get|is getting|should get)\\b.{0,60}?\\bfrom)\\s+(${who})\\b`, 'gi'))) pairs.add(`${m[2].toLowerCase()}>${m[1].toLowerCase()}`);
   return pairs;
 }
-const LOSS = /\b(lost|loss|losses|losing|lose|negative|minus|in the red|down|short|deficit|behind|off)\b/i;
+// The reader may be either partner, so "you owe ..." / "... is owed by you" is never safe to show
+const YOU_PAY = /\byou\s+(?:still\s+|also\s+|now\s+)?(?:owe|owed|need\s+to\s+(?:pay|send)|have\s+to\s+(?:pay|send)|should\s+(?:pay|send|give)|must\s+(?:pay|send))\b|\bowed\b.{0,60}?\bby\s+you\b/i;
+// A loss may be written as a positive amount only right after a loss word ("lost $15.07", "down **$50.99**"), and
+// never in a sentence that also calls it a gain
+const lossBefore = (s, raw) => new RegExp(`\\b(?:lost|loss of|losing|down|negative|minus|deficit of|short|in the red by)\\s+(?:by\\s+)?\\**\\$?\\s?${raw.replace(/[.]/g, '\\.')}(?![\\d.])`, 'i').test(s);
+const GAIN = /\b(?:made|make|making|earned|earn|gained|gain|profit (?:is|was|of)|in the black|not a loss|no loss)\b|\bup\s+\**\$/i;
 const SETTLED = /\b(paid in full|in full|fully paid|all paid|paid up|nothing (?:is |was )?(?:owed|due|outstanding)|(?:doesn'?t|does not|don'?t) owe|owes nothing|squared up|settled up|all settled|covers it exactly|exactly what it came to)\b/i;
 const OWED = /\b(still owed|still owes?|owes?|owed|unpaid|not paid|outstanding|overdue|not due yet|isn'?t due)\b/i;
+// What a figure is in its clause: paid, owed, or a payment's total so far. The closest role word wins.
+const ROLES = [['paid', /\b(?:paid|sent)\b/gi], ['owed', /\b(?:still owed|owes?|owed|owing|outstanding|unpaid)\b/gi], ['total', /\b(?:(?<!paid )so far|comes to|came to|coming to)\b/gi]]; // "paid so far" is paid
+const clauses = (s) => String(s).split(/,(?!\d)|;|\s(?:and|but|while|so)\s(?!far\b)/i);
+function rolesIn(s) {
+  const out = []; // { cents, role }
+  for (const c of clauses(s)) {
+    const words = ROLES.flatMap(([role, re]) => [...c.matchAll(re)].map((m) => ({ role, at: m.index, end: m.index + m[0].length })));
+    for (const m of c.matchAll(/(−\s?|-(?=\$))?\$\s?(\d[\d,]*(?:\.\d+)?)/g)) {
+      const at = m.index; const end = at + m[0].length;
+      const near = words.map((w) => ({ ...w, d: w.end <= at ? at - w.end : w.at >= end ? w.at - end : 0 })).sort((x, y) => x.d - y.d)[0];
+      // A role word more than a few words away is about something else ("lost $15.07 on the October payment so far")
+      out.push({ k: Math.round(Number(m[2].replace(/,/g, '')) * 100), role: near && near.d <= 20 ? near.role : null });
+    }
+  }
+  return out;
+}
+// The months a sentence puts its figures on. The dates of a payment's sales ("(sales Sep 27–Oct 26)") and its due
+// day are not the payment's month: "October payment (sales Sep 27–Oct 26): $240.87" is October's only.
+const undated = (s) => String(s).replace(/\(sales [^)]*\)/gi, ' ').replace(/\bdue\s+[A-Z][a-z]{2,8}\.?\s+\d{1,2}\b/g, ' ');
+function figureMonths(s) {
+  const t = undated(s);
+  const pay = [...t.matchAll(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|May|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+payment\b/gi)].map((m) => MONTHS.indexOf(m[1].slice(0, 3).toLowerCase()));
+  const all = pay.length ? new Set(pay) : monthsIn(t);
+  const out = new Map(); // cents (abs) -> months
+  for (const m of t.matchAll(/(−\s?|-(?=\$))?\$\s?(\d[\d,]*(?:\.\d+)?)/g)) {
+    const k = Math.round(Number(m[2].replace(/,/g, '')) * 100) * (m[1] ? -1 : 1);
+    // "Sep $704.40" (a month written right before the amount) is that month's
+    const own = t.slice(Math.max(0, m.index - 12), m.index).match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*$/i);
+    out.set(k, own ? new Set([MONTHS.indexOf(own[1].toLowerCase())]) : all);
+  }
+  return out;
+}
 // The facts as plain lines: the dashboard's headline, its bullets and its table
 const factLines = (facts) => [facts.text, ...(facts.bullets || []), ...(facts.table ? [facts.table.head.join(' | '), ...facts.table.rows.map((r) => r.join(' | '))] : [])]
   .filter(Boolean).map((l) => String(l).replace(/\*\*/g, ''));
@@ -163,33 +203,43 @@ export function checkReply(text, facts, question = '') {
   const [A, B] = facts.partners || ['Myles', 'Drew'];
   const factText = factLines(facts).join('\n');
   const problems = [];
-  const money = new Map(); // signed cents -> months named alongside it in the facts (empty: no month)
+  const money = new Map(); // signed cents -> months the facts put it on (empty: no month)
+  const roles = new Map(); // cents (no sign) -> what the facts call it: paid, owed, or a payment's total so far
   const pcts = new Set();
   const factNums = new Set(figuresIn(factText).filter((f) => f.kind === 'num').map((f) => Math.abs(f.v)));
   const plain = new Set([...factNums, ...figuresIn(question).filter((f) => f.kind === 'num').map((f) => Math.abs(f.v))]);
   const moneyAbs = new Set(figuresIn(factText).filter((f) => f.kind === 'money').map((f) => Math.abs(f.v)));
   for (const s of sentences(factText)) {
-    for (const f of figuresIn(s)) {
-      if (f.kind === 'pct') pcts.add(Math.abs(f.v));
-      if (f.kind !== 'money') continue;
-      const k = Math.round(f.v * 100);
+    for (const f of figuresIn(s)) if (f.kind === 'pct') pcts.add(Math.abs(f.v));
+    for (const [k, mos] of figureMonths(s)) {
       if (!money.has(k)) money.set(k, new Set());
-      for (const mo of monthsIn(s)) money.get(k).add(mo);
+      for (const mo of mos) money.get(k).add(mo);
+    }
+    for (const r of rolesIn(s)) {
+      if (!roles.has(r.k)) roles.set(r.k, new Set());
+      if (r.role) roles.get(r.k).add(r.role);
     }
   }
   for (const s of sentences(text)) {
-    const months = monthsIn(s);
+    const months = monthsIn(undated(s));
     for (const f of figuresIn(s)) {
       // A dollar amount from the facts written without its "$" ("Drew paid 704.40") is still checked as money
       if (f.kind === 'num' && /\.\d\d$/.test(f.raw) && moneyAbs.has(Math.abs(f.v)) && !factNums.has(Math.abs(f.v))) f.kind = 'money';
       if (f.kind === 'pct') { if (!pcts.has(Math.abs(f.v))) problems.push(`${f.v}% isn't in the facts`); continue; }
       if (f.kind === 'num') { if (!plain.has(Math.abs(f.v))) problems.push(`${f.v} isn't in the facts`); continue; }
       const k = Math.round(f.v * 100);
-      // A loss may be written as a positive amount with a loss word ("we lost $15.07"), never as a gain
-      const key = money.has(k) ? k : k > 0 && money.has(-k) && LOSS.test(s) ? -k : null;
+      // A loss may be written as a positive amount right after a loss word ("we lost $15.07"), never as a gain
+      const key = money.has(k) ? k : k > 0 && money.has(-k) && lossBefore(s, f.raw) && !GAIN.test(s) ? -k : null;
       if (key === null) { problems.push(money.has(-k) ? `$${f.v} has the wrong sign` : `$${f.v} isn't in the facts`); continue; }
       const factMonths = money.get(key);
       if (months.size && factMonths.size && ![...months].some((m) => factMonths.has(m))) problems.push(`$${Math.abs(f.v)} is put on a different month`);
+    }
+    // Paid, owed or so far: each amount keeps what the facts call it ("Drew paid $15.15" when $15.15 is what's owed).
+    // "So far" on a figure the facts never call paid or owed ("profit is −$50.99 so far") is just a running total.
+    for (const r of rolesIn(s)) {
+      const fr = roles.get(r.k) || new Set();
+      if (r.role === 'total' && !fr.has('paid') && !fr.has('owed')) continue;
+      if (r.role && !fr.has(r.role)) problems.push(`$${(r.k / 100).toFixed(2)} is called ${r.role} when the facts don't`);
     }
   }
   // "Did Drew pay?": the reply can't say Yes when the dashboard says Partly, No or Not yet (or the other way round),
@@ -200,13 +250,19 @@ export function checkReply(text, facts, question = '') {
   if (SETTLED.test(text) && !SETTLED.test(factText)) problems.push("it says it's paid up when the facts don't");
   if (OWED.test(text) && !OWED.test(factText)) problems.push("it says money is owed when the facts don't");
   // Who pays whom: every direction in the reply must be one the facts give. With none in the facts, only the usual
-  // one (Drew pays Myles) is allowed.
+  // one (Drew pays Myles) is allowed. "You" may be either partner, so it is never the payer, and "Drew owes you" is
+  // only kept when the facts have Drew paying the other partner.
+  if (YOU_PAY.test(text)) problems.push('it tells the reader "you" owe money, and the reader may be either partner');
   const factDirs = directionsIn(factText, [A, B]);
   const usual = `${B.toLowerCase()}>${A.toLowerCase()}`;
+  const other = (x) => (x === A.toLowerCase() ? B.toLowerCase() : A.toLowerCase());
   for (const d of directionsIn(text, [A, B])) {
-    const [x, y] = d.split('>');
+    let [x, y] = d.split('>');
     if (x === y) continue;
-    if (!factDirs.has(d) && (factDirs.size || d !== usual)) problems.push(`"${d.replace('>', ' pays ')}" isn't who pays whom in the facts`);
+    if (x === 'you') { if (!problems.some((p) => p.includes('"you"'))) problems.push('it tells the reader "you" owe money, and the reader may be either partner'); continue; }
+    if (y === 'you') y = other(x);
+    const pair = `${x}>${y}`;
+    if (!factDirs.has(pair) && (factDirs.size || pair !== usual)) problems.push(`"${pair.replace('>', ' pays ')}" isn't who pays whom in the facts`);
   }
   return problems;
 }

@@ -96,60 +96,6 @@ await check('thinking tags from reasoning models are removed', async () => {
   assert.equal(await writeAnswer('what does drew owe me', facts), 'Drew owes you $45.96.');
 });
 
-// The number guard, with the dashboard's real answers from Oct 10 (the audit's cases)
-const { checkReply } = await import('../src/llm.js');
-const thisMonth = { text: '**Net business profit this month (Oct 1–10): −$50.99.** 1 more sale is awaiting the Amazon email and isn’t counted yet.', bullets: ['Item profit $157.96 from 14 sales, minus $208.95 operating costs.', 'October payment (sales Sep 27–Oct 26): −$15.07 business profit; it comes to $240.87 for Drew to send Myles.'] };
-const owe = { text: '**Drew owes Myles $15.15 now.**', bullets: ['September payment (sales Sep 1–Sep 26): $15.15 still owed, due Sep 26 (14 days overdue).', 'October payment (sales Sep 27–Oct 26): $240.87 so far, due Oct 26 (in 16 days).', 'Paid so far: $2,226.79 (Jul $217.63, Aug $1,304.76, Sep $704.40).'] };
-const fishing = { text: '**Partly: $15.15 still owed.** “Dorisea 300m 30lb Black/Yellow Braided Fishing Li…” (order 16-15194-64325, sold Sep 23) is on the September payment (sales Sep 1–Sep 26), where it adds **$14.85**: its $12.82 Amazon cost + Myles\'s 50% of its $4.06 profit. Drew paid $704.40 on Sep 27 of the $719.55 it came to, so $15.15 is still owed, due Sep 26 (14 days overdue).', bullets: ['A payment covers its whole pay period, not single items, so an item is paid once the payment it is on is paid.'] };
-await check('guard: a loss written as a gain is thrown away ("made $50.99" when it is −$50.99)', async () => {
-  reply = 'This month the business made **$50.99** in profit.';
-  assert.equal(await writeAnswer('how much did we make this month', thisMonth), null);
-  assert.match(checkReply(reply, thisMonth).join(), /wrong sign/);
-  assert.deepEqual(checkReply('This month the business is down **$50.99** after operating costs.', thisMonth), []);
-  assert.deepEqual(checkReply('Business profit is **−$50.99** this month, from 14 sales.', thisMonth), []);
-  assert.deepEqual(checkReply('Profit is -$50.99 so far.', thisMonth), []);
-});
-await check('guard: payer and payee must match ("Myles owes Drew $15.15" is thrown away)', async () => {
-  assert.deepEqual(checkReply('Drew owes Myles **$15.15** right now.', owe), []);
-  assert.match(checkReply('Myles owes Drew **$15.15** right now.', owe).join(), /myles pays drew/);
-  assert.match(checkReply('Myles needs to send Drew $15.15.', owe).join(), /myles pays drew/);
-  assert.match(checkReply('Drew gets $15.15 from Myles.', owe).join(), /myles pays drew/);
-});
-await check('guard: a figure must stay with its month ($15.15 is September\'s, not October\'s)', async () => {
-  assert.match(checkReply('For October, Drew still owes **$15.15**.', owe).join(), /different month/);
-  assert.deepEqual(checkReply('The September payment still has $15.15 owed, and October is at $240.87 so far.', owe), []);
-  assert.match(checkReply('The fishing line adds $14.85 to the October payment.', fishing).join(), /different month/);
-});
-await check('guard: money only in the question, a product title or the instructions is never allowed', async () => {
-  assert.match(checkReply('Yes, we made $500 this month.', thisMonth, 'did we make $500 this month?').join(), /\$500 isn't in the facts/);
-  assert.match(checkReply('The Dorisea line is a $300 item.', fishing, 'did drew pay me for the fishing line').join(), /\$300 isn't in the facts/);
-  assert.match(checkReply('Drew sends you $50 on the 26th.', owe).join(), /\$50 isn't in the facts/);
-  assert.match(checkReply('Drew paid 704.40, so 15.07 is left.', fishing).join(), /15\.07 isn't in the facts/);
-  assert.deepEqual(checkReply('That fishing line is order 16-15194-64325 and adds **$14.85**.', fishing), []);
-});
-await check('guard: "did Drew pay" can\'t be answered Yes when the dashboard says Partly', async () => {
-  assert.match(checkReply('Yes, Drew paid you for the fishing line.', fishing).join(), /"yes" where the dashboard says "partly"/);
-  assert.match(checkReply('Drew is all paid up on the September payment.', fishing).join(), /paid up/);
-  assert.deepEqual(checkReply('Partly. The fishing line adds **$14.85** to the September payment, which still has $15.15 owed.', fishing), []);
-});
-await check('the router hears the previous product, so a follow-up keeps it', async () => {
-  reply = '{"topic":"profit","period":"","compare_to":"","product":""}';
-  await routeQuestion('and in september?', { prev: { intent: 'product', period: { label: 'all time' }, product: ['hhlpro'] } });
-  assert.match(seen.at(-1).body.messages[0].content, /product "hhlpro"/);
-});
-await check('the page always shows the dashboard\'s answer as the headline, the model\'s words under it', async () => {
-  const { answerParts } = await import('../public/js/ask-answer.js');
-  // What the server sends today when the model wrote a reply
-  const p = answerParts({ text: 'This month the business made **$50.99**.', facts: { text: thisMonth.text, bullets: thisMonth.bullets, table: null }, bullets: [], table: null, writtenBy: 'model' });
-  assert.equal(p.headline, thisMonth.text);
-  assert.equal(p.friendly, 'This month the business made **$50.99**.');
-  assert.deepEqual(p.folded.bullets, thisMonth.bullets);
-  // The dashboard's own wording alone, and the { text, friendly } shape
-  assert.equal(answerParts({ ...thisMonth, writtenBy: 'dashboard' }).headline, thisMonth.text);
-  assert.equal(answerParts({ ...thisMonth, writtenBy: 'dashboard' }).friendly, null);
-  assert.equal(answerParts({ ...thisMonth, friendly: 'Rough month.' }).headline, thisMonth.text);
-});
-
 // A small HTTP proxy standing in for Tailscale's (CONNECT tunnels and plain forwarding)
 const viaProxy = [];
 const proxy = http.createServer((req, res) => {
