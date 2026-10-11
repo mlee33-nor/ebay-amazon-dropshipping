@@ -564,7 +564,9 @@ export async function buildDataset({ sheets = true } = {}) {
   }
 
   // eBay money with no order, and return/case holds never released after 30 days (a case that may have been lost)
-  out.unassignedCharges = orderlessTx.map((t) => ({ type: t.type, fee_type: t.fee_type, amount: (t.booking_entry === 'CREDIT' ? -1 : 1) * (num(t.amount) || 0), at: iso(t.transaction_at), id: t.transaction_id }));
+  // Payouts to the bank (WITHDRAWAL) and transfers move money, they aren't costs; anything before the partnership
+  // started isn't the partnership's
+  out.unassignedCharges = orderlessTx.filter((t) => !['WITHDRAWAL', 'TRANSFER'].includes(t.type) && (!startMonth || businessMonth(t.transaction_at) >= startMonth)).map((t) => ({ type: t.type, fee_type: t.fee_type, amount: (t.booking_entry === 'CREDIT' ? -1 : 1) * (num(t.amount) || 0), at: iso(t.transaction_at), id: t.transaction_id }));
   const released = new Set(holdTx.filter((t) => t.type === 'CREDIT').map((t) => String(t.transaction_id || '').match(/^DISPUTE_HOLD_REVERSE-(\d+)/)?.[1]).filter(Boolean));
   out.openHolds = holdTx.filter((t) => t.type === 'DISPUTE' && t.booking_entry === 'DEBIT')
     .map((t) => ({ order_id: t.order_id, amount: num(t.amount), since: iso(t.transaction_at), id: String(t.transaction_id || '').match(/^DISPUTE_HOLD-(\d+)/)?.[1] }))
