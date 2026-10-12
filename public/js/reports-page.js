@@ -4,7 +4,7 @@
 import { $, esc, money, count, fmtDate, toast, downloadCsv, ICONS, settlementDueDate, dueStatus, monthLabel, settleView, azDay } from './util.js';
 import { allMonths, settlePeriodRange, CYCLE_START } from './settlement.js';
 import { statementFor as statementOf, taxRows, taxTotals, isSheetRefundFee } from './report-math.js';
-import { state } from './app.js';
+import { state, currentPeriod } from './app.js';
 
 const d2 = (c) => c / 100;
 let pickedMonth = null;
@@ -26,7 +26,7 @@ export function renderReports(el) {
   const dueDay = d.settings.settlement_day ?? 26;
   const months = allMonths(d.orders, d.books.expenses);
   if (!months.length) { el.innerHTML = `<div class="card"><div class="empty lg"><div class="ic">${ICONS.receipt}</div><div class="t">No months to report yet</div></div></div>`; return; }
-  if (!pickedMonth || !months.includes(pickedMonth)) pickedMonth = months[months.length - 1];
+  if (!pickedMonth || !months.includes(pickedMonth)) pickedMonth = months.includes(currentPeriod()) ? currentPeriod() : months[months.length - 1];
   const years = [...new Set(d.orders.filter((o) => o.counted && o.business_month).map((o) => o.business_month.slice(0, 4)).concat(months.map((m) => m.slice(0, 4))))].sort();
   if (!pickedYear || !years.includes(pickedYear)) pickedYear = years[years.length - 1];
 

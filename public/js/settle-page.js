@@ -1,7 +1,7 @@
 // Settlement page: the monthly partner sheet, computed live from orders + operating expenses.
 import { $, $$, esc, money, count, fmtDate, api, toast, downloadCsv, ICONS, countUp, settlementDueDate, settlementDueDay, dueStatus, monthLabel as mLabel, settleView, azDay } from './util.js';
 import { settleMonth, allMonths, settlePeriodRange } from './settlement.js';
-import { state, loadData, renderPage } from './app.js';
+import { state, loadData, renderPage, currentPeriod } from './app.js';
 import { paymentWarnings, warningsText, paymentDateProblem } from './health.js';
 import { remainingFor } from './report-math.js';
 import { rowMonth, isSale } from './metrics.js';
@@ -50,7 +50,8 @@ export function renderSettlement(el) {
     el.innerHTML = `<div class="card"><div class="empty lg"><div class="ic">${ICONS.settle}</div><div class="t">Nothing to settle yet</div><p>The monthly partner settlement is computed from counted sales and operating costs. Once either exists, the month appears here.</p><div class="actions"><a class="btn primary" href="#/import">${ICONS.sheet} Upload a monthly sheet</a><a class="btn" href="#/settings">${ICONS.settings} Connect eBay</a></div></div></div>`;
     return;
   }
-  if (!selected || !months.includes(selected)) selected = months[months.length - 1];
+  // Opens on the pay period being built now (not a later month that only has a cost entered ahead)
+  if (!selected || !months.includes(selected)) selected = months.includes(currentPeriod()) ? currentPeriod() : months[months.length - 1];
   const all = months.map((m) => settleMonth({ month: m, orders: d.orders, expenses, settlements, splitAmazon: split }));
   const s = all.find((x) => x.month === selected);
   const view = (x) => settleView(x, A, B);
@@ -194,9 +195,10 @@ export function renderSettlement(el) {
             ${line(`${esc(A)}'s ${split}% profit share`, money(so.shareAmazon, 2), { cls: so.shareAmazon < 0 ? 'neg' : '' })}
             ${line(`${esc(B)}'s ${100 - split}% profit share`, money(so.shareSeller, 2), { cls: so.shareSeller < 0 ? 'neg' : '' })}
             ${fix ? `${line(`${monthLabel(selected)} period on its own`, money(Math.abs(so.sellerSends), 2) + (so.sellerSends < 0 ? ' <span class="muted">(other way)</span>' : ''))}
-            ${fix.rows.map((x) => line(`Correction for the ${monthLabel(x.correction_for)} payment, which missed it: ${esc(String(x.title || '').replace(/^Refund · /, '').slice(0, 45))} <span class="muted" style="font-size:11.5px">(profit ${money(x.net, 2)}${x.cogs ? `, Amazon cost ${money(x.cogs, 2)}` : ''})</span>`, '')).join('')}
+            ${fix.rows.map((x) => line(`Correction for the ${monthLabel(x.correction_for)} payment, which missed it: ${esc(String(x.title || '').replace(/^Refund · /, '').slice(0, 45))} <span class="muted" style="font-size:11.5px">(profit ${money(x.net, 2)}${x.cogs ? `, Amazon cost ${money(x.cogs, 2)}` : ''})</span>${s.paid === null ? ` <button class="btn sm" data-settle-fix="${esc(x.order_id)}" title="You squared this up between yourselves: take it off this payment">Settled between you</button>` : ''}`, '')).join('')}
             ${line('Corrections on this payment', `${fix.sellerSends < 0 ? '−' : '+'}${money(Math.abs(fix.sellerSends), 2)}`, { cls: fix.sellerSends < 0 ? 'neg' : '' })}` : ''}
             ${line(`${ICONS.arrow.replace('<svg', '<svg style="width:14px;height:14px;color:var(--accent)"')} ${sendsLine}`, money(v.amount, 2), { total: true })}
+            ${(() => { const squared = d.orders.filter((o) => o.settled_outside && o.settle_month === selected); return squared.length ? `<div class="muted" style="font-size:12.5px;margin-top:8px">Settled between you, not on this payment: ${squared.map((o) => `${esc(String(o.title || '').replace(/^Refund · /, '').slice(0, 45))} (profit ${money(o.net, 2)}, for the ${monthLabel(o.correction_for)} payment)${s.paid === null ? ` <button class="btn sm" data-unsettle-fix="${esc(o.order_id)}">Undo</button>` : ''}`).join(', ')}</div>` : ''; })()}
             ${(() => { const later = d.orders.filter((o) => o.counted && o.correction_for === selected); return later.length ? `<div class="muted" style="font-size:12.5px;margin-top:8px">Found after this payment was made: ${later.map((o) => `${esc(String(o.title || '').replace(/^Refund · /, '').slice(0, 45))} (profit ${money(o.net, 2)})`).join(', ')}. This payment stays as paid; the correction is on the ${[...new Set(later.map((o) => monthLabel(rowMonth(o))))].join(' and ')} payment.</div>` : ''; })()}
           </div>
         </div>
@@ -247,6 +249,13 @@ export function renderSettlement(el) {
       await done(r.nothing ? 'Nothing left to pay' : `Recorded ${money(Math.abs(r.amount), 2)}${got !== shown ? ` (the latest numbers, not the ${money(Math.abs(expected), 2)} this page showed)` : ''}`);
     } catch (err) { toast(err.message, 'bad'); }
   });
+  const settleFix = async (id, settled) => {
+    try { await api('/api/corrections/settle', { method: 'POST', body: { id, settled } }); await done(settled ? 'Taken off this payment (settled between you)' : 'Counted on this payment again'); } catch (err) { toast(err.message, 'bad'); }
+  };
+  $$('[data-settle-fix]', el).forEach((b) => b.addEventListener('click', () => {
+    if (confirm('Mark this correction as settled between you? It comes off this payment and stays on record. Undo any time before the payment is made.')) settleFix(b.dataset.settleFix, true);
+  }));
+  $$('[data-unsettle-fix]', el).forEach((b) => b.addEventListener('click', () => settleFix(b.dataset.unsettleFix, false)));
   $$('.pay-del', el).forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('Remove this payment? Use this only for an entry made by mistake.')) return;
     try { await api(`/api/settlements/payments/${b.dataset.id}`, { method: 'DELETE' }); await done('Payment removed'); } catch (err) { toast(err.message, 'bad'); }

@@ -573,6 +573,16 @@ export async function buildDataset({ sheets = true } = {}) {
     const own = r.approx_date ? r.business_month : settlePeriodOf(businessDay(r.created_at), dueDay);
     if (own && r.settle_month && own < r.settle_month) r.correction_for = own;
   }
+  // A correction the partners settled between themselves (Settlement page: "Settled between you"): kept on record but
+  // not counted, so it doesn't change the payment it would have gone on. Only for a payment not made yet; a paid
+  // payment never changes.
+  const settledFixes = (await getSetting('settled_corrections')) || {};
+  for (const r of out) {
+    const mark = settledFixes[r.order_id];
+    if (!mark || !r.correction_for || !r.counted || frozen.has(r.settle_month)) continue;
+    r.counted = false;
+    r.settled_outside = { at: mark.at || null, note: mark.note || '' };
+  }
 
   // eBay money with no order, and return/case holds never released after 30 days (a case that may have been lost)
   // Payouts to the bank (WITHDRAWAL) and transfers move money, they aren't costs; anything before the partnership

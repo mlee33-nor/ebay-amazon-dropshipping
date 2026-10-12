@@ -195,6 +195,27 @@ await check('a refund dated in paid April lands on May as a correction for April
   assert.equal(a.sellerSends, apr.sellerSends, 'April stays as paid');
 });
 
+await check('a correction the partners settled between themselves stops counting on the open payment, and counts again when un-marked', async () => {
+  const before = (await settle('2027-05')).s;
+  await setSetting('settled_corrections', { 'ADJ:MISSED-REF:2027-04': { at: '2027-05-11T00:00:00Z', note: 'squared up' } });
+  const { data, s } = await settle('2027-05');
+  const fix = data.find((o) => o.order_id === 'ADJ:MISSED-REF:2027-04');
+  assert.equal(fix.counted, false);
+  assert.ok(fix.settled_outside);
+  assert.equal(s.corrections, null, 'no corrections left on May');
+  assert.equal(Math.round(s.sellerSends * 100), Math.round(before.own.sellerSends * 100), 'May sends just its own amount');
+  await setSetting('settled_corrections', {});
+  assert.equal((await settle('2027-05')).s.sellerSends, before.sellerSends, 'un-marked: back as it was');
+});
+await check('a settled mark never changes a payment that was made', async () => {
+  const may = await pay('2027-05', null, '2027-05-26'); // May paid with the April correction on it
+  await setSetting('settled_corrections', { 'ADJ:MISSED-REF:2027-04': { at: '2027-05-27T00:00:00Z' } });
+  const { data, s } = await settle('2027-05');
+  assert.equal(data.find((o) => o.order_id === 'ADJ:MISSED-REF:2027-04').counted, true, 'still counted on the paid payment');
+  assert.equal(s.sellerSends, may.sellerSends, 'May stays as paid');
+  await setSetting('settled_corrections', {});
+});
+
 await closeDb();
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(failed ? '\nCORE: FAILED' : '\nCORE: ALL CHECKS PASSED');

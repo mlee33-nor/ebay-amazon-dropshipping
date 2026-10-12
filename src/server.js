@@ -326,6 +326,25 @@ app.post('/api/review/charge', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// A correction for an earlier, already-paid period that the partners settled between themselves: it stops counting
+// on the open payment it was going on (and counts again if un-marked). Never for a payment already made.
+app.post('/api/corrections/settle', wrap(async (req, res) => {
+  const id = String(req.body?.id || '').slice(0, 200);
+  const settled = req.body?.settled !== false;
+  if (!id) return res.status(400).json({ error: 'id required' });
+  const list = (await getSetting('settled_corrections')) || {};
+  if (settled) {
+    const row = (await buildDataset()).find((o) => o.order_id === id);
+    if (!row || !row.correction_for) return res.status(400).json({ error: 'That line is not a correction for an earlier payment' });
+    const books = await buildBooks();
+    if ((books.closed || []).some((c) => c.month === row.settle_month)) return res.status(409).json({ error: 'That payment has been made, so it can no longer change' });
+    list[id] = { at: new Date().toISOString(), note: String(req.body?.note || '').slice(0, 300), profit: row.net, month: row.settle_month };
+  } else delete list[id];
+  await setSetting('settled_corrections', list);
+  await logMoney(req, settled ? 'correction settled between partners' : 'correction counted again', id, null, list[id] || null);
+  res.json({ ok: true, ...(await buildBooks()) });
+}));
+
 app.post('/api/sync', wrap(async (_req, res) => res.json(await syncEbay())));
 
 // ---------- eBay listing analytics (Products page) ----------

@@ -25,7 +25,7 @@ const dueDayOf = () => Number(state.data?.settings?.settlement_day) || 26;
 const currentPeriod = () => settlePeriodOf(azDay(), dueDayOf());
 export const state = {
   data: null,
-  range: ['today', 'period', 'lastperiod', 'month', 'all', 'custom'].includes(store('dd_range')) ? store('dd_range') : 'period',
+  range: 'period', // every visit opens on this pay period; a choice made in the range bar lasts until the page is reloaded
   month: store('dd_month') || settlePeriodOf(azDay(), 26), // a payment (pay period), see rangeFor
   custom: store('dd_custom') || { from: addDays(azDay(), -29), to: azDay() },
   gran: null,
