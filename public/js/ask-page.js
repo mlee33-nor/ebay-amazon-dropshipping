@@ -1,4 +1,4 @@
-// Ask AI: a chat about the business. The AI model (FreeLLMAPI) reads each question, the dashboard works the answer out
+// Ask AI: a chat about the business. The AI model (Claude) reads each question, the dashboard works the answer out
 // from the same numbers and settlement math as every other page, and that answer is always shown first. The model's
 // friendly line goes under it, and is dropped when a figure in it doesn't match. While it works, the chat shows each
 // step as it happens, so it's obvious it's thinking.
@@ -28,7 +28,7 @@ function answerHtml(a) {
     parts.push(`<details class="ask-facts"><summary>${ICONS.search}<span>The numbers behind this</span></summary><div class="ask-facts-body">${f.bullets?.length ? bulletsHtml(f.bullets) : ''}${f.table ? tableHtml(f.table) : ''}</div></details>`);
   }
   if (a.understood) {
-    const by = p.friendly ? 'the dashboard’s answer, with a line from FreeLLMAPI' : a.writtenBy === 'dashboard' ? 'the dashboard’s own wording (the AI line didn’t match the numbers)' : a.understood.by === 'model' ? 'read by FreeLLMAPI' : 'built-in reader';
+    const by = p.friendly ? 'the dashboard’s answer, with a line from Claude' : a.writtenBy === 'dashboard' ? 'the dashboard’s own wording (the AI line didn’t match the numbers)' : a.understood.by === 'model' ? 'read by Claude' : 'built-in reader';
     parts.push(`<div class="ask-read" title="How the question was read. If it's wrong, rephrase the question.">${ICONS.search}<span>Answering: <b>${esc(a.understood.label)}</b>${a.understood.period ? ` · ${esc(a.understood.period)}` : ''}${a.understood.product ? ` · “${esc(a.understood.product)}”` : ''} · ${by}</span></div>`);
   }
   return parts.join('');
@@ -47,7 +47,7 @@ function thinkingHtml(m) {
   const secs = Math.max(0, Math.floor((Date.now() - m.started) / 1000));
   const rows = steps.map(([k, label], i) => {
     const st = at < 0 ? (i === 0 ? 'on' : '') : i < at ? 'done' : i === at ? 'on' : '';
-    const extra = k === 'reading' && ai ? ' <span class="muted">(FreeLLMAPI)</span>' : k === 'writing' ? ' <span class="muted">(FreeLLMAPI)</span>' : k === 'numbers' && m.understood ? ` <span class="muted">· ${esc(m.understood.label)}${m.understood.period ? `, ${esc(m.understood.period)}` : ''}</span>` : '';
+    const extra = k === 'reading' && ai ? ' <span class="muted">(Claude)</span>' : k === 'writing' ? ' <span class="muted">(Claude)</span>' : k === 'numbers' && m.understood ? ` <span class="muted">· ${esc(m.understood.label)}${m.understood.period ? `, ${esc(m.understood.period)}` : ''}</span>` : '';
     return `<li class="${st}"><span class="dot">${st === 'done' ? ICONS.check : st === 'on' ? '<i class="spin"></i>' : ''}</span>${label}${extra}</li>`;
   }).join('');
   return `<div class="bubble ask-think" aria-live="polite">
@@ -72,7 +72,7 @@ const SUGGEST = ['How much did we make this month?', 'Why are we down this month
 
 function statusHtml() {
   const ai = state.data?.ai?.configured;
-  return `<div class="ask-status">${ICONS.check}<div><b>Answers come straight from your numbers.</b> <span class="muted">${ai ? 'The first line of each answer is the dashboard’s own figure. FreeLLMAPI may add a friendly line under it; that line is dropped when a figure, sign, month or who-pays-whom in it doesn’t match the dashboard, but read the headline for the exact number.' : 'Every figure is the same one the dashboard shows.'}</span></div></div>`;
+  return `<div class="ask-status">${ICONS.check}<div><b>Answers come straight from your numbers.</b> <span class="muted">${ai ? 'The first line of each answer is the dashboard’s own figure. Claude may add a friendly line under it; that line is dropped when a figure, sign, month or who-pays-whom in it doesn’t match the dashboard, but read the headline for the exact number.' : 'Every figure is the same one the dashboard shows.'}</span></div></div>`;
 }
 
 function paintLog() {

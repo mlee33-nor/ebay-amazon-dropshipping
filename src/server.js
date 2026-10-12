@@ -625,7 +625,7 @@ app.post('/api/demo/clear', wrap(async (_req, res) => {
   res.json({ ok: true });
 }));
 
-// ---------- Ask AI: the AI model (FreeLLMAPI) reads every question, the dashboard works the answer out from the books,
+// ---------- Ask AI: the AI model (Claude) reads every question, the dashboard works the answer out from the books,
 // and the model writes it in its own words from those facts (any number not in the facts and the reply is dropped).
 // Progress streams as one JSON object per line so the page can show each step while it waits. If the model is off or
 // can't be reached, the built-in reader and the dashboard's own wording answer instead. ----------
@@ -687,7 +687,7 @@ if (every > 0) {
   setTimeout(tick, 5_000);
   setInterval(tick, every * 60_000);
 }
-// Ask AI model: check it can be reached once Tailscale (if used) has had time to connect, and again later if not
+// Ask AI model: check Anthropic can be reached (logs the outcome only), and again later if not
 if (llmConfigured()) setTimeout(() => checkModel().then((ok) => { if (!ok) setTimeout(checkModel, 90_000); }), 20_000);
 if (!ebayConfigured()) console.log('eBay not connected yet: set EBAY_CLIENT_ID / EBAY_CLIENT_SECRET / EBAY_RUNAME, then Settings -> Connect eBay');
 if (every > 0) {

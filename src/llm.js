@@ -1,20 +1,17 @@
-// Hosted AI model for Ask AI (any OpenAI-compatible API, e.g. FreeLLMAPI). It reads every question (topic and
-// period), the dashboard works out the answer from the books, and the model adds a friendly line about it. The
-// dashboard's own answer always stays the headline; the model's line is thrown away when any figure in it isn't one
-// of the dashboard's (or has the wrong sign, month, or payer and payee), so the figures are always the dashboard's.
-// Configured with AI_API_BASE, AI_API_KEY, AI_MODEL, AI_HOST, and AI_PROXY when the model is only reachable through a
-// proxy (Tailscale, set by scripts/start.sh).
+// Ask AI's model: Claude, through Anthropic's API. It reads every question (topic and period), the dashboard works out
+// the answer from the books, and the model adds a friendly line about it. The dashboard's own answer always stays the
+// headline; the model's line is thrown away when any figure in it isn't one of the dashboard's (or has the wrong sign,
+// month, or payer and payee), so the figures are always the dashboard's.
+// Configured with ANTHROPIC_API_KEY (an sk-ant-api03-... key), ANTHROPIC_MODEL (default claude-sonnet-5-5) and, only for
+// an organization-level key, ANTHROPIC_WORKSPACE_ID.
 import { TOPICS } from './ask.js';
 
-// Two ways to reach a model: Anthropic's API (ANTHROPIC_API_KEY) or any OpenAI-compatible endpoint such as FreeLLMAPI
-// (AI_API_BASE + AI_API_KEY). With an Anthropic key, Anthropic answers everything (no FreeLLMAPI, so nothing depends on
-// a PC being on); without one, the OpenAI-compatible endpoint does.
 // The key: ANTHROPIC_API_KEY, or the same name typed another way in Railway (anthropic_Api, Anthropic_API_Key...).
-// ANTHROPIC_API_KEY wins whenever it is defined, even empty (the tests set it empty so a real key is never used).
+// ANTHROPIC_API_KEY wins whenever it is defined, even empty (the tests set their own). Spaces and line breaks pasted
+// around it are dropped.
 const anthropicKey = () => {
-  if ('ANTHROPIC_API_KEY' in process.env) return process.env.ANTHROPIC_API_KEY || '';
-  const name = Object.keys(process.env).find((k) => /^anthropic[_-]?api(?:[_-]?key)?$/i.test(k));
-  return name ? process.env[name] || '' : '';
+  const name = 'ANTHROPIC_API_KEY' in process.env ? 'ANTHROPIC_API_KEY' : Object.keys(process.env).find((k) => /^anthropic[_-]?api(?:[_-]?key)?$/i.test(k));
+  return name ? String(process.env[name] || '').trim().replace(/^["']|["']$/g, '') : '';
 };
 const anthropicOn = () => Boolean(anthropicKey());
 // An organization-level key (not made inside a workspace) has to say which workspace it is for: ANTHROPIC_WORKSPACE_ID
@@ -22,15 +19,13 @@ const anthropicHeaders = () => ({
   'x-api-key': anthropicKey(), 'anthropic-version': '2023-06-01',
   ...(process.env.ANTHROPIC_WORKSPACE_ID ? { 'anthropic-workspace-id': process.env.ANTHROPIC_WORKSPACE_ID.trim() } : {}),
 });
-const compatOn = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
-export const llmConfigured = () => anthropicOn() || compatOn();
+export const llmConfigured = () => anthropicOn();
 const ANTHROPIC_DEFAULT = 'claude-sonnet-5-5';
 const anthropicModel = () => process.env.ANTHROPIC_MODEL || ANTHROPIC_DEFAULT;
 const anthropicBase = () => String(process.env.ANTHROPIC_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
-const providers = () => (anthropicOn() ? ['anthropic'] : compatOn() ? ['compat'] : []);
-export const llmProvider = () => (anthropicOn() ? `Anthropic ${anthropicModel()}` : compatOn() ? 'OpenAI-compatible' : null);
-const base = () => String(process.env.AI_API_BASE || '').replace(/\/+$/, '');
-const model = () => process.env.AI_MODEL || 'auto';
+export const llmProvider = () => (anthropicOn() ? `Anthropic ${anthropicModel()}` : null);
+// A key that isn't an API key (sk-ant-api...) is refused by the API; say so in the log instead of a bare 401
+const keyKind = () => { const k = anthropicKey(); return /^sk-ant-api\d\d-/.test(k) ? null : /^sk-ant-(\w+)/.test(k) ? `this is an sk-ant-${k.match(/^sk-ant-(\w+)/)[1]}- token, not an API key (sk-ant-api03-...)` : 'this does not look like an Anthropic API key (sk-ant-api03-...)'; };
 
 const SYSTEM = `You turn questions about an eBay-to-Amazon dropshipping business into a data lookup.
 Reply with one JSON object and nothing else: {"topic": "...", "period": "...", "compare_to": "...", "product": "..."}
@@ -68,28 +63,9 @@ function firstJson(s) {
   try { return JSON.parse(m[0]); } catch { return null; }
 }
 
-// Through AI_PROXY (an HTTP proxy, e.g. Tailscale's) when set. AI_HOST sends that Host name while connecting to the
-// address in AI_API_BASE: Tailscale's proxy can't look up tailnet names, so the base is the PC's Tailscale IP and
-// `tailscale serve` still needs its name to route the request. fetch() can't set Host, so this uses undici.request.
-let dispatcher;
-async function send(url, { method = 'GET', headers = {}, body, signal } = {}) {
-  const u = await import('undici');
-  if (process.env.AI_PROXY && !dispatcher) dispatcher = new u.ProxyAgent(process.env.AI_PROXY);
-  const h = { ...headers, ...(process.env.AI_HOST ? { host: process.env.AI_HOST } : {}) };
-  const res = await u.request(url, { method, headers: h, body, signal, ...(process.env.AI_PROXY ? { dispatcher } : {}) });
-  const text = await res.body.text();
-  return { ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text, json: async () => JSON.parse(text) };
-}
-
-// One chat request to the provider for this try: the reply text, or null for an error reply
-async function chat(messages, signal, { maxTokens = 800, attempt = 0 } = {}) {
-  const list = providers();
-  const which = list[Math.min(attempt, list.length - 1)];
-  return which === 'anthropic' ? chatAnthropic(messages, signal, maxTokens) : chatCompat(messages, signal, maxTokens);
-}
-
-// Anthropic Messages API. The system prompt goes in "system"; the key is sent only to Anthropic and never logged.
-async function chatAnthropic(messages, signal, maxTokens) {
+// One request to Anthropic's Messages API: the reply text, or null for an error reply. The system prompt goes in
+// "system"; the key is sent only to Anthropic and never logged.
+async function chat(messages, signal, { maxTokens = 800 } = {}) {
   const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
   const res = await fetch(`${anthropicBase()}/v1/messages`, {
     method: 'POST',
@@ -97,38 +73,23 @@ async function chatAnthropic(messages, signal, maxTokens) {
     headers: { 'content-type': 'application/json', ...anthropicHeaders() },
     body: JSON.stringify({ model: anthropicModel(), max_tokens: maxTokens, temperature: 0, system, messages: messages.filter((m) => m.role !== 'system') }),
   });
-  if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 400)}`); return null; }
+  if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 400)}${res.status === 401 && keyKind() ? ` (${keyKind()})` : ''}`); return null; }
   const body = await res.json();
   if (body?.stop_reason === 'max_tokens') { console.error('AI model (Anthropic): reply was cut off, asking again'); return null; }
   return (body?.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('') || null;
 }
 
-async function chatCompat(messages, signal, maxTokens) {
-  const res = await send(`${base()}/chat/completions`, {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.AI_API_KEY}` },
-    body: JSON.stringify({ model: model(), temperature: 0, max_tokens: maxTokens, messages }), // room for providers that think first
-  });
-  if (!res.ok) { console.error(`AI model: ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
-  const body = await res.json();
-  // A reply cut off at the length limit (a provider that spent it thinking) is not an answer
-  if (body?.choices?.[0]?.finish_reason === 'length') { console.error('AI model: reply was cut off, asking again'); return null; }
-  return body?.choices?.[0]?.message?.content ?? null;
-}
-
-// Up to two tries, one after the other (a router like FreeLLMAPI's "auto" may give the second try to another
-// provider). The first gets 40% of the time, the second the rest, so the whole wait is at most timeoutMs.
+// Up to two tries, one after the other (a busy or slow first reply gets one more chance). The first gets 40% of the
+// time, the second the rest, so the whole wait is at most timeoutMs.
 async function twoTries(fn, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  let tries = 0;
   for (const ms of [Math.round(timeoutMs * 0.4), null]) { // a stalled first provider is dropped sooner
     const limit = ms ?? deadline - Date.now();
     if (limit < 50) break;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), limit);
     try {
-      const r = await fn(ctl.signal, tries++);
+      const r = await fn(ctl.signal);
       if (r) return r;
     } catch (e) {
       console.error(`AI model: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
@@ -146,8 +107,8 @@ export async function routeQuestion(question, { prev = null, timeoutMs = Number(
   if (!llmConfigured()) return null;
   const about = prev?.intent ? [prev.intent, prev.period?.label, Array.isArray(prev.product) && prev.product.length ? `product "${prev.product.join(' ')}"` : null].filter(Boolean).join(', ') : '';
   const before = about ? `\n(The previous question was about: ${about}. A short follow-up like "and July?" or "what about refunds" keeps that period and product unless it names new ones.)` : '';
-  return twoTries(async (signal, attempt) => {
-    const r = firstJson(await chat([{ role: 'system', content: SYSTEM + before }, { role: 'user', content: String(question).slice(0, 500) }], signal, { attempt }));
+  return twoTries(async (signal) => {
+    const r = firstJson(await chat([{ role: 'system', content: SYSTEM + before }, { role: 'user', content: String(question).slice(0, 500) }], signal));
     if (!r || typeof r.topic !== 'string' || !TOPICS[r.topic]) return null;
     const str = (v) => (typeof v === 'string' ? v.slice(0, 80) : '');
     return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
@@ -316,8 +277,8 @@ export function checkReply(text, facts, question = '') {
 export async function writeAnswer(question, facts, { timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 40000) } = {}) {
   if (!llmConfigured()) return null;
   const lines = factLines(facts);
-  return twoTries(async (signal, attempt) => {
-    const out = await chat([{ role: 'system', content: WRITER }, { role: 'user', content: `Question: ${String(question).slice(0, 500)}\n\nFacts:\n${lines.map((l) => `- ${l}`).join('\n')}` }], signal, { maxTokens: 1200, attempt });
+  return twoTries(async (signal) => {
+    const out = await chat([{ role: 'system', content: WRITER }, { role: 'user', content: `Question: ${String(question).slice(0, 500)}\n\nFacts:\n${lines.map((l) => `- ${l}`).join('\n')}` }], signal, { maxTokens: 1200 });
     const text = String(out || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     if (!text) return null;
     const bad = checkReply(text, facts, question);
@@ -329,28 +290,15 @@ export async function writeAnswer(question, facts, { timeoutMs = Number(process.
 // Startup check for the deploy log: can the server reach the model? Logs the outcome only, never the key.
 export async function checkModel({ timeoutMs = 15000 } = {}) {
   if (!llmConfigured()) return false;
+  if (keyKind()) console.error(`AI model: ANTHROPIC_API_KEY ${keyKind()}`);
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  if (anthropicOn()) {
-    try {
-      const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: anthropicHeaders() });
-      console.log(res.ok ? `AI model: Anthropic reachable, using ${anthropicModel()}` : `AI model: Anthropic answered ${res.status} (check ANTHROPIC_API_KEY)`);
-      return res.ok;
-    } catch (e) {
-      console.error(`AI model: can't reach Anthropic: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
-      return false;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
   try {
-    const res = await send(`${base()}/models`, { signal: ctl.signal, headers: { authorization: `Bearer ${process.env.AI_API_KEY}` } });
-    const body = await res.json().catch(() => null);
-    const n = Array.isArray(body?.data) ? body.data.length : 0;
-    console.log(res.ok ? `AI model: reachable (${n} models${process.env.AI_PROXY ? ', through Tailscale' : ''})` : `AI model: ${res.status} from ${base()}`);
+    const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: anthropicHeaders() });
+    console.log(res.ok ? `AI model: Anthropic reachable, using ${anthropicModel()}` : `AI model: Anthropic answered ${res.status} (check ANTHROPIC_API_KEY)`);
     return res.ok;
   } catch (e) {
-    console.error(`AI model: can't reach ${base()}: ${e.name === 'AbortError' ? 'timed out' : e.cause?.message || e.message}`);
+    console.error(`AI model: can't reach Anthropic: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
     return false;
   } finally {
     clearTimeout(timer);

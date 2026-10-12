@@ -1,3 +1,0 @@
-# Tailscale for scripts/start.sh (only used when TS_AUTHKEY is set). "..." keeps Nixpacks' own packages (Node).
-[phases.setup]
-nixPkgs = ["...", "tailscale"]

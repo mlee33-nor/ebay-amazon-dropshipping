@@ -1,8 +1,6 @@
-// Hosted AI model connectors (Anthropic, and OpenAI-compatible e.g. FreeLLMAPI) against mock servers: reading a question sends only the
-// question text, a bad or slow reply is ignored, an unusable reply is asked once more, an unknown topic is never used,
-// and with AI_PROXY set the request goes through that proxy (Tailscale on Railway).
+// Ask AI's model connector (Anthropic's Messages API) against a stand-in server: reading a question sends only the
+// question text, a bad or slow reply is ignored, an unusable reply is asked once more, an unknown topic is never used.
 import http from 'node:http';
-import net from 'node:net';
 import assert from 'node:assert/strict';
 
 let reply = '{"topic":"profit","period":"august","compare_to":"","product":""}';
@@ -14,33 +12,33 @@ const mock = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
-    seen.push({ path: req.url, auth: req.headers.authorization, body: JSON.parse(body || '{}') });
+    seen.push({ path: req.url, key: req.headers['x-api-key'], auth: req.headers.authorization, body: JSON.parse(body || '{}') });
     setTimeout(() => {
       res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { content: queue.length ? queue.shift() : reply } }] }));
+      res.end(JSON.stringify({ content: [{ type: 'text', text: queue.length ? queue.shift() : reply }], stop_reason: 'end_turn' }));
     }, delay);
   });
 });
 await new Promise((r) => mock.listen(0, r));
-process.env.AI_API_BASE = `http://127.0.0.1:${mock.address().port}/v1/`;
-process.env.AI_API_KEY = 'test-key';
-process.env.ANTHROPIC_API_KEY = ''; // a real key in .env is never used by tests
+process.env.ANTHROPIC_API_BASE = `http://127.0.0.1:${mock.address().port}`;
+process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test'; // a stand-in: a real key in .env is never used by tests
 process.env.DATABASE_URL = '';
 const { routeQuestion, llmConfigured } = await import('../src/llm.js');
 
 let failed = false;
 const check = async (label, fn) => { try { await fn(); console.log(`  PASS  ${label}`); } catch (e) { failed = true; console.log(`  FAIL  ${label}\n        ${e.message}`); } };
 
-await check('configured from AI_API_BASE + AI_API_KEY', () => assert.equal(llmConfigured(), true));
+await check('configured from ANTHROPIC_API_KEY', () => assert.equal(llmConfigured(), true));
 await check('a question comes back as a topic and period', async () => {
   assert.deepEqual(await routeQuestion('how did we go in aug'), { topic: 'profit', period: 'august', compare_to: '', product: '' });
 });
-await check('only the question is sent, with the key as a bearer token, to /chat/completions', () => {
+await check('only the question is sent, with the key in x-api-key, to /v1/messages', () => {
   const s = seen.at(-1);
-  assert.equal(s.path, '/v1/chat/completions');
-  assert.equal(s.auth, 'Bearer test-key');
-  assert.equal(s.body.messages.length, 2);
-  assert.equal(s.body.messages[1].content, 'how did we go in aug');
+  assert.equal(s.path, '/v1/messages');
+  assert.equal(s.key, 'sk-ant-api03-test');
+  assert.equal(s.auth, undefined);
+  assert.equal(s.body.messages.length, 1);
+  assert.equal(s.body.messages[0].content, 'how did we go in aug');
   assert.ok(!/\$\d/.test(JSON.stringify(s.body)), 'no money figures in the request');
 });
 await check('JSON wrapped in text or code fences still reads', async () => {
@@ -84,7 +82,7 @@ await check('the model writes the answer from the facts when every number matche
   reply = "Drew owes you **$45.96** for October, and it's due Oct 26.";
   assert.equal(await writeAnswer('what does drew owe me', facts), reply);
   const s = seen.at(-1);
-  assert.match(s.body.messages[1].content, /\$45\.96/, 'the facts are sent to write from');
+  assert.match(s.body.messages[0].content, /\$45\.96/, 'the facts are sent to write from');
 });
 await check('a written answer with a made-up number is thrown away (the dashboard\'s wording is used)', async () => {
   reply = 'Drew owes you about $46 for October.';
@@ -97,31 +95,7 @@ await check('thinking tags from reasoning models are removed', async () => {
   assert.equal(await writeAnswer('what does drew owe me', facts), 'Drew owes you $45.96.');
 });
 
-// A small HTTP proxy standing in for Tailscale's (CONNECT tunnels and plain forwarding)
-const viaProxy = [];
-const proxy = http.createServer((req, res) => {
-  viaProxy.push(req.url);
-  const u = new URL(req.url);
-  const up = http.request({ host: u.hostname, port: u.port, path: u.pathname, method: req.method, headers: req.headers }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
-  req.pipe(up);
-});
-proxy.on('connect', (req, sock, head) => {
-  viaProxy.push(req.url);
-  const [host, port] = req.url.split(':');
-  const up = net.connect(Number(port), host, () => { sock.write('HTTP/1.1 200 Connection Established\r\n\r\n'); up.write(head); up.pipe(sock); sock.pipe(up); });
-  up.on('error', () => sock.destroy());
-});
-await new Promise((r) => proxy.listen(0, r));
-await check('with AI_PROXY the request goes through the proxy', async () => {
-  process.env.AI_PROXY = `http://127.0.0.1:${proxy.address().port}`;
-  reply = '{"topic":"settlement","period":"","compare_to":"","product":""}';
-  assert.equal((await routeQuestion('what does drew owe')).topic, 'settlement');
-  assert.ok(viaProxy.length >= 1, 'the proxy saw the request');
-  assert.equal(seen.at(-1).auth, 'Bearer test-key');
-  delete process.env.AI_PROXY;
-});
-// ---- Anthropic: with ANTHROPIC_API_KEY set, every question goes to Anthropic's Messages API and nothing to the
-// OpenAI-compatible endpoint
+// ---- Headers, model choice, retries and the key's spelling, against a second stand-in
 const ant = [];
 let antReply = { content: [{ type: 'text', text: '{"topic":"refunds","period":"september","compare_to":"","product":""}' }], stop_reason: 'end_turn' };
 let antStatus = 200;
@@ -148,7 +122,6 @@ await check('with an Anthropic key, Anthropic answers (Messages API, x-api-key, 
   assert.equal(r.auth, undefined, 'the key goes in x-api-key only');
   assert.equal(r.body.model, 'claude-sonnet-5-5');
   assert.ok(r.body.system && r.body.messages.every((m) => m.role !== 'system'), 'the system prompt is in "system"');
-  assert.equal(seen.length, before, 'nothing went to the OpenAI-compatible endpoint');
 });
 await check('ANTHROPIC_WORKSPACE_ID is sent as anthropic-workspace-id (organization-level keys need it)', async () => {
   process.env.ANTHROPIC_WORKSPACE_ID = 'wrkspc_test';
@@ -164,14 +137,18 @@ await check('ANTHROPIC_MODEL picks the model', async () => {
   assert.equal(ant.at(-1).body.model, 'claude-haiku-5-5');
   delete process.env.ANTHROPIC_MODEL;
 });
-await check('an Anthropic error is retried on Anthropic, never sent elsewhere, and gives up cleanly', async () => {
-  const before = seen.length;
+await check('an Anthropic error is retried once and gives up cleanly', async () => {
   const n = ant.length;
   antStatus = 529;
   assert.equal(await routeQuestion('refunds in sept?'), null);
   assert.equal(ant.length - n, 2, 'two tries');
-  assert.equal(seen.length, before);
   antStatus = 200;
+});
+await check('spaces, a line break or quotes pasted around the key are dropped', async () => {
+  process.env.ANTHROPIC_API_KEY = '  "sk-ant-api03-pasted"\n';
+  await routeQuestion('refunds in sept?');
+  assert.equal(ant.at(-1).key, 'sk-ant-api03-pasted');
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
 });
 await check('a reply cut off at max_tokens is not used', async () => {
   antReply = { content: [{ type: 'text', text: '{"topic":"refu' }], stop_reason: 'max_tokens' };
@@ -192,7 +169,6 @@ await check('the key also works saved under another spelling (anthropic_Api), an
 anthropic.close();
 process.env.ANTHROPIC_API_KEY = '';
 
-proxy.close();
 mock.close();
 console.log(failed ? '\nLLM: FAILED' : '\nLLM: ALL CHECKS PASSED');
 process.exitCode = failed ? 1 : 0;

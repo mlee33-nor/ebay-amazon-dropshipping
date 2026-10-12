@@ -21,13 +21,12 @@ const mock = http.createServer((req, res) => {
   req.on('end', () => {
     seen.push(JSON.parse(body || '{}'));
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: { content: '{"topic":"profit","period":"","compare_to":"","product":""}' } }] }));
+    res.end(JSON.stringify({ content: [{ type: 'text', text: '{"topic":"profit","period":"","compare_to":"","product":""}' }], stop_reason: 'end_turn' }));
   });
 });
 await new Promise((r) => mock.listen(0, r));
-process.env.AI_API_BASE = `http://127.0.0.1:${mock.address().port}/v1/`;
-process.env.AI_API_KEY = 'test-key';
-process.env.ANTHROPIC_API_KEY = ''; // a real key in .env is never used by tests
+process.env.ANTHROPIC_API_BASE = `http://127.0.0.1:${mock.address().port}`;
+process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test'; // a stand-in: a real key in .env is never used by tests
 
 const { initDb, q, closeDb } = await import('../src/db.js');
 const { importLedgerCsv } = await import('../src/ledger.js');
@@ -185,7 +184,7 @@ await check('model-routed follow-up keeps the product: "and in september?" after
 });
 await check('the router hears the previous product, so a follow-up keeps it', async () => {
   await routeQuestion('and in september?', { prev: { intent: 'product', period: { label: 'all time' }, product: ['hhlpro'] } });
-  assert.match(seen.at(-1).messages[0].content, /product "hhlpro"/);
+  assert.match(seen.at(-1).system, /product "hhlpro"/);
 });
 
 // -------- Products and refund lines

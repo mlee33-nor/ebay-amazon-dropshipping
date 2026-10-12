@@ -82,20 +82,12 @@ node scripts/stress-test.js 7 realistic
    Alternative: set `INBOUND_TOKEN` and POST emails to `/api/email/inbound` from Zapier/Make/Apps Script.
 4. **Railway**: New project → Deploy from this GitHub repo → Variables: everything from `.env.example`, plus
    `DASHBOARD_PASSWORD` and `SESSION_SECRET` (any long random string). Railway runs `scripts/start.sh` and health-checks `/api/health`.
-5. **Ask AI model (optional)**: with `ANTHROPIC_API_KEY` set, Anthropic answers every question (model: `ANTHROPIC_MODEL`,
-   default `claude-sonnet-5-5`; `claude-haiku-5-5` is cheaper and faster). The question and the figures behind each answer are
-   sent to Anthropic. Without an Anthropic key, any OpenAI-compatible API reads every question and writes the answer from the
-   dashboard's own figures; a reply with any number that isn't in those figures is replaced by the dashboard's wording.
-   The question **and the figures behind the answer** are sent to the model (FreeLLMAPI passes them to whichever
-   provider it picks). For FreeLLMAPI running on your own PC over Tailscale:
-   - On the PC: `tailscale serve --bg 31415` (tailnet-only HTTPS in front of FreeLLMAPI; not Funnel).
-   - Tailscale admin → Settings → Keys → generate an auth key: **Ephemeral** on, Reusable on (so redeploys can rejoin).
-   - Railway Variables: `TS_AUTHKEY` = that key, `AI_API_BASE` = `https://<pc-name>.<tailnet>.ts.net/v1`,
-     `AI_API_KEY` = the FreeLLMAPI key, `AI_MODEL` = `auto`. Tailscale's userspace proxy can't look up tailnet names, so also run
-     `tailscale serve --bg --http=80 http://127.0.0.1:31415` and use `AI_API_BASE` = `http://<pc tailscale ip>/v1` with
-     `AI_HOST` = `<pc-name>.<tailnet>.ts.net` (traffic inside the tailnet is already encrypted).
-   The server joins the tailnet in userspace mode and only the Ask AI request goes through it. When the PC is off,
-   Ask AI keeps working with the built-in reader. To keep the server from reaching your other devices, tag its key
-   (e.g. `tag:dashboard`) and add a Tailscale access rule that lets `tag:dashboard` reach only your PC on port 80.
+5. **Ask AI model (optional)**: Claude, through Anthropic's API. Railway Variables: `ANTHROPIC_API_KEY` = an API key from
+   console.anthropic.com → API keys (it starts `sk-ant-api03-`; make it inside a workspace, or also set
+   `ANTHROPIC_WORKSPACE_ID`). `ANTHROPIC_MODEL` picks the model (default `claude-sonnet-5-5`; `claude-haiku-5-5` is cheaper
+   and faster). The question **and the figures behind the answer** are sent to Anthropic. The model reads each question
+   and writes a line about the dashboard's own answer; a line with any number that isn't in the dashboard's figures is
+   dropped. Without a key, Ask AI works with its built-in reader. The deploy log says "Anthropic reachable, using ..."
+   when the key works.
 
 Local: `npm install`, copy `.env.example` to `.env`, `npm run dev`. With no `DATABASE_URL` it runs an embedded Postgres in `./.localdb`.
