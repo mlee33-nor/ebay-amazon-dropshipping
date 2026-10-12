@@ -650,8 +650,10 @@ app.post('/api/ask', async (req, res) => {
     step({ stage: 'numbers', understood: a.understood || null });
     if (ai && a.understood) {
       step({ stage: 'writing' });
-      const text = await writeAnswer(question, a);
-      a = text ? { ...a, facts: { text: a.text, bullets: a.bullets || [], table: a.table || null }, text, bullets: [], table: null, writtenBy: 'model' } : { ...a, writtenBy: 'dashboard' };
+      let rejected = false;
+      const text = await writeAnswer(question, a, { onReject: () => { rejected = true; } });
+      // 'dashboard': the model's line didn't match the numbers; 'dashboard-ai-off': the model couldn't be reached
+      a = text ? { ...a, facts: { text: a.text, bullets: a.bullets || [], table: a.table || null }, text, bullets: [], table: null, writtenBy: 'model' } : { ...a, writtenBy: rejected ? 'dashboard' : 'dashboard-ai-off' };
     }
     step({ done: true, answer: a });
   } catch (e) {

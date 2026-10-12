@@ -274,7 +274,7 @@ export function checkReply(text, facts, question = '') {
 
 // The model's friendly line about an answer the dashboard computed, or null. The dashboard's own answer stays the
 // headline; this is shown under it only if checkReply finds nothing wrong (so no figure can be made up or flipped).
-export async function writeAnswer(question, facts, { timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 40000) } = {}) {
+export async function writeAnswer(question, facts, { timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 40000), onReject = null } = {}) {
   if (!llmConfigured()) return null;
   const lines = factLines(facts);
   return twoTries(async (signal) => {
@@ -282,7 +282,7 @@ export async function writeAnswer(question, facts, { timeoutMs = Number(process.
     const text = String(out || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     if (!text) return null;
     const bad = checkReply(text, facts, question);
-    if (bad.length) { console.error(`AI model: reply didn't match the facts (${bad.slice(0, 3).join('; ')}); showing the dashboard's answer`); return null; }
+    if (bad.length) { onReject?.(); console.error(`AI model: reply didn't match the facts (${bad.slice(0, 3).join('; ')}); showing the dashboard's answer`); return null; }
     return text.slice(0, 1500);
   }, timeoutMs);
 }
