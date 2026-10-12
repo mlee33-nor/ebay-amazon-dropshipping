@@ -9,7 +9,14 @@ import { TOPICS } from './ask.js';
 // Two ways to reach a model: Anthropic's API (ANTHROPIC_API_KEY) or any OpenAI-compatible endpoint such as FreeLLMAPI
 // (AI_API_BASE + AI_API_KEY). With an Anthropic key, Anthropic answers everything (no FreeLLMAPI, so nothing depends on
 // a PC being on); without one, the OpenAI-compatible endpoint does.
-const anthropicOn = () => Boolean(process.env.ANTHROPIC_API_KEY);
+// The key: ANTHROPIC_API_KEY, or the same name typed another way in Railway (anthropic_Api, Anthropic_API_Key...).
+// ANTHROPIC_API_KEY wins whenever it is defined, even empty (the tests set it empty so a real key is never used).
+const anthropicKey = () => {
+  if ('ANTHROPIC_API_KEY' in process.env) return process.env.ANTHROPIC_API_KEY || '';
+  const name = Object.keys(process.env).find((k) => /^anthropic[_-]?api(?:[_-]?key)?$/i.test(k));
+  return name ? process.env[name] || '' : '';
+};
+const anthropicOn = () => Boolean(anthropicKey());
 const compatOn = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
 export const llmConfigured = () => anthropicOn() || compatOn();
 const ANTHROPIC_DEFAULT = 'claude-sonnet-5-5';
@@ -82,7 +89,7 @@ async function chatAnthropic(messages, signal, maxTokens) {
   const res = await fetch(`${anthropicBase()}/v1/messages`, {
     method: 'POST',
     signal,
-    headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    headers: { 'content-type': 'application/json', 'x-api-key': anthropicKey(), 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({ model: anthropicModel(), max_tokens: maxTokens, temperature: 0, system, messages: messages.filter((m) => m.role !== 'system') }),
   });
   if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
@@ -321,7 +328,7 @@ export async function checkModel({ timeoutMs = 15000 } = {}) {
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   if (anthropicOn()) {
     try {
-      const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' } });
+      const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: { 'x-api-key': anthropicKey(), 'anthropic-version': '2023-06-01' } });
       console.log(res.ok ? `AI model: Anthropic reachable, using ${anthropicModel()}` : `AI model: Anthropic answered ${res.status} (check ANTHROPIC_API_KEY)`);
       return res.ok;
     } catch (e) {

@@ -169,6 +169,18 @@ await check('a reply cut off at max_tokens is not used', async () => {
   antReply = { content: [{ type: 'text', text: '{"topic":"refu' }], stop_reason: 'max_tokens' };
   assert.equal(await routeQuestion('refunds in sept?'), null);
 });
+await check('the key also works saved under another spelling (anthropic_Api), and ANTHROPIC_API_KEY wins when defined', async () => {
+  antReply = { content: [{ type: 'text', text: '{"topic":"refunds","period":"september","compare_to":"","product":""}' }], stop_reason: 'end_turn' };
+  delete process.env.ANTHROPIC_API_KEY;
+  process.env.anthropic_Api = 'sk-ant-alias';
+  await routeQuestion('refunds in sept?');
+  assert.equal(ant.at(-1).key, 'sk-ant-alias');
+  process.env.ANTHROPIC_API_KEY = '';
+  const n = ant.length;
+  await routeQuestion('refunds in sept?');
+  assert.equal(ant.length, n, 'an empty ANTHROPIC_API_KEY turns Anthropic off');
+  delete process.env.anthropic_Api;
+});
 anthropic.close();
 process.env.ANTHROPIC_API_KEY = '';
 
