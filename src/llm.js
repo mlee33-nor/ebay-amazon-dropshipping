@@ -17,6 +17,11 @@ const anthropicKey = () => {
   return name ? process.env[name] || '' : '';
 };
 const anthropicOn = () => Boolean(anthropicKey());
+// An organization-level key (not made inside a workspace) has to say which workspace it is for: ANTHROPIC_WORKSPACE_ID
+const anthropicHeaders = () => ({
+  'x-api-key': anthropicKey(), 'anthropic-version': '2023-06-01',
+  ...(process.env.ANTHROPIC_WORKSPACE_ID ? { 'anthropic-workspace-id': process.env.ANTHROPIC_WORKSPACE_ID.trim() } : {}),
+});
 const compatOn = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
 export const llmConfigured = () => anthropicOn() || compatOn();
 const ANTHROPIC_DEFAULT = 'claude-sonnet-5-5';
@@ -89,10 +94,10 @@ async function chatAnthropic(messages, signal, maxTokens) {
   const res = await fetch(`${anthropicBase()}/v1/messages`, {
     method: 'POST',
     signal,
-    headers: { 'content-type': 'application/json', 'x-api-key': anthropicKey(), 'anthropic-version': '2023-06-01' },
+    headers: { 'content-type': 'application/json', ...anthropicHeaders() },
     body: JSON.stringify({ model: anthropicModel(), max_tokens: maxTokens, temperature: 0, system, messages: messages.filter((m) => m.role !== 'system') }),
   });
-  if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
+  if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 400)}`); return null; }
   const body = await res.json();
   if (body?.stop_reason === 'max_tokens') { console.error('AI model (Anthropic): reply was cut off, asking again'); return null; }
   return (body?.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('') || null;
@@ -328,7 +333,7 @@ export async function checkModel({ timeoutMs = 15000 } = {}) {
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   if (anthropicOn()) {
     try {
-      const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: { 'x-api-key': anthropicKey(), 'anthropic-version': '2023-06-01' } });
+      const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: anthropicHeaders() });
       console.log(res.ok ? `AI model: Anthropic reachable, using ${anthropicModel()}` : `AI model: Anthropic answered ${res.status} (check ANTHROPIC_API_KEY)`);
       return res.ok;
     } catch (e) {

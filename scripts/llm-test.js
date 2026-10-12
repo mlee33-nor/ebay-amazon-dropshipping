@@ -129,7 +129,7 @@ const anthropic = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
-    ant.push({ path: req.url, key: req.headers['x-api-key'], version: req.headers['anthropic-version'], auth: req.headers.authorization, body: JSON.parse(body || '{}') });
+    ant.push({ path: req.url, workspace: req.headers['anthropic-workspace-id'], key: req.headers['x-api-key'], version: req.headers['anthropic-version'], auth: req.headers.authorization, body: JSON.parse(body || '{}') });
     res.writeHead(antStatus, { 'content-type': 'application/json' });
     res.end(JSON.stringify(antReply));
   });
@@ -149,6 +149,14 @@ await check('with an Anthropic key, Anthropic answers (Messages API, x-api-key, 
   assert.equal(r.body.model, 'claude-sonnet-5-5');
   assert.ok(r.body.system && r.body.messages.every((m) => m.role !== 'system'), 'the system prompt is in "system"');
   assert.equal(seen.length, before, 'nothing went to the OpenAI-compatible endpoint');
+});
+await check('ANTHROPIC_WORKSPACE_ID is sent as anthropic-workspace-id (organization-level keys need it)', async () => {
+  process.env.ANTHROPIC_WORKSPACE_ID = 'wrkspc_test';
+  await routeQuestion('refunds in sept?');
+  assert.equal(ant.at(-1).workspace, 'wrkspc_test');
+  delete process.env.ANTHROPIC_WORKSPACE_ID;
+  await routeQuestion('refunds in sept?');
+  assert.equal(ant.at(-1).workspace, undefined, 'not sent when not set');
 });
 await check('ANTHROPIC_MODEL picks the model', async () => {
   process.env.ANTHROPIC_MODEL = 'claude-haiku-5-5';
