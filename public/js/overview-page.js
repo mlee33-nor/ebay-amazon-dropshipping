@@ -8,6 +8,7 @@ import { settleMonth, settlePeriodRange, allMonths } from './settlement.js';
 import { showCard } from './dash-prefs.js';
 import { state, currentRange, currentPeriod, setupBanner, statusPill, viewStatus, openOrder, switchAccount } from './app.js';
 import { reviewItems } from './review-page.js';
+import { flowMoney, setMoney } from './flow.js';
 
 const cents = (n) => Math.round((Number(n) || 0) * 100);
 // A cost line: minus sign only when there is something to take off
@@ -257,14 +258,14 @@ export function renderOverview(el) {
 
   const c = colors();
   if ($('#hero-value')) {
-    countUp($('#hero-value'), biz, (v) => money(v, 2));
+    flowMoney($('#hero-value'), biz);
     heroScrub({ r, rows, fig, prev, today, c });
     $('#hero-compare')?.addEventListener('click', () => { state.compare = !state.compare; store('dd_compare', state.compare); $('#hero-compare').classList.toggle('on', state.compare); heroScrub({ r, rows, fig, prev, today, c }); });
     const bsSpark = buckets(plain(r), rows, granFor(r, today));
     sparkline($('#k-rev'), bsSpark.map((b) => b.revenueAll), c.revenue);
     sparkline($('#k-ord'), bsSpark.map((b) => b.orders), c.accent);
   }
-  if ($('#settle-value')) countUp($('#settle-value'), cv.amount, (v) => money(v, 2), 700);
+  if ($('#settle-value')) flowMoney($('#settle-value'), d.combined ? Number(String($('#settle-value').textContent).replace(/[^0-9.-]/g, '')) || 0 : cv.amount);
 
   const chartEl = $('#ov-chart');
   if (chartEl) {
@@ -318,7 +319,7 @@ function heroScrub({ r, rows, fig, prev, today, c }) {
   const val = $('#hero-value');
   const at = $('#hero-at');
   const idle = () => {
-    val.textContent = money(biz, 2);
+    setMoney(val, biz);
     val.classList.toggle('neg', biz < 0);
     at.innerHTML = cmp ? `<span class="k-dash"></span>The time before ended at <b>${money(cmp.run.at(-1) ?? 0, 2)}</b> · drag to compare` : 'Drag across the chart to see the running profit';
     at.classList.remove('on');
@@ -330,7 +331,7 @@ function heroScrub({ r, rows, fig, prev, today, c }) {
     if (i === undefined || i === null || cur[i] === undefined) return;
     const v = cur[i];
     const day = bs[i].net;
-    val.textContent = money(v, 2);
+    setMoney(val, v);
     val.classList.toggle('neg', v < 0);
     const vs = cmp && cmp.run[i] !== undefined ? ` · <span class="k-dash"></span>same point before ${money(cmp.run[i], 2)}` : '';
     at.innerHTML = `<b>${esc(labels[i])}</b> · ${day >= 0 ? '+' : '−'}${money(Math.abs(day), 2)} from sales ${g === 'hour' ? 'that hour' : g === 'month' ? 'that month' : 'that day'} · ${count(bs[i].countedOrders)} sales${vs}`;
