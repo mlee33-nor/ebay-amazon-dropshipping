@@ -1,6 +1,6 @@
 // Products → Promotional: how much of the store is on eBay Promoted Listings, at what ad rate and cost, and whether
 // promoted listings actually get seen and bought more than the rest.
-import { esc, money, count, ago, api, toast, ICONS, monthLabel, fmtDate, azMonth } from './util.js';
+import { esc, money, count, ago, api, toast, ICONS, monthLabel, fmtDate, azMonth, apiLink } from './util.js';
 import { promoMonths } from './promo-months.js';
 import { state } from './app.js';
 
@@ -110,7 +110,7 @@ export async function renderPromotionsPanel(box) {
 
     <div class="card mt promo-meter-card">
       <div class="card-h"><div><h3>${ICONS.target} Share of listings promoted</h3><div class="sub">Active listings with an active ad in a running campaign</div></div>
-        <div class="right"><a class="btn sm" href="/api/promotions/not-promoted.csv">${ICONS.down} Not-promoted listings (CSV)</a></div></div>
+        <div class="right"><a class="btn sm" href="${apiLink('/api/promotions/not-promoted.csv')}">${ICONS.down} Not-promoted listings (CSV)</a></div></div>
       <div class="card-b">
         <div class="promo-meter" role="img" aria-label="${n(promotedShare, 1)}% promoted"><div class="seg-a" style="width:${promotedShare.toFixed(2)}%"></div><div class="seg-b" style="width:${(100 - promotedShare).toFixed(2)}%"></div></div>
         <div class="promo-legend"><span><i class="sw a"></i>Promoted <b>${count(P.promoted)}</b> (${pctTxt(P.pctPromoted)})</span><span><i class="sw b"></i>Not promoted <b>${count(P.notPromoted)}</b> (${pctTxt(P.pctNotPromoted)})</span></div>

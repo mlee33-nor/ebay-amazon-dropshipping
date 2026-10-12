@@ -1,4 +1,4 @@
-import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, fmtTime, ago, api, toast, downloadCsv, ICONS, DAY, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel, azDay, azHour, azWeekday, azStart, addDays, daysBetween } from './util.js';
+import { $, $$, esc, money, moneyShort, pct, count, signed, fmtDate, fmtDateTime, fmtTime, ago, api, toast, downloadCsv, ICONS, DAY, countUp, dismissed, settlementDueDate, dueStatus, syncInProgress, syncFailed, monthLabel, settleView, orderLabel, azDay, azHour, azWeekday, azStart, addDays, daysBetween, accountId, setAccountId, apiLink } from './util.js';
 import { rangeFor, previousRange, inRange, summarize, buckets, autoGran, byProduct, groupBy, STATUS_META, bucketKey, opexFor, isSale, saleIdOf, rowMonth, periodMonth } from './metrics.js';
 import { ORDER_EXPORT } from './report-math.js';
 import { ebayStepIssues, ebayIssueText, emailFailures, emailFailureText } from './health.js';
@@ -56,7 +56,12 @@ const PAGES = [
 
 // ---------------------------------------------------------------- data
 export async function loadData() {
-  state.data = await api('/api/data');
+  try { state.data = await api('/api/data'); } catch (e) {
+    if (!/Unknown account/.test(e.message)) throw e;
+    setAccountId('main');
+    state.data = await api('/api/data');
+  }
+  renderAccountSwitch();
   renderRangeSeg();
   renderSidebarFoot();
   renderNav();
@@ -105,6 +110,16 @@ function renderNav() {
 function renderSidebarFoot() {
   const e = state.data?.ebay;
   if (!e) return;
+  if (state.data.combined) {
+    // One line per account: its eBay sync and its Amazon inbox
+    $('#sidebar-foot').innerHTML = state.data.byAccount.map((a) => {
+      const ok = a.ebay?.configured && a.ebay?.last?.ok;
+      const mail = a.email?.configured && (a.email?.last?.ok || a.email?.last?.connected);
+      return `<div class="status-row"><span class="dot ${ok && mail ? 'ok' : 'warn'}"></span><div><div class="st-t">${esc(a.name)}</div><div class="st-s">eBay ${ok ? `synced ${ago(a.ebay.lastSuccess)}` : a.ebay?.configured ? 'check' : 'not connected'} · email ${mail ? 'ok' : a.email?.configured ? 'check' : 'not set up'}</div></div><button class="st-a" data-acct-go="${esc(a.id)}">Open</button></div>`;
+    }).join('') + `<div class="status-foot"><span>ENTIRE BUSINESS</span><span class="mono" style="font-size:10.5px">${count(state.data.orders.length)} sales</span></div>`;
+    $$('[data-acct-go]', $('#sidebar-foot')).forEach((b) => b.addEventListener('click', () => switchAccount(b.dataset.acctGo)));
+    return;
+  }
   let dot = 'warn';
   let line = 'Not connected';
   let action = 'Set up';
@@ -294,10 +309,72 @@ export function renderPage() {
   el.classList.add('page-in');
   renderDueBar();
   if (!state.data) { el.innerHTML = skeleton(); return; }
+  if (state.data.combined && ONE_ACCOUNT.has(p.id)) return pickAccount(el, p);
   const fn = { overview: renderOverview, review: renderReview, promotions: (x) => renderPromotionsPanel(x), ask: renderAsk, watch: renderWatch, reports: renderReports, trends, products, orders, returns, settlement: renderSettlement, costs: renderOpex, editor: renderEditor, import: importPage, settings }[p.id];
   fn(el);
   // A failing sync is shown on every page, not only the Overview, so nobody pays or reads numbers from stale data
   if (p.id !== 'overview') { const loud = setupBanner({ failuresOnly: true }); if (loud) el.insertAdjacentHTML('afterbegin', loud); }
+}
+
+// ---------------------------------------------------------------- accounts
+// The switcher at the top left: ENTIRE BUSINESS (every account added together, read-only) and each account (eBay store)
+const ONE_ACCOUNT = new Set(['settlement', 'reports', 'costs', 'editor', 'import', 'ask', 'promotions', 'products', 'watch', 'settings']);
+function renderAccountSwitch() {
+  const d = state.data;
+  if (!d?.accounts) return;
+  const cur = d.account?.id || accountId();
+  const many = d.accounts.length > 1;
+  $('#acct-name').textContent = d.account?.name || 'MDBIZ MAIN';
+  $('#acct-sub').textContent = d.combined ? `${d.accounts.length} accounts combined` : many ? 'Switch account' : 'eBay × Amazon profit';
+  $('#acct-menu').innerHTML = [
+    many ? `<button role="menuitem" data-acct="all" class="${cur === 'all' ? 'on' : ''}"><b>ENTIRE BUSINESS</b><span>Every account added together</span></button><div class="acct-sep"></div>` : '',
+    ...d.accounts.map((a) => `<button role="menuitem" data-acct="${esc(a.id)}" class="${many ? 'sub ' : ''}${cur === a.id ? 'on' : ''}"><b>${esc(a.name)}</b><span>${a.id === 'main' ? 'Main account' : 'Account'}</span></button>`),
+    '<div class="acct-sep"></div><button role="menuitem" data-acct="+"><b>+ Add an account</b><span>Another eBay store with its own Amazon inbox</span></button>',
+  ].join('');
+}
+export async function switchAccount(id) {
+  setAccountId(id);
+  $('#acct-menu').hidden = true;
+  $('#acct-btn').setAttribute('aria-expanded', 'false');
+  state.data = null;
+  renderPage();
+  try { await loadData(); } catch (e) { toast(e.message, 'bad'); }
+  route();
+}
+async function addAccount() {
+  const name = prompt('Name the new account (for example the eBay store name):');
+  if (!name || !name.trim()) return;
+  try {
+    const r = await api('/api/accounts', { method: 'POST', body: { name }, headers: { 'X-Account': 'main' } });
+    toast(`${r.account.name} added. Connect its eBay store and Amazon inbox here.`, 'good');
+    location.hash = '#/settings';
+    await switchAccount(r.account.id);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+$('#acct-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const m = $('#acct-menu');
+  m.hidden = !m.hidden;
+  $('#acct-btn').setAttribute('aria-expanded', String(!m.hidden));
+});
+$('#acct-menu').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-acct]');
+  if (!b) return;
+  if (b.dataset.acct === '+') { $('#acct-menu').hidden = true; addAccount(); return; }
+  switchAccount(b.dataset.acct);
+});
+document.addEventListener('click', (e) => { if (!e.target.closest('.acct-wrap')) $('#acct-menu').hidden = true; });
+
+// A page that works on one account at a time, opened on ENTIRE BUSINESS: pick the account
+function pickAccount(el, p) {
+  const d = state.data;
+  el.innerHTML = `<div class="card"><div class="empty lg">
+    <div class="ic">${ICONS[p.icon] || ICONS.info}</div>
+    <div class="t">${esc(p.label)} works on one account at a time</div>
+    <p>ENTIRE BUSINESS adds every account together to look at. ${p.id === 'settlement' || p.id === 'reports' ? 'Each account has its own pay periods and payments.' : 'Pick the account to open.'}</p>
+    <div class="actions">${d.accounts.map((a) => `<button class="btn" data-pick="${esc(a.id)}">${esc(a.name)}</button>`).join('')}</div>
+  </div></div>`;
+  $$('[data-pick]', el).forEach((b) => b.addEventListener('click', () => switchAccount(b.dataset.pick)));
 }
 
 // Red reminder across the top of every page: a settlement that is due within DUE_WARN_DAYS days, or overdue
@@ -310,10 +387,11 @@ function renderDueBar() {
   const A = d.settings.partner_amazon;
   const B = d.settings.partner_ebay;
   const dueDay = d.settings.settlement_day ?? 26;
-  const { expenses, settlements } = d.books;
-  const items = allMonths(d.orders, expenses)
-    .map((m) => settleMonth({ month: m, orders: d.orders, expenses, settlements, splitAmazon: Number(d.settings.split_amazon) }))
-    .map((s) => ({ s, v: settleView(s, A, B), due: dueStatus(settlementDueDate(s.month, dueDay)) }))
+  const books = d.combined ? d.byAccount.map((a) => ({ name: a.name, orders: d.orders.filter((o) => o.account === a.id), ...a.books, split: a.settings.split_amazon }))
+    : [{ name: '', orders: d.orders, ...d.books, split: d.settings.split_amazon }];
+  const items = books.flatMap((bk) => allMonths(bk.orders, bk.expenses)
+    .map((m) => settleMonth({ month: m, orders: bk.orders, expenses: bk.expenses, settlements: bk.settlements, splitAmazon: Number(bk.split) }))
+    .map((s) => ({ s, acct: bk.name, v: settleView(s, A, B), due: dueStatus(settlementDueDate(s.month, dueDay)) })))
     .filter((x) => !x.v.settled && !x.v.nothingDue && x.v.outstanding > 0.009 && x.due.days <= DUE_WARN_DAYS)
     .sort((a, b) => a.due.days - b.due.days);
   if (!items.length) { bar.hidden = true; bar.innerHTML = ''; return; }
@@ -324,7 +402,7 @@ function renderDueBar() {
     : `due ${fmtDate(settlementDueDate(x.s.month, dueDay), { weekday: 'short', month: 'short', day: 'numeric' })}, in ${n} day${n === 1 ? '' : 's'}`;
   const more = items.length > 1 ? ` · plus ${items.length - 1} more month${items.length > 2 ? 's' : ''}` : '';
   bar.hidden = false;
-  bar.innerHTML = `<a class="due-bar ${n < 0 ? 'overdue' : ''}" href="#/settlement" role="alert">${ICONS.alert}<span class="txt"><b>${esc(x.v.from)} sends ${esc(x.v.to)} ${money(x.v.outstanding, 2)}</b> for ${monthLabel(x.s.month, 'long')} · ${when}${more}</span><span class="go">Open settlement ${ICONS.chevron}</span></a>`;
+  bar.innerHTML = `<a class="due-bar ${n < 0 ? 'overdue' : ''}" href="#/settlement" role="alert">${ICONS.alert}<span class="txt"><b>${esc(x.v.from)} sends ${esc(x.v.to)} ${money(x.v.outstanding, 2)}</b> for ${monthLabel(x.s.month, 'long')}${x.acct ? ` (${esc(x.acct)})` : ''} · ${when}${more}</span><span class="go">Open settlement ${ICONS.chevron}</span></a>`;
 }
 
 // "Sep 1 – Sep 22", or with years when the range crosses a year boundary / isn't this year: "Sep 23, 2025 – Sep 22, 2026"
@@ -488,15 +566,16 @@ function notice({ key, kind = '', icon = ICONS.alert, text, action, href, soft =
 // `failuresOnly`: just the loud failures (a sync step or the email import not working), shown on every other page
 export function setupBanner({ failuresOnly = false } = {}) {
   const d = state.data;
+  if (d.combined) return '';
   const out = [];
   if (!d.ebay.configured)
     out.push(notice({ key: 'ebay-setup', soft: true, text: `<b>eBay isn't connected.</b> Finish setup in Settings, then click <b>Connect eBay account</b>. <span class="muted">Missing: ${d.ebay.missing.join(', ')}</span>`, action: 'Set up', href: '#/settings' }));
   // Loud warnings when an automatic pull stops working, so a silent failure can't hide missing sales or costs
   const stale = (iso, hours) => !iso || Date.now() - new Date(iso).getTime() > hours * 3600_000;
   if (d.ebay.needsReconnect)
-    out.push(notice({ key: 'ebay-reconnect', kind: 'bad', text: '<b>eBay needs to be reconnected.</b> eBay stopped accepting the saved connection, so no new sales are coming in.', action: 'Reconnect eBay', href: '/api/ebay/connect' }));
+    out.push(notice({ key: 'ebay-reconnect', kind: 'bad', text: '<b>eBay needs to be reconnected.</b> eBay stopped accepting the saved connection, so no new sales are coming in.', action: 'Reconnect eBay', href: apiLink('/api/ebay/connect') }));
   else if (d.ebay.refreshExpiresAt && new Date(d.ebay.refreshExpiresAt) - Date.now() < 30 * 86400_000)
-    out.push(notice({ key: 'ebay-expiring', text: `<b>eBay connection expires ${fmtDate(d.ebay.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}.</b> Reconnect now so syncing never stops.`, action: 'Reconnect eBay', href: '/api/ebay/connect' }));
+    out.push(notice({ key: 'ebay-expiring', text: `<b>eBay connection expires ${fmtDate(d.ebay.refreshExpiresAt, { month: 'short', day: 'numeric', year: 'numeric' })}.</b> Reconnect now so syncing never stops.`, action: 'Reconnect eBay', href: apiLink('/api/ebay/connect') }));
   else if (d.ebay.configured && syncFailed(d.ebay))
     out.push(notice({ key: 'ebay-failing', kind: 'bad', text: `<b>eBay sync is failing.</b> New sales are not coming in. <span class="muted">${esc((d.ebay.last.message || '').slice(0, 180))}</span>`, action: 'Details', href: '#/settings' }));
   else if (d.ebay.configured && !syncInProgress(d.ebay) && d.ebay.lastSuccess && stale(d.ebay.lastSuccess, 3))
@@ -874,6 +953,7 @@ function orders(el) {
     selectableRows: false,
     initialSort: [{ column: 'created_at', dir: 'desc' }],
     columns: [
+      ...(state.data.combined ? [{ title: 'Account', field: 'account_name', width: 120, minWidth: 100, formatter: (c) => esc(c.getValue() || '') }] : []),
       { title: 'Date', field: 'created_at', width: 108, minWidth: 100, formatter: (c) => `${fmtDate(c.getValue())}<div class="muted" style="font-size:11px">${c.getRow().getData().approx_date ? 'date approx.' : `${fmtTime(c.getValue())} AZ`}</div>` },
       { title: 'Item', field: 'title', minWidth: 186, widthGrow: 3, formatter: (c) => { const d = c.getRow().getData(); return `<div style="white-space:normal;line-height:1.3">${esc(trunc(d.title, 90))}</div><div class="${d.source === 'ledger' ? '' : 'mono '}muted" style="font-size:11px">${esc(orderLabel(d))}${d.units > 1 ? ` · ×${d.units}` : ''}</div>`; } },
       { title: 'Buyer', field: 'buyer', width: 120, minWidth: 110, formatter: (c) => { const d = c.getRow().getData(); return `${esc(d.buyer || '')}<div class="muted" style="font-size:11px">${esc([d.ship_city, d.ship_state].filter(Boolean).join(', '))}</div>`; } },
@@ -1267,6 +1347,8 @@ async function importPage(el) {
 
 // ---------------------------------------------------------------- SETTINGS
 async function settings(el) {
+  const backTo = new URLSearchParams(location.hash.split('?')[1] || '').get('account');
+  if (backTo && backTo !== accountId()) { history.replaceState(null, '', location.hash.replace(/([?&])account=[^&]*/, '$1')); return switchAccount(backTo); }
   const ebayMsg = new URLSearchParams(location.hash.split('?')[1] || '').get('ebay');
   if (ebayMsg) {
     toast(ebayMsg === 'connected' ? 'eBay connected. Pulling your sales now.' : `eBay: ${ebayMsg}`, ebayMsg === 'connected' ? 'good' : 'bad');
@@ -1282,7 +1364,9 @@ async function settings(el) {
   const focus = new URLSearchParams(location.hash.split('?')[1] || '').get('focus');
   el.innerHTML = `<div class="grid g-12">
     <div class="c-7 stack">
-      <div class="section-h" style="margin-top:0" id="dashboard-sec"><h2>Customize dashboard</h2><span class="sub">what everyone sees · saved for both partners</span></div>
+      <div class="section-h" style="margin-top:0"><h2>Accounts</h2><span class="sub">each eBay store with its own Amazon inbox</span></div>
+      ${accountsCard()}
+      <div class="section-h" id="dashboard-sec"><h2>Customize dashboard</h2><span class="sub">what everyone sees · saved for both partners</span></div>
       ${dashboardCard(d.settings)}
       <div class="section-h"><h2>Data sources</h2><span class="sub">where sales and costs come from</span></div>
       ${emailCard(em, mails)}
@@ -1313,6 +1397,7 @@ async function settings(el) {
         ${demo ? `<button class="btn danger" id="clear-demo">Remove ${count(demo)} demo orders</button>` : ''}</div>`, { cls: 'set-card' })}
     </div></div>`;
   bindDashboardCard();
+  bindAccountsCard();
   if (focus === 'dashboard') requestAnimationFrame(() => $('#dashboard-sec')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   if (focus === 'email') {
     const target = $('#email-card');
@@ -1345,6 +1430,23 @@ async function settings(el) {
     toast('Demo data removed', 'good');
     await loadData();
     renderPage();
+  });
+}
+
+// Accounts: rename this one, add another, switch
+function accountsCard() {
+  const d = state.data;
+  const me = d.account || { id: 'main', name: 'MDBIZ MAIN' };
+  return card('Accounts', `You are in <b>${esc(me.name)}</b>. Everything on this page (eBay, Amazon email, partners) is for this account.`, `
+    <div class="acct-list">${d.accounts.map((a) => `<div class="acct-row ${a.id === me.id ? 'on' : ''}"><div><b>${esc(a.name)}</b><div class="muted" style="font-size:12px">${a.id === 'main' ? 'Main account · reads EMAIL_USER / EMAIL_PASSWORD' : `reads EMAIL_USER_${esc(a.id.toUpperCase())} / EMAIL_PASSWORD_${esc(a.id.toUpperCase())}`}</div></div>${a.id === me.id ? '<span class="pill good">Open</span>' : `<button class="btn sm" data-acct-open="${esc(a.id)}">Open</button>`}</div>`).join('')}</div>
+    <div class="row mt" style="gap:8px;flex-wrap:wrap"><input class="input" id="acct-rename" style="flex:1;min-width:180px" value="${esc(me.name)}" aria-label="Account name" /><button class="btn" id="acct-rename-btn">Rename</button><button class="btn primary" id="acct-add-btn">+ Add an account</button></div>`, { cls: 'set-card' });
+}
+function bindAccountsCard() {
+  $$('[data-acct-open]').forEach((b) => b.addEventListener('click', () => switchAccount(b.dataset.acctOpen)));
+  $('#acct-add-btn')?.addEventListener('click', addAccount);
+  $('#acct-rename-btn')?.addEventListener('click', async () => {
+    const id = state.data.account?.id || 'main';
+    try { await api(`/api/accounts/${encodeURIComponent(id)}/rename`, { method: 'POST', body: { name: $('#acct-rename').value } }); toast('Renamed', 'good'); await loadData(); renderPage(); } catch (e) { toast(e.message, 'bad'); }
   });
 }
 
@@ -1387,7 +1489,7 @@ function ebayCard(e, log) {
   const pill = (ok, yes = 'set', no = 'missing') => (ok ? `<span class="pill good">${yes}</span>` : `<span class="pill bad">${no}</span>`);
   const expSoon = e.refreshExpiresAt && new Date(e.refreshExpiresAt) - Date.now() < 30 * 86400_000;
   const connectBtn = e.canConnect
-    ? `<a class="btn primary" href="/api/ebay/connect">${e.configured ? 'Reconnect eBay' : 'Connect eBay account'}</a>`
+    ? `<a class="btn primary" href="${apiLink('/api/ebay/connect')}">${e.configured ? 'Reconnect eBay' : 'Connect eBay account'}</a>`
     : '<button class="btn" disabled title="Set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RUNAME first">Connect eBay account</button>';
   const rows = `<table class="simple"><tbody>
       <tr><td class="mono">EBAY_CLIENT_ID</td><td>App ID (Production)</td><td>${pill(has('EBAY_CLIENT_ID'))}</td></tr>
@@ -1414,6 +1516,8 @@ function ebayCard(e, log) {
     ${logHtml}`, { cls: 'set-card', right: !e.configured ? '<span class="pill warn">Not connected</span>' : busy ? '<span class="pill info">Syncing…</span>' : e.needsReconnect ? '<span class="pill bad">Reconnect</span>' : syncFailed(e) ? '<span class="pill bad">Failing</span>' : '<span class="pill good">Connected</span>' });
 }
 
+// The main account reads EMAIL_USER / EMAIL_PASSWORD; another account EMAIL_USER_<ID> / EMAIL_PASSWORD_<ID>
+const envSuffix = () => (state.data?.account?.id && state.data.account.id !== 'main' ? `_${state.data.account.id.toUpperCase()}` : '');
 function emailCard(em, mails) {
   const h4 = (t) => `<h4 style="margin:18px 0 6px;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)">${t}</h4>`;
   const intro = '<p class="ink2" style="margin-top:0;font-size:13px">This is where Amazon costs come from. It reads only mail <b>from amazon.com</b>: order confirmations (cost, ship-to, items), cancellations (cost drops to $0) and refunds (logged as money recovered from Amazon). Purchases are keyed by Amazon order number, so nothing is ever double-counted, and each one links to its eBay sale by zip, name or tracking number.</p>';
@@ -1421,8 +1525,8 @@ function emailCard(em, mails) {
   if (!em.configured) {
     return card('Amazon purchases from email', 'Primary source of Amazon costs · not connected yet', `${intro}
       <table class="simple env-table"><tbody>
-        <tr><td class="mono">EMAIL_USER</td><td>${em.user ? esc(em.user) : 'your Gmail address'}</td><td>${em.user ? '<span class="pill good">set</span>' : '<span class="pill bad">missing</span>'}</td></tr>
-        <tr><td class="mono">EMAIL_PASSWORD</td><td>Gmail <b>App Password</b> (16 letters), not your normal password</td><td><span class="pill bad">missing</span></td></tr>
+        <tr><td class="mono">EMAIL_USER${envSuffix()}</td><td>${em.user ? esc(em.user) : 'your Gmail address'}</td><td>${em.user ? '<span class="pill good">set</span>' : '<span class="pill bad">missing</span>'}</td></tr>
+        <tr><td class="mono">EMAIL_PASSWORD${envSuffix()}</td><td>Gmail <b>App Password</b> (16 letters), not your normal password</td><td><span class="pill bad">missing</span></td></tr>
       </tbody></table>
       <p class="muted" style="font-size:12.5px;margin-bottom:0">Create one at <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a> (2-Step Verification must be on). Put it in <span class="mono">.env</span> or Railway Variables, then restart. Until then, enter costs by hand in the <a href="#/editor">Editor</a>.</p>`, { ...opts, right: '<span class="pill warn">Not connected</span>' });
   }

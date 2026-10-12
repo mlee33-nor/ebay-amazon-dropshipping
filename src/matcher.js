@@ -2,7 +2,7 @@
 // (buyer zip / buyer name on the Amazon shipping address, or a shared tracking number).
 // Title similarity alone never auto-links - it only produces suggestions for manual review.
 // Amazon orders that never link are ignored by every metric.
-import { q, getSetting } from './db.js';
+import { q, getSetting, accountState } from './db.js';
 import { businessDay } from './time.js';
 
 const STOP = new Set(
@@ -331,7 +331,7 @@ export async function getSuggestions(limit = 300) {
 
 // The last answer and the inputs it was worked out from: the dashboard asks on every load, but the full Amazon x eBay
 // scan only runs again when an order, link, cost or rejection changed
-let sharedCache = { key: null, value: null };
+const S = accountState(() => ({ sharedCache: { key: null, value: null } }));
 
 // One Amazon order that looks like the purchase for two or more eBay sales (the same buyer bought twice, Amazon
 // shipped both in one order). order_links holds one sale per Amazon order, so this is never linked automatically: it
@@ -345,7 +345,7 @@ export async function sharedOrderSuggestions() {
   const linkCounts = await loadLinkCounts();
   const rej = new Set((await q('select amazon_order_id, ebay_order_id from link_rejections')).map((r) => `${r.amazon_order_id}|${r.ebay_order_id}`));
   const key = JSON.stringify([amazon, ebay, [...linkCounts], [...rej].sort()]);
-  if (sharedCache.key === key) return sharedCache.value;
+  if (S().sharedCache.key === key) return S().sharedCache.value;
   const out = [];
   for (const az of amazon) {
     const sales = [];
@@ -388,6 +388,6 @@ export async function sharedOrderSuggestions() {
       })),
     });
   }
-  sharedCache = { key, value: out };
+  S().sharedCache = { key, value: out };
   return out;
 }

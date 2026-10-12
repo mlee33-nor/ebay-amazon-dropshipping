@@ -3,7 +3,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initDb, dbKind, q, one, getSetting, setSetting, withTransaction } from './db.js';
+import { initDb, dbKind, q, one, getSetting, setSetting, withTransaction, MAIN, withAccount, currentAccount, hasAccount, accountIds, listAccounts, createAccount, renameAccount } from './db.js';
 import { syncEbay, ebayStatus, ebayConfigured, ebayCanConnect, ebayConsentUrl, ebayConnectWithCode, loadEbayConnection } from './ebay.js';
 import { importAmazonCsv } from './amazon.js';
 import { runMatcher, getSuggestions, candidatesForSale } from './matcher.js';
@@ -15,7 +15,7 @@ import { settleMonth, CYCLE_START } from '../public/js/settlement.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage, reprocessEmail, dismissFailedEmail } from './email.js';
 import { ask } from './ask.js';
 import { routeQuestion, writeAnswer, llmConfigured, checkModel } from './llm.js';
-import { syncListings, listingAnalytics } from './listings.js';
+import { syncListings, listingAnalytics, zeroViewListings } from './listings.js';
 import { promotionAnalytics, unpromotedListings } from './promotions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -85,6 +85,20 @@ app.use((req, res, next) => {
 // Browsers check for a newer copy every time (a quick 304 when nothing changed), so a deploy shows up on the next load
 app.use(express.static(path.join(__dirname, '..', 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 
+// Which account (eBay store) a request is about: the X-Account header the pages send, or ?account= on a link (Connect
+// eBay). "all" (ENTIRE BUSINESS) is read-only: it only loads the combined data; anything that changes money or
+// connections is done on one account.
+app.use('/api', (req, res, next) => {
+  const id = String(req.headers['x-account'] || req.query.account || MAIN);
+  if (id === 'all') {
+    if (req.method === 'GET' && (req.path === '/data' || req.path === '/accounts')) { req.allAccounts = true; req.account = MAIN; return withAccount(MAIN, next); }
+    return res.status(400).json({ error: 'ENTIRE BUSINESS is a combined view. Pick one account at the top left to do this.' });
+  }
+  if (!hasAccount(id)) return res.status(400).json({ error: `Unknown account: ${id}` });
+  req.account = id;
+  withAccount(id, next);
+});
+
 // Every manual change to money is logged: what, when, before and after, and from where
 async function logMoney(req, action, subject, before, after, run = q) {
   const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
@@ -103,14 +117,38 @@ const parseAmount = (v) => {
   return (neg ? -1 : 1) * Number(t);
 };
 
+// Each handler runs in its request's account again (an upload's stream callbacks can lose the request context)
 const wrap = (fn) => (req, res) =>
-  fn(req, res).catch((e) => {
+  withAccount(req.account || MAIN, () => fn(req, res)).catch((e) => {
     console.error(e);
     res.status(e.status || 500).json({ error: e.message });
   });
 
 // ---------- data ----------
-app.get('/api/data', wrap(async (_req, res) => {
+app.get('/api/data', wrap(async (req, res) => {
+  const accounts = await listAccounts();
+  if (!req.allAccounts) return res.json({ ...(await accountData()), account: accounts.find((a) => a.id === currentAccount()), accounts });
+  // ENTIRE BUSINESS: every account's data, each row tagged with its account. Payments stay per account (books.byAccount).
+  const parts = [];
+  for (const a of accounts) parts.push({ a, d: await withAccount(a.id, accountData) });
+  const tag = (list, a) => (list || []).map((x) => ({ ...x, account: a.id, account_name: a.name }));
+  const main = parts[0].d;
+  res.json({
+    combined: true, account: { id: 'all', name: 'ENTIRE BUSINESS' }, accounts,
+    orders: parts.flatMap(({ a, d }) => tag(d.orders, a)),
+    flags: { unassignedCharges: parts.flatMap(({ a, d }) => tag(d.flags.unassignedCharges, a)), openHolds: parts.flatMap(({ a, d }) => tag(d.flags.openHolds, a)) },
+    amazon: { orders: parts.reduce((t, p) => t + (p.d.amazon.orders || 0), 0), linked: parts.reduce((t, p) => t + (p.d.amazon.linked || 0), 0), suggestions: parts.reduce((t, p) => t + (p.d.amazon.suggestions || 0), 0), unmatchedRefunds: parts.flatMap(({ a, d }) => tag(d.amazon.unmatchedRefunds, a)) },
+    email: { ...main.email, failed: parts.flatMap(({ a, d }) => tag(d.email.failed, a)) },
+    ebay: main.ebay,
+    byAccount: parts.map(({ a, d }) => ({ id: a.id, name: a.name, ebay: d.ebay, email: { configured: d.email.configured, running: d.email.running, last: d.email.last, user: d.email.user }, books: d.books, settings: d.settings })),
+    settings: main.settings,
+    books: { expenses: parts.flatMap(({ a, d }) => tag(d.books.expenses, a)), settlements: [], payments: [], closed: [] },
+    db: main.db, ai: main.ai,
+  });
+}));
+
+// Everything the pages need for the current account
+async function accountData() {
   const [orders, status, amazonStats, settings, suggestions, email, books] = await Promise.all([
     buildDataset(),
     ebayStatus(),
@@ -125,7 +163,21 @@ app.get('/api/data', wrap(async (_req, res) => {
   ]);
   // eBay charges someone already looked at on the Review page are marked, not dropped
   const reviewed = new Set((await getSetting('reviewed_charges')) || []);
-  res.json({ orders, flags: { unassignedCharges: (orders.unassignedCharges || []).map((c) => ({ ...c, reviewed: reviewed.has(c.id) })), openHolds: orders.openHolds || [] }, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } });
+  return { orders, flags: { unassignedCharges: (orders.unassignedCharges || []).map((c) => ({ ...c, reviewed: reviewed.has(c.id) })), openHolds: orders.openHolds || [] }, ebay: status, email, amazon: { ...amazonStats, suggestions, unmatchedRefunds: orders.unmatchedRefunds || [] }, settings, books, db: dbKind(), ai: { configured: llmConfigured() } };
+}
+
+// ---------- accounts (eBay stores) ----------
+app.get('/api/accounts', wrap(async (_req, res) => res.json(await listAccounts())));
+app.post('/api/accounts', wrap(async (req, res) => {
+  const a = await createAccount(req.body?.name);
+  await withAccount(a.id, () => loadEbayConnection());
+  await logMoney(req, 'account added', a.id, null, a);
+  res.json({ ok: true, account: a, accounts: await listAccounts() });
+}));
+app.post('/api/accounts/:id/rename', wrap(async (req, res) => {
+  if (!hasAccount(req.params.id)) return res.status(404).json({ error: 'No such account' });
+  const a = await renameAccount(req.params.id, req.body?.name);
+  res.json({ ok: true, account: a, accounts: await listAccounts() });
 }));
 
 async function runMatcherSuggestionsCount() {
@@ -362,12 +414,25 @@ app.get('/api/promotions/not-promoted.csv', wrap(async (_req, res) => {
   res.send([head.join(','), ...body].join('\n'));
 }));
 
+// Products -> Listings: every active listing with 0 views in the last 30 days, as a spreadsheet
+app.get('/api/listings/zero-views.csv', wrap(async (_req, res) => {
+  // A cell a spreadsheet would read as a formula (=, +, -, @) is kept as text
+  const cell = (v) => { let s = v === null || v === undefined ? '' : String(v); if (/^[=+\-@]/.test(s)) s = `'${s}`; return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const { rows, period } = await zeroViewListings();
+  if (!rows) return res.status(409).type('text/plain').send('30-day listing views have not synced from eBay yet (Products -> Listings -> Check listings now). Without them there is no way to tell which listings had no views in the last 30 days.');
+  const head = ['Item ID', 'Title', 'SKU', 'Price', 'Listed on', 'Days live', 'Views (last 30 days)', 'Times shown in search (last 30 days)', 'Watchers', 'Sold', 'Quantity available', 'Link'];
+  const body = rows.map((r) => [r.itemId, r.title, r.sku, r.price, r.started, r.daysLive, 0, r.impressions, r.watchers, r.sold, r.available, r.url].map(cell).join(','));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="zero-views-${period?.to_day || 'last-30-days'}.csv"`);
+  res.send([head.join(','), ...body].join('\n'));
+}));
+
 // ---------- Connect eBay (OAuth authorization-code flow) ----------
 // eBay Developer portal -> User Tokens -> "Get a Token from eBay via Your Application" -> add a RuName whose
 // "Your auth accepted URL" is https://<this app>/api/ebay/callback, then set EBAY_RUNAME to that RuName.
 app.get('/api/ebay/connect', wrap(async (_req, res) => {
   if (!ebayCanConnect()) return res.status(400).send('Set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RUNAME first.');
-  const state = crypto.randomBytes(16).toString('hex');
+  const state = `${currentAccount()}.${crypto.randomBytes(16).toString('hex')}`;
   await setSetting('ebay_oauth_state', { state, at: Date.now() });
   res.redirect(ebayConsentUrl(state));
 }));
@@ -383,6 +448,12 @@ app.post('/api/ebay/code', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 app.get('/api/ebay/callback', wrap(async (req, res) => {
+  // The account this connection is for is the part of the state before the dot
+  const acct = String(req.query.state || '').split('.')[0];
+  if (acct && acct !== currentAccount() && hasAccount(acct)) return withAccount(acct, () => ebayCallback(req, res));
+  return ebayCallback(req, res);
+}));
+async function ebayCallback(req, res) {
   const saved = await getSetting('ebay_oauth_state');
   if (req.query.error) return res.redirect(`/#/settings?ebay=${encodeURIComponent(String(req.query.error_description || req.query.error))}`);
   if (!saved || saved.state !== req.query.state || Date.now() - saved.at > 15 * 60_000)
@@ -390,8 +461,8 @@ app.get('/api/ebay/callback', wrap(async (req, res) => {
   await ebayConnectWithCode(String(req.query.code || ''));
   await setSetting('ebay_oauth_state', null);
   syncEbay().catch((err) => console.error('first eBay sync failed', err));
-  res.redirect('/#/settings?ebay=connected');
-}));
+  res.redirect(`/#/settings?ebay=connected&account=${encodeURIComponent(currentAccount())}`);
+}
 
 // ---------- books: operating expenses, settlements, ledger links ----------
 app.post('/api/expenses', wrap(async (req, res) => {
@@ -594,7 +665,7 @@ app.get('/api/health', wrap(async (_req, res) => { await q('select 1'); res.json
 
 const port = Number(process.env.PORT || 3000);
 const kind = await initDb();
-await loadEbayConnection();
+for (const id of accountIds()) await withAccount(id, () => loadEbayConnection());
 app.listen(port, () => {
   console.log(`Dropship dashboard on http://localhost:${port}  (db: ${kind}${PASSWORD ? ', password on' : ', NO PASSWORD'})`);
 });
@@ -603,9 +674,15 @@ app.listen(port, () => {
 const every = Number(process.env.SYNC_INTERVAL_MINUTES || 30);
 // Always scheduled; each tick checks whether eBay is connected, so connecting in the UI starts syncing without a restart
 if (every > 0) {
-  const tick = () => {
-    if (!ebayConfigured()) return;
-    syncEbay().then((r) => console.log('eBay sync:', r.log.join(' | '))).catch((e) => console.error('eBay sync error', e));
+  // Every account in turn (one at a time, so two stores never hit eBay's limits together)
+  const tick = async () => {
+    for (const id of accountIds()) {
+      await withAccount(id, async () => {
+        if (!ebayConfigured()) return;
+        const r = await syncEbay().catch((e) => ({ log: [`error: ${e.message}`] }));
+        console.log(`eBay sync [${id}]:`, r.log.join(' | '));
+      });
+    }
   };
   setTimeout(tick, 5_000);
   setInterval(tick, every * 60_000);
@@ -613,8 +690,17 @@ if (every > 0) {
 // Ask AI model: check it can be reached once Tailscale (if used) has had time to connect, and again later if not
 if (llmConfigured()) setTimeout(() => checkModel().then((ok) => { if (!ok) setTimeout(checkModel, 90_000); }), 20_000);
 if (!ebayConfigured()) console.log('eBay not connected yet: set EBAY_CLIENT_ID / EBAY_CLIENT_SECRET / EBAY_RUNAME, then Settings -> Connect eBay');
-if (emailConfigured() && every > 0) {
-  const tickMail = () => syncEmail().then((r) => console.log('Email sync:', r.log.join(' | '))).catch((e) => console.error('Email sync error', e));
+if (every > 0) {
+  // Each account's own inbox (an account without one is skipped)
+  const tickMail = async () => {
+    for (const id of accountIds()) {
+      await withAccount(id, async () => {
+        if (!emailConfigured()) return;
+        const r = await syncEmail().catch((e) => ({ log: [`error: ${e.message}`] }));
+        console.log(`Email sync [${id}]:`, r.log.join(' | '));
+      });
+    }
+  };
   setTimeout(tickMail, 15_000);
   setInterval(tickMail, every * 60_000);
 }

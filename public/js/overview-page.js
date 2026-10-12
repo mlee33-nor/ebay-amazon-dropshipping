@@ -6,7 +6,7 @@ import { buckets, byProduct, isSale, opexFor, previousRange } from './metrics.js
 import { mount, colors, tooltipBase, axisBase, ttRow, ttHead, sparkline, areaFade } from './charts.js';
 import { settleMonth, settlePeriodRange, allMonths } from './settlement.js';
 import { showCard } from './dash-prefs.js';
-import { state, currentRange, currentPeriod, setupBanner, statusPill, viewStatus, openOrder } from './app.js';
+import { state, currentRange, currentPeriod, setupBanner, statusPill, viewStatus, openOrder, switchAccount } from './app.js';
 import { reviewItems } from './review-page.js';
 
 const cents = (n) => Math.round((Number(n) || 0) * 100);
@@ -169,6 +169,24 @@ export function renderOverview(el) {
     <div style="margin-top:12px"><a class="btn sm" href="#/settlement">Open settlement ${ICONS.arrow}</a></div>
   </div>`;
 
+  // ENTIRE BUSINESS: each account settles on its own, so the card lists each account's payment and adds them up
+  const combinedCard = d.combined ? (() => {
+    const per = d.byAccount.map((a) => {
+      const st = settleMonth({ month: payMonth, orders: d.orders.filter((o) => o.account === a.id), expenses: a.books.expenses, settlements: a.books.settlements, splitAmazon: Number(a.settings.split_amazon ?? 50) });
+      const v = view(st);
+      const due = dueStatus(settlementDueDate(payMonth, dueDay), { paid: v.fullyPaid });
+      const pill = v.nothingDue ? '<span class="pill">Nothing due</span>' : v.fullyPaid ? `<span class="pill good">${ICONS.check} Paid</span>` : due.kind === 'overdue' ? `<span class="pill bad">${ICONS.alert} Overdue</span>` : `<span class="pill warn">${ICONS.clock} ${esc(due.text)}</span>`;
+      return { a, v, pill, signed: v.reverse ? -v.amount : v.amount };
+    });
+    const total = Math.round(per.reduce((t, x) => t + x.signed, 0) * 100) / 100;
+    return `<div class="card settle-card c-4">
+      <div class="settle-head"><span class="eyebrow">${ICONS.wallet} Partner settlement</span><span class="pill">${ICONS.calendar} ${monthLabel(payMonth, 'long')}</span></div>
+      <div class="settle-amt num" id="settle-value">${money(Math.abs(total), 2)}</div>
+      <div class="settle-hint">${total < 0 ? `${esc(A)} sends ${esc(B)}` : `${esc(B)} sends ${esc(A)}`} across every account · each account is paid on its own</div>
+      <div class="settle-track" role="list">${per.map((x) => `<a class="settle-row" role="listitem" href="#/settlement" data-acct-go="${esc(x.a.id)}"><span class="m">${esc(x.a.name)}</span><span class="amt num">${x.v.reverse ? `<span class="dir">${esc(x.v.from)} → ${esc(x.v.to)}</span>` : ''}${money(x.v.amount, 2)}</span>${x.pill}</a>`).join('')}</div>
+    </div>`;
+  })() : null;
+
   // ---- how the profit adds up, in plain words
   const half = Math.round(((biz * split) / 100) * 100) / 100;
   const addsUp = `<div class="card c-4"><div class="card-h"><div><h3>How the profit adds up</h3><div class="sub">${esc(when)}</div></div></div><div class="card-b"><div class="ov-sum" style="border-top:0;margin-top:0">
@@ -230,7 +248,7 @@ export function renderOverview(el) {
     else if (cards.length === 2 && cards.every((x) => /\bc-4\b/.test(x))) list = cards.map((x) => x.replace(/\bc-4\b/, 'c-6'));
     return `<div class="grid g-12 ${first ? '' : 'mt'}">${list.join('')}</div>`;
   };
-  const row1 = [show('profit') && hero, show('owed') && settleCard].filter(Boolean);
+  const row1 = [show('profit') && hero, show('owed') && (combinedCard || settleCard)].filter(Boolean);
   const row2 = [show('attention') && attention, show('breakdown') && addsUp, show('promo') && promo].filter(Boolean);
   const row3 = [show('chart') && chartCard, show('recent') && recent].filter(Boolean);
   const row4 = [show('top') && topCard].filter(Boolean);
@@ -261,6 +279,7 @@ export function renderOverview(el) {
     });
   }
   $$('.ov-sales tr[data-id]', el).forEach((tr) => tr.addEventListener('click', () => openOrder(tr.dataset.id)));
+  $$('[data-acct-go]', el).forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); location.hash = '#/settlement'; switchAccount(a.dataset.acctGo); }));
 }
 
 // Robinhood-style running profit: the line is the running total over the time picked; drag or hover across it and the

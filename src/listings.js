@@ -4,7 +4,7 @@
 //                      snapshot row per business day.
 //   listingAnalytics(): listed-count growth, averages, top listings, traffic series, stale listings, sell-through and a
 //                      last-30-vs-previous-30 "drivers" comparison ("more listings but fewer sales?").
-import { q, getSetting, setSetting } from './db.js';
+import { q, getSetting, setSetting, accountState } from './db.js';
 import { businessDay } from './time.js';
 import * as ebay from './ebay.js'; // namespace import: works before ebayUserToken is exported (clear error instead of a crash)
 import { syncPromotions } from './promotions.js';
@@ -68,8 +68,8 @@ create table if not exists listing_traffic (
   synced_at    timestamptz default now()
 );
 `;
-let schemaReady = null;
-const ensureSchema = () => (schemaReady ||= q(LISTINGS_SCHEMA).catch((e) => { schemaReady = null; throw e; }));
+const S = accountState(() => ({ schemaReady: null, running: null }));
+const ensureSchema = () => { const st = S(); return (st.schemaReady ||= q(LISTINGS_SCHEMA).catch((e) => { st.schemaReady = null; throw e; })); };
 
 // ---------------- tiny dependency-free XML reader (enough for Trading API responses) ----------------
 const ENT = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
@@ -296,12 +296,12 @@ async function bulk(sql, rows, extra = []) {
 }
 
 // ---------------- sync ----------------
-let running = null;
 
 // Never throws. Pass { log } to append lines to syncEbay's log; { auth } overrides the token source (tests).
 export function syncListings({ log = null, auth = defaultAuth, now = () => new Date() } = {}) {
-  if (running) return running;
-  running = (async () => {
+  const st = S();
+  if (st.running) return st.running;
+  st.running = (async () => {
     const lines = [];
     const out = { ok: false, active: 0, pages: 0, newlyEnded: 0, traffic: 'not run', log: lines };
     try {
@@ -355,8 +355,8 @@ export function syncListings({ log = null, auth = defaultAuth, now = () => new D
     } catch {}
     if (Array.isArray(log)) log.push(...lines);
     return out;
-  })().finally(() => { running = null; });
-  return running;
+  })().finally(() => { st.running = null; });
+  return st.running;
 }
 
 // ---------------- analytics ----------------
@@ -421,6 +421,23 @@ const compare = (cur, prev) => ({
   change: cur !== null && prev !== null ? r4(cur - prev) : null,
   changePct: cur !== null && prev !== null && prev !== 0 ? Math.round(((cur - prev) / Math.abs(prev)) * 1000) / 10 : null,
 });
+
+// Every active listing with no views in the last 30 days (eBay's Sell Analytics listing traffic). Only when that 30-day
+// traffic has been synced: lifetime view counts can't say "none in the last 30 days", so then rows is null.
+export async function zeroViewListings({ now = new Date() } = {}) {
+  await ensureSchema();
+  const active = (await loadListings()).filter((l) => !l.ended);
+  const source = await attachViews(active);
+  const [period] = await q("select to_char(min(period_start), 'YYYY-MM-DD') as from_day, to_char(max(period_end), 'YYYY-MM-DD') as to_day from listing_traffic");
+  if (source !== 'analytics_30d') return { source, period: null, rows: null };
+  const nowMs = new Date(now).getTime();
+  const rows = active.filter((l) => l.views === 0).map((l) => ({
+    itemId: l.itemId, title: l.title, sku: l.sku, price: l.price, url: l.url, started: l.startTime ? l.startTime.slice(0, 10) : '',
+    daysLive: Math.max(0, Math.floor((nowMs - l.start.getTime()) / DAY_MS)), watchers: l.watchers ?? 0, sold: l.quantitySold || 0,
+    impressions: l.impressions ?? 0, available: l.quantityAvailable,
+  })).sort((a, b) => b.daysLive - a.daysLive || a.itemId.localeCompare(b.itemId));
+  return { source, period, rows };
+}
 
 export async function listingAnalytics({ now = new Date() } = {}) {
   await ensureSchema();

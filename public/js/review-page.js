@@ -4,6 +4,8 @@ import { $$, esc, money, count, fmtDate, ICONS, api, toast, azDay } from './util
 import { settlePeriodOf } from './settlement.js';
 import { emailFailures, emailFailureText } from './health.js';
 import { state, loadData, renderPage, openOrder, statusPill, viewStatus } from './app.js';
+// On ENTIRE BUSINESS every item is named with its account and the buttons are left out (fix it in that account)
+const acctTag = (x) => (state.data?.combined && x?.account_name ? `<span class="pill" style="margin-right:6px">${esc(x.account_name)}</span>` : '');
 
 // An eBay charge with no order that has the same amount as a monthly cost entered for that pay period (or its calendar
 // month) is already in the numbers, e.g. the $74.95 store subscription entered as "eBay Sub Cost"
@@ -37,13 +39,13 @@ export function renderReview(el) {
   const out = [];
 
   if (x.waiting.length) out.push(sec(ICONS.mail, 'warn', 'Sales waiting for the Amazon cost', 'Not in profit or the payment until the Amazon order is found. Usually the email just hasn’t arrived yet; open a sale to check email now or type the cost.',
-    `<table class="simple rv-rows"><tbody>${x.waiting.map((o) => `<tr data-id="${esc(o.order_id)}"><td class="muted" style="white-space:nowrap">${fmtDate(o.created_at)}</td><td>${esc(String(o.title || '').slice(0, 70))}</td><td class="r num">${money(o.revenue, 2)} sale</td><td>${statusPill(viewStatus(o))}</td></tr>`).join('')}</tbody></table>`, x.waiting.length));
+    `<table class="simple rv-rows"><tbody>${x.waiting.map((o) => `<tr data-id="${esc(o.order_id)}"><td class="muted" style="white-space:nowrap">${fmtDate(o.created_at)}</td><td>${acctTag(o)}${esc(String(o.title || '').slice(0, 70))}</td><td class="r num">${money(o.revenue, 2)} sale</td><td>${statusPill(viewStatus(o))}</td></tr>`).join('')}</tbody></table>`, x.waiting.length));
 
   if (x.held.length) out.push(sec(ICONS.alert, 'bad', 'Sales held for a check', 'An Amazon email that may have the cost couldn’t be read, or the sale may already be on a monthly sheet. Open it to link the right purchase or type the cost.',
-    `<table class="simple rv-rows"><tbody>${x.held.map((o) => `<tr data-id="${esc(o.order_id)}"><td class="muted" style="white-space:nowrap">${fmtDate(o.created_at)}</td><td>${esc(String(o.title || '').slice(0, 70))}</td><td class="r num">${money(o.revenue, 2)} sale</td><td>${statusPill(viewStatus(o))}</td></tr>`).join('')}</tbody></table>`, x.held.length));
+    `<table class="simple rv-rows"><tbody>${x.held.map((o) => `<tr data-id="${esc(o.order_id)}"><td class="muted" style="white-space:nowrap">${fmtDate(o.created_at)}</td><td>${acctTag(o)}${esc(String(o.title || '').slice(0, 70))}</td><td class="r num">${money(o.revenue, 2)} sale</td><td>${statusPill(viewStatus(o))}</td></tr>`).join('')}</tbody></table>`, x.held.length));
 
   if (x.emails.length) out.push(sec(ICONS.mail, 'warn', 'Amazon emails the reader didn’t understand', 'Email is working. These are usually multi-item, gift-card or partly cancelled orders. If one is for an eBay sale, open that sale and type its cost. If it isn’t (a personal order), dismiss it.',
-    `<div class="rv-list">${x.emails.map((f) => `<div class="rv-item"><div><div>${esc(f.subject || 'Amazon email')}</div><div class="muted">${esc([(f.order_ids || []).join(' '), f.received_at ? fmtDate(f.received_at) : '', f.note || ''].filter(Boolean).join(' · ') || emailFailureText(f))}</div></div>${f.message_id ? `<button class="btn sm" data-dismiss="${esc(f.message_id)}">Dismiss</button>` : ''}</div>`).join('')}</div>`, x.emails.length));
+    `<div class="rv-list">${x.emails.map((f) => `<div class="rv-item"><div><div>${acctTag(f)}${esc(f.subject || 'Amazon email')}</div><div class="muted">${esc([(f.order_ids || []).join(' '), f.received_at ? fmtDate(f.received_at) : '', f.note || ''].filter(Boolean).join(' · ') || emailFailureText(f))}</div></div>${f.message_id ? `<button class="btn sm" data-dismiss="${esc(f.message_id)}">Dismiss</button>` : ''}</div>`).join('')}</div>`, x.emails.length));
 
   if (x.refunds.length) out.push(sec(ICONS.alert, 'bad', 'Amazon refunds not matched to a sale', 'Amazon refunded Myles, but the refund couldn’t be tied to exactly one sale, so it isn’t taken off the payment yet. Set it on the right sale in the Editor (Amazon refund column).',
     `<div class="rv-list">${x.refunds.map((r) => `<div class="rv-item"><div><div>${money(r.amount, 2)}${r.title ? ` for “${esc(String(r.title).slice(0, 60))}”` : ''}</div><div class="muted">Amazon order ${esc(r.amazon_order_id || '')} · ${fmtDate(r.received_at)}</div></div><a class="btn sm" href="#/editor">Open Editor</a></div>`).join('')}</div>`, x.refunds.length));
@@ -61,10 +63,12 @@ export function renderReview(el) {
 
   if (x.matches) out.push(sec(ICONS.link, 'info', 'Possible matches to confirm', 'Amazon orders that might belong to a sale but need a yes or no from a person.', `<a class="btn sm" href="#/editor?tab=matches">Review ${count(x.matches)} in the Editor</a>`, x.matches));
 
-  el.innerHTML = `<div class="rv-top">${open ? `<b>${count(open)} thing${open === 1 ? '' : 's'} to look at.</b> Nothing here changes a payment that has already been made.` : `${ICONS.circleCheck}<b>Nothing to review.</b> Every sale has its cost and nothing needs a look.`}</div>
+  const ro = Boolean(d.combined);
+  el.innerHTML = `${ro ? '<div class="ov-note" style="margin:0 0 10px">ENTIRE BUSINESS shows every account’s items. To fix one, switch to its account at the top left.</div>' : ''}<div class="rv-top">${open ? `<b>${count(open)} thing${open === 1 ? '' : 's'} to look at.</b> Nothing here changes a payment that has already been made.` : `${ICONS.circleCheck}<b>Nothing to review.</b> Every sale has its cost and nothing needs a look.`}</div>
     <div class="stack">${out.join('')}</div>`;
 
   $$('.rv-rows tr[data-id]', el).forEach((tr) => tr.addEventListener('click', () => openOrder(tr.dataset.id)));
+  if (ro) $$('[data-dismiss], [data-charge]', el).forEach((b) => b.remove());
   $$('[data-dismiss]', el).forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('Dismiss this email? Only if it isn’t for an eBay sale (a personal order, or one already costed). It stays in the email log in Settings.')) return;
     try { await api('/api/email/failed/dismiss', { method: 'POST', body: { message_id: b.dataset.dismiss } }); toast('Dismissed', 'good'); await loadData(); renderPage(); } catch (e) { toast(e.message, 'bad'); }

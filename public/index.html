@@ -19,12 +19,16 @@
 <body>
   <div class="app">
     <aside class="sidebar" id="sidebar" aria-label="Navigation">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l5-5 4 3 7-8"/><path d="M15 7h5v5"/></svg></div>
-        <div>
-          <div class="brand-name">Dropship Ledger</div>
-          <div class="brand-sub">eBay × Amazon profit</div>
-        </div>
+      <div class="acct-wrap">
+        <button class="brand acct-btn" id="acct-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="Switch account">
+          <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l5-5 4 3 7-8"/><path d="M15 7h5v5"/></svg></div>
+          <div class="acct-text">
+            <div class="brand-name" id="acct-name">Dropship Ledger</div>
+            <div class="brand-sub" id="acct-sub">eBay × Amazon profit</div>
+          </div>
+          <svg class="acct-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+        </button>
+        <div class="acct-menu" id="acct-menu" role="menu" hidden></div>
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="sidebar-foot" id="sidebar-foot"></div>

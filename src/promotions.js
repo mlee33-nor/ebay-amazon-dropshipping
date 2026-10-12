@@ -3,7 +3,7 @@
 //   syncPromotions():       campaigns + their ads from the Sell Marketing API (called from syncListings)
 //   promotionAnalytics():   promoted vs not promoted, campaigns, ad rates, ad fees, new listings left unpromoted,
 //                           and 30-day performance of each group (views, times shown, orders)
-import { q, getSetting, setSetting } from './db.js';
+import { q, getSetting, setSetting, accountState } from './db.js';
 
 const MARKETING_SCOPE = 'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly';
 const api = () => process.env.EBAY_API_BASE || 'https://api.ebay.com';
@@ -34,8 +34,8 @@ create table if not exists listing_ads (
 );
 create index if not exists listing_ads_campaign_idx on listing_ads(campaign_id);
 `;
-let ready = null;
-const ensure = () => (ready ||= q(PROMOTIONS_SCHEMA).catch((e) => { ready = null; throw e; }));
+const S = accountState(() => ({ ready: null }));
+const ensure = () => { const st = S(); return (st.ready ||= q(PROMOTIONS_SCHEMA).catch((e) => { st.ready = null; throw e; })); };
 
 const num = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 const r1 = (x) => Math.round(x * 10) / 10;

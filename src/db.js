@@ -4,6 +4,7 @@ import pg from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Load .env for local runs (Railway injects env vars directly)
@@ -13,7 +14,36 @@ try { process.loadEnvFile?.(path.join(ROOT, '.env')); } catch {}
 // Arizona reader sees as the day before (a payment on Oct 26 would read as Oct 25).
 pg.types.setTypeParser(1082, (v) => v);
 
-let impl = null;
+let impl = null; // the main account (MDBIZ MAIN)
+
+// ---- accounts. Each eBay store is an account with its own Postgres schema (sales, costs, payments, settings, its own
+// eBay connection and Amazon inbox). Every query runs against the account of the request it serves: the server wraps
+// each request (and each background sync) in withAccount(id, ...), and q() picks that account's connection. Code
+// that never names an account works on the main one, exactly as before accounts existed.
+export const MAIN = 'main';
+const als = new AsyncLocalStorage();
+const extra = new Map(); // account id -> connection, for accounts other than the main one
+let poolConf = null; // how to open another account's connection: { url, ssl, base }
+export const currentAccount = () => als.getStore() || MAIN;
+export const withAccount = (id, fn) => als.run(id || MAIN, fn);
+export const accountIds = () => [MAIN, ...extra.keys()];
+export const hasAccount = (id) => id === MAIN || extra.has(id);
+function cur() {
+  const a = currentAccount();
+  const c = a === MAIN ? impl : extra.get(a);
+  if (!c) throw new Error(`Unknown account: ${a}`);
+  return c;
+}
+// Module state that belongs to one account (an eBay token, a sync in progress): one copy per account
+export function accountState(init) {
+  const m = new Map();
+  return () => { const a = currentAccount(); if (!m.has(a)) m.set(a, init()); return m.get(a); };
+}
+// A setting from the environment for the current account: EMAIL_USER for the main one, EMAIL_USER_<ID> for another
+export function accountEnv(name) {
+  const a = currentAccount();
+  return a === MAIN ? process.env[name] : process.env[`${name}_${a.toUpperCase()}`];
+}
 
 const SCHEMA = `
 create table if not exists ebay_orders (
@@ -366,6 +396,7 @@ export async function initDb() {
     });
     // Keep every table in its own schema so the app can share a Supabase project with other apps safely
     const schema = (process.env.DB_SCHEMA || 'dropship').replace(/[^a-z0-9_]/gi, '');
+    poolConf = { url, ssl: local ? false : { rejectUnauthorized: false }, base: schema };
     pool.on('connect', (client) => {
       client.query(`create schema if not exists ${schema}; set search_path to ${schema}, public`).catch((e) => console.error('schema setup failed', e.message));
     });
@@ -394,6 +425,7 @@ export async function initDb() {
       await embedded.start();
     }
     const pool = new pg.Pool({ connectionString: url, max: 5 });
+    poolConf = { url, ssl: false, base: 'acct' }; // the main account uses public here; others get acct_<id>
     impl = {
       kind: 'local-postgres',
       query: (text, params) => pool.query(text, params),
@@ -410,7 +442,55 @@ export async function initDb() {
   // eBay's extra columns (refs, hold ids, per-step sync status) are added here too, so the money pages that read them
   // work before the first eBay sync after a deploy
   await (await import('./ebay.js')).ensureEbaySchema(true);
+  // The other accounts (registered in the main schema) each get their own connection and tables
+  await impl.exec('create table if not exists accounts (id text primary key, name text not null, created_at timestamptz not null default now())');
+  for (const { id } of (await impl.query('select id from accounts order by created_at')).rows) await openAccount(id);
   return impl.kind;
+}
+
+async function openAccount(id) {
+  if (extra.has(id)) return;
+  const schema = `${poolConf.base}_${id}`.replace(/[^a-z0-9_]/gi, '');
+  const pool = new pg.Pool({ connectionString: poolConf.url, ssl: poolConf.ssl, max: 3 });
+  pool.on('connect', (client) => {
+    client.query(`create schema if not exists ${schema}; set search_path to ${schema}, public`).catch((e) => console.error('schema setup failed', e.message));
+  });
+  const c = { kind: impl.kind, schema, query: (text, params) => pool.query(text, params), exec: (text) => pool.query(text), client: () => pool.connect(), close: () => pool.end() };
+  extra.set(id, c);
+  await withAccount(id, async () => {
+    await c.exec(SCHEMA);
+    await (await import('./ebay.js')).ensureEbaySchema(true);
+  });
+}
+
+// Every account, the main one first: [{ id, name }]
+export async function listAccounts() {
+  return withAccount(MAIN, async () => {
+    const rows = await q('select id, name from accounts order by created_at');
+    return [{ id: MAIN, name: (await getSetting('account_name')) || 'MDBIZ MAIN' }, ...rows];
+  });
+}
+export async function createAccount(name) {
+  const clean = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  if (!clean) throw new Error('Give the account a name');
+  return withAccount(MAIN, async () => {
+    const base = clean.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 12) || 'store';
+    const taken = new Set([MAIN, 'all', ...(await q('select id from accounts')).map((r) => r.id)]);
+    let id = base;
+    for (let n = 2; taken.has(id); n++) id = `${base}${n}`;
+    await q('insert into accounts (id, name) values ($1, $2)', [id, clean]);
+    await openAccount(id);
+    return { id, name: clean };
+  });
+}
+export async function renameAccount(id, name) {
+  const clean = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  if (!clean) throw new Error('Give the account a name');
+  return withAccount(MAIN, async () => {
+    if (id === MAIN) await setSetting('account_name', clean);
+    else if (!(await q('update accounts set name = $2 where id = $1 returning id', [id, clean])).length) throw new Error('No such account');
+    return { id, name: clean };
+  });
 }
 
 async function canConnect(url) {
@@ -419,6 +499,8 @@ async function canConnect(url) {
 }
 
 export async function closeDb() {
+  for (const c of extra.values()) await c.close().catch(() => {});
+  extra.clear();
   await impl?.close?.();
 }
 
@@ -428,7 +510,7 @@ export function dbKind() {
 
 // Run several statements as one: all of them happen or none do, and other readers never see a half-done state
 export async function withTransaction(fn) {
-  const client = await impl.client();
+  const client = await cur().client();
   try {
     await client.query('begin');
     const out = await fn(async (text, params = []) => (await client.query(text, params)).rows);
@@ -443,7 +525,7 @@ export async function withTransaction(fn) {
 }
 
 export async function q(text, params = []) {
-  const res = await impl.query(text, params);
+  const res = await cur().query(text, params);
   return res.rows;
 }
 

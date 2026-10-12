@@ -2,7 +2,7 @@
 // Finances API (exact fees, ad fees, and every other money record), Post-Order API (returns).
 // Each sync records a status per step (orders, finances, returns); a failed or skipped step makes the sync not ok.
 import crypto from 'node:crypto';
-import { q, one, getSetting, setSetting } from './db.js';
+import { q, one, getSetting, setSetting, accountState, currentAccount, MAIN } from './db.js';
 import { runMatcher } from './matcher.js';
 import { matchLedger } from './ledger.js';
 import { syncListings } from './listings.js';
@@ -47,7 +47,8 @@ const SCOPE_SETS = [
   ['https://api.ebay.com/oauth/api_scope/sell.fulfillment'],
 ];
 
-let tokenCache = { token: null, exp: 0, scopes: null };
+// One copy per account (each eBay store has its own connection, token and sync)
+const S = accountState(() => ({ tokenCache: { token: null, exp: 0, scopes: null }, schemaReady: null, connection: null, running: null }));
 
 // Columns the eBay sync adds to the tables src/db.js creates. Run once per process (startup and before the first sync);
 // every statement is safe to run again. Pass true to run it again (a test standing in for a restart).
@@ -58,10 +59,9 @@ let tokenCache = { token: null, exp: 0, scopes: null };
 //   ebay_returns: recheck_error / recheck_failed_at = why and since when an open return couldn't be fetched by id.
 //   sync_log: status = ok | partial (a step failed or was skipped) | failed; steps = { orders, finances, returns }:
 //     { ok, status, at, message, warnings }.
-let schemaReady = null;
 export function ensureEbaySchema(again = false) {
-  if (!schemaReady || again) {
-    schemaReady = (async () => {
+  if (!S().schemaReady || again) {
+    S().schemaReady = (async () => {
       for (const sql of [
         `alter table ebay_transactions add column if not exists refs jsonb default '[]'::jsonb`,
         'alter table ebay_transactions add column if not exists hold_id text',
@@ -84,21 +84,21 @@ export function ensureEbaySchema(again = false) {
         `update ebay_transactions set payout_id = raw->>'payoutId' where payout_id is null and raw ? 'payoutId'`,
         `update ebay_transactions set memo = raw->>'transactionMemo' where memo is null and raw ? 'transactionMemo'`,
       ]) await q(sql);
-    })().catch((e) => { schemaReady = null; throw e; });
+    })().catch((e) => { S().schemaReady = null; throw e; });
   }
-  return schemaReady;
+  return S().schemaReady;
 }
 
 // The refresh token comes from the in-app "Connect eBay" flow (stored in settings) and falls back to
 // EBAY_REFRESH_TOKEN. eBay refresh tokens last ~18 months; the dashboard warns before they expire.
-let connection = null; // { refresh_token, refresh_expires_at, connected_at, scopes }
+// S().connection: { refresh_token, refresh_expires_at, connected_at, scopes }
 export async function loadEbayConnection() {
   await ensureEbaySchema();
-  connection = await getSetting('ebay_oauth');
-  tokenCache = { token: null, exp: 0, scopes: null };
-  return connection;
+  S().connection = await getSetting('ebay_oauth');
+  S().tokenCache = { token: null, exp: 0, scopes: null };
+  return S().connection;
 }
-const refreshToken = () => connection?.refresh_token || process.env.EBAY_REFRESH_TOKEN || null;
+const refreshToken = () => S().connection?.refresh_token || (currentAccount() === MAIN ? process.env.EBAY_REFRESH_TOKEN : null) || null;
 const basicAuth = () => Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64');
 
 export function ebayConfigured() {
@@ -142,13 +142,13 @@ export async function ebayConnectWithCode(code) {
     scopes: SCOPE_SETS[0],
   };
   await setSetting('ebay_oauth', value);
-  connection = value;
-  tokenCache = { token: body.access_token, exp: Date.now() + (body.expires_in || 7200) * 1000, scopes: SCOPE_SETS[0] };
+  S().connection = value;
+  S().tokenCache = { token: body.access_token, exp: Date.now() + (body.expires_in || 7200) * 1000, scopes: SCOPE_SETS[0] };
   return value;
 }
 
 async function getAccessToken() {
-  if (tokenCache.token && Date.now() < tokenCache.exp - 60_000) return tokenCache.token;
+  if (S().tokenCache.token && Date.now() < S().tokenCache.exp - 60_000) return S().tokenCache.token;
   if (!ebayConfigured()) throw new Error(`eBay not configured: missing ${ebayMissing().join(', ')}`);
   const basic = basicAuth();
   let lastErr;
@@ -164,7 +164,7 @@ async function getAccessToken() {
     });
     const body = await res.json().catch(() => ({}));
     if (res.ok && body.access_token) {
-      tokenCache = { token: body.access_token, exp: Date.now() + body.expires_in * 1000, scopes };
+      S().tokenCache = { token: body.access_token, exp: Date.now() + body.expires_in * 1000, scopes };
       return body.access_token;
     }
     lastErr = `${res.status} ${body.error || ''} ${body.error_description || ''}`.trim();
@@ -176,7 +176,7 @@ async function getAccessToken() {
 // OAuth user token + the scopes it was granted, for read-only modules outside this file (src/listings.js)
 export async function ebayUserToken() {
   const token = await getAccessToken();
-  return { token, scopes: tokenCache.scopes || [] };
+  return { token, scopes: S().tokenCache.scopes || [] };
 }
 
 async function ebayGet(url, { iaf = false } = {}) {
@@ -452,7 +452,7 @@ async function syncFinances(log) {
   // Get (or refresh) the token first: the scopes are only known once a token was granted. A refresh that fails (eBay's
   // sign-in down, network) then fails this step with the real error instead of reading as a missing scope.
   await getAccessToken();
-  if (!tokenCache.scopes?.some((s) => s.includes('sell.finances'))) {
+  if (!S().tokenCache.scopes?.some((s) => s.includes('sell.finances'))) {
     const why = 'token lacks sell.finances scope; using order-level fees, no ad fees or refund dates. Reconnect eBay';
     log.push(`finances: skipped (${why})`);
     return { skipped: why };
@@ -655,10 +655,8 @@ export async function upsertReturn(r) {
   );
 }
 
-let running = null;
-
 export async function syncEbay() {
-  if (running) return running;
+  if (S().running) return S().running;
   const run = (async () => {
     await ensureEbaySchema();
     const [{ id }] = await q('insert into sync_log (started_at) values (now()) returning id');
@@ -708,9 +706,10 @@ export async function syncEbay() {
       return { ok: false, status: 'failed', steps, log };
     }
   })();
-  running = run;
+  S().running = run;
   // Cleared however the run ends, also when the schema check or the log row itself fails (before the try above)
-  const clear = () => { if (running === run) running = null; };
+  const st = S(); // captured: the run may settle outside this account's context
+  const clear = () => { if (st.running === run) st.running = null; };
   run.then(clear, clear);
   return run;
 }
@@ -757,14 +756,14 @@ export async function ebayStatus() {
     missing: ebayMissing(),
     canConnect: ebayCanConnect(),
     runameSet: Boolean(process.env.EBAY_RUNAME),
-    connectedAt: connection?.connected_at || null,
-    refreshExpiresAt: connection?.refresh_expires_at || null,
-    source: connection?.refresh_token ? 'connected' : process.env.EBAY_REFRESH_TOKEN ? 'env' : null,
+    connectedAt: S().connection?.connected_at || null,
+    refreshExpiresAt: S().connection?.refresh_expires_at || null,
+    source: S().connection?.refresh_token ? 'connected' : currentAccount() === MAIN && process.env.EBAY_REFRESH_TOKEN ? 'env' : null,
     // Only eBay saying the refresh token itself is bad means reconnect; a refresh that failed because eBay's sign-in
     // was down (5xx, network) clears up on its own
     needsReconnect: /invalid_grant|refresh token is invalid/i.test(last?.message || '') && !last?.ok,
-    running: Boolean(running),
-    scopes: tokenCache.scopes,
+    running: Boolean(S().running),
+    scopes: S().tokenCache.scopes,
     last,
     lastSuccess: lastOk?.finished_at || null,
     status,

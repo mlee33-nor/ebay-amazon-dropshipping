@@ -66,10 +66,16 @@ export const ago = (d) => {
   return `${Math.floor(s / 86400)}d ago`;
 };
 
+// The account (eBay store) this viewer is looking at: 'main', another account's id, or 'all' (ENTIRE BUSINESS).
+// Every request says which, so the server reads and writes that account's books only.
+export const accountId = () => { try { return localStorage.getItem('dd_account') || 'main'; } catch { return 'main'; } };
+export const setAccountId = (id) => { try { localStorage.setItem('dd_account', id); } catch {} };
+// A link to the server (a download, Connect eBay) for the current account
+export const apiLink = (path) => `${path}${path.includes('?') ? '&' : '?'}account=${encodeURIComponent(accountId())}`;
 export async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,
-    headers: opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json', ...(opts.headers || {}) } : opts.headers,
+    headers: { 'X-Account': accountId(), ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) },
     body: opts.body && !(opts.body instanceof FormData) && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body,
   });
   if (res.status === 401) { location.href = '/login'; throw new Error('Not logged in'); }

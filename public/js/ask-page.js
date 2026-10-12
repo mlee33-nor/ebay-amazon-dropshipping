@@ -2,7 +2,7 @@
 // from the same numbers and settlement math as every other page, and that answer is always shown first. The model's
 // friendly line goes under it, and is dropped when a figure in it doesn't match. While it works, the chat shows each
 // step as it happens, so it's obvious it's thinking.
-import { esc, ICONS } from './util.js';
+import { esc, ICONS, accountId } from './util.js';
 import { state } from './app.js';
 import { answerParts } from './ask-answer.js';
 
@@ -93,7 +93,7 @@ function setBusy(on) {
 
 // POST the question and follow the server's progress lines ({stage}, then {done, answer} or {error})
 async function streamAsk(body, onStep) {
-  const res = await fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const res = await fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Account': accountId() }, body: JSON.stringify(body) });
   if (res.status === 401) { location.href = '/login'; throw new Error('Not logged in'); }
   if (!res.ok || !res.body) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `Request failed (${res.status})`); }
   const reader = res.body.getReader();

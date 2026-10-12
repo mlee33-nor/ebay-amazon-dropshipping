@@ -5,14 +5,14 @@
 import crypto from 'node:crypto';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import { q, one, getSetting, setSetting } from './db.js';
+import { q, one, getSetting, setSetting, accountState, accountEnv } from './db.js';
 import { runMatcher, sharedOrderSuggestions } from './matcher.js';
 import { extractZip } from './amazon.js';
 import { businessDay, BUSINESS_TZ } from './time.js';
 import { settlePeriodOf } from '../public/js/settlement.js';
 
 export function emailConfigured() {
-  return Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASSWORD);
+  return Boolean(accountEnv('EMAIL_USER') && accountEnv('EMAIL_PASSWORD'));
 }
 
 const ORDER_RE = /\b(?:D\d{2}|\d{3})-\d{7}-\d{7}\b/g;
@@ -422,7 +422,7 @@ export async function applyCancellations() {
 
 const hashId = (parts) => `sha1:${crypto.createHash('sha1').update(parts.map((x) => String(x ?? '')).join('\u0000')).digest('hex')}`;
 const selfAddress = (from) => {
-  const me = String(process.env.EMAIL_USER || '').toLowerCase();
+  const me = String(accountEnv('EMAIL_USER') || '').toLowerCase();
   return Boolean(me) && String(from || '').toLowerCase().split(/[\s,;<>]+/).includes(me);
 };
 
@@ -454,12 +454,12 @@ export async function ingestMessage({ messageId, subject = '', text = '', html =
 
 // ---- mailbox access (IMAP). Tests swap in their own mailbox with useMailboxForTests().
 function imapSettings() {
-  const user = process.env.EMAIL_USER;
-  const host = process.env.EMAIL_IMAP_HOST || (/@(gmail|googlemail)\./i.test(user) ? 'imap.gmail.com'
+  const user = accountEnv('EMAIL_USER');
+  const host = accountEnv('EMAIL_IMAP_HOST') || (/@(gmail|googlemail)\./i.test(user) ? 'imap.gmail.com'
     : /@(outlook|hotmail|live|msn)\./i.test(user) ? 'outlook.office365.com'
     : /@yahoo\./i.test(user) ? 'imap.mail.yahoo.com'
     : /@(icloud|me|mac)\./i.test(user) ? 'imap.mail.me.com' : null);
-  const mailbox = process.env.EMAIL_MAILBOX || (host === 'imap.gmail.com' ? '[Gmail]/All Mail' : 'INBOX');
+  const mailbox = accountEnv('EMAIL_MAILBOX') || (host === 'imap.gmail.com' ? '[Gmail]/All Mail' : 'INBOX');
   return { user, host, mailbox };
 }
 
@@ -467,8 +467,8 @@ async function openImap() {
   const { user, host, mailbox } = imapSettings();
   if (!host) throw Object.assign(new Error('Set EMAIL_IMAP_HOST for this email provider'), { config: true });
   const client = new ImapFlow({
-    host, port: Number(process.env.EMAIL_IMAP_PORT || 993), secure: true,
-    auth: { user, pass: process.env.EMAIL_PASSWORD }, logger: false,
+    host, port: Number(accountEnv('EMAIL_IMAP_PORT') || 993), secure: true,
+    auth: { user, pass: accountEnv('EMAIL_PASSWORD') }, logger: false,
   });
   await client.connect();
   let lock;
@@ -530,11 +530,12 @@ async function storeReadError(messageId, subject, e) {
 
 const fmtFailed = (failed) => `${failed.length} Amazon email${failed.length > 1 ? 's' : ''} could not be read and need${failed.length > 1 ? '' : 's'} a look: ${failed.slice(0, 3).map((f) => `"${String(f.subject || '').slice(0, 60)}" (${f.reason})`).join('; ')}`;
 
-let running = null;
+const S = accountState(() => ({ running: null })); // one email check at a time, per account
 export async function syncEmail() {
   if (!emailConfigured()) return { ok: false, log: ['Email not configured: set EMAIL_USER and EMAIL_PASSWORD'] };
-  if (running) return running;
-  running = (async () => {
+  if (S().running) return S().running;
+  const st = S();
+  st.running = (async () => {
     const last = await getSetting('email_last_sync');
     const since = last
       ? new Date(new Date(last).getTime() - 3 * 86400_000)
@@ -600,10 +601,10 @@ export async function syncEmail() {
       await setSetting('email_last_result', { ok: false, connected: false, at: startedAt, log: [msg] });
       return { ok: false, log: [msg] };
     } finally {
-      running = null;
+      st.running = null;
     }
   })();
-  return running;
+  return st.running;
 }
 
 // Read every Amazon email again with the current parser, WITHOUT clearing anything first: costs, refunds and links
@@ -611,8 +612,9 @@ export async function syncEmail() {
 // changes. Never overlaps a sync (it waits for one in flight). Links, cost overrides and ignored flags are kept.
 export async function reprocessEmail() {
   if (!emailConfigured()) return { ok: false, log: ['Email not configured: set EMAIL_USER and EMAIL_PASSWORD'] };
-  while (running) await running.catch(() => {});
-  running = (async () => {
+  while (S().running) await S().running.catch(() => {});
+  const st = S();
+  st.running = (async () => {
     const startedAt = new Date().toISOString();
     const counts = { ok: 0, failed: 0, seen: 0 };
     const staged = [];
@@ -675,10 +677,10 @@ export async function reprocessEmail() {
       await setSetting('email_last_result', { ok: true, connected: true, failed: failed.length, at: startedAt, log });
       return { ok: failed.length === 0, log };
     } finally {
-      running = null;
+      st.running = null;
     }
   })();
-  return running;
+  return st.running;
 }
 
 // Emails from the last 60 days that could not be fully read and still leave something unsorted. An order email is
@@ -724,8 +726,8 @@ export async function emailStatus() {
   const [last, failed, sharedOrders] = await Promise.all([getSetting('email_last_result'), failedEmails(), sharedOrderSuggestions().catch(() => [])]);
   return {
     configured: emailConfigured(),
-    user: process.env.EMAIL_USER ? process.env.EMAIL_USER.replace(/^(.{2}).*(@.*)$/, '$1•••$2') : null,
-    running: Boolean(running),
+    user: accountEnv('EMAIL_USER') ? accountEnv('EMAIL_USER').replace(/^(.{2}).*(@.*)$/, '$1•••$2') : null,
+    running: Boolean(S().running),
     last,
     // Emails that couldn't be read: each one may be a sale without its Amazon cost
     failed,

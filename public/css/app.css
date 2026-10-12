@@ -1204,3 +1204,23 @@ tr.row-bad td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
 .rv-rows tr { cursor: pointer; }
 .rv-rows tr:hover td { background: var(--hover); }
 .ov-todo { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--ink-2); }
+
+/* ---------------------------------------------------------------- account switcher (top left) */
+.acct-wrap { position: relative; }
+.acct-btn { width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: var(--r-md); }
+.acct-btn:hover { background: var(--hover); }
+.acct-text { flex: 1; min-width: 0; }
+.acct-text .brand-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-chev { width: 16px; height: 16px; color: var(--ink-3); flex: none; }
+.acct-menu { position: absolute; left: 8px; right: 8px; top: calc(100% + 4px); z-index: 50; padding: 6px; border-radius: var(--r-lg); background: var(--el-2, var(--page)); border: 1px solid var(--line-strong, var(--line)); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; gap: 2px; }
+.acct-menu[hidden] { display: none; }
+.acct-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 8px 10px; border: 0; border-radius: var(--r-md); background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.acct-menu button span { font-size: 11.5px; color: var(--ink-3); }
+.acct-menu button b { font-size: 13.5px; }
+.acct-menu button.sub { padding-left: 22px; }
+.acct-menu button:hover, .acct-menu button.on { background: var(--hover); }
+.acct-menu button.on b { color: var(--accent-ink, var(--accent)); }
+.acct-sep { height: 1px; background: var(--line); margin: 4px 2px; }
+.acct-list { display: flex; flex-direction: column; }
+.acct-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.acct-row:last-child { border-bottom: 0; }
