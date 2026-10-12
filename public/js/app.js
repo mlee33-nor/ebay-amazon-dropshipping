@@ -1541,6 +1541,24 @@ function emailCard(em, mails) {
     ${mails.length ? `${h4('Recent Amazon emails')}<div class="table-wrap" style="max-height:320px;overflow:auto"><table class="simple"><tbody>${rows}</tbody></table></div>` : ''}`, { ...opts, right: em.running ? '<span class="pill info">Checking…</span>' : `<span class="pill ${em.last && !em.last.ok ? 'bad' : 'good'}">${em.last && !em.last.ok ? 'Failing' : 'Connected'}</span>` });
 }
 
+// ---------------------------------------------------------------- staying current
+// The server checks eBay and the Amazon inbox every 30 minutes; the page picks up what they found every 5 minutes and
+// whenever the tab comes back into view. Only the Overview and Review redraw (nothing to lose there); other pages
+// just update the menu counts, so a half-typed cost or an open drawer is never wiped.
+const LIVE_PAGES = new Set(['overview', 'review']);
+let lastLoad = Date.now();
+async function refreshQuietly() {
+  if (document.hidden || !state.data || Date.now() - lastLoad < 60_000) return;
+  lastLoad = Date.now();
+  try {
+    await loadData();
+    const busy = document.activeElement?.matches?.('input, textarea, select') || document.querySelector('.drawer.open');
+    if (LIVE_PAGES.has(state.page) && !busy) renderPage();
+  } catch {}
+}
+setInterval(refreshQuietly, 5 * 60_000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuietly(); });
+
 // ---------------------------------------------------------------- boot
 renderRangeSeg();
 route();
