@@ -82,7 +82,9 @@ node scripts/stress-test.js 7 realistic
    Alternative: set `INBOUND_TOKEN` and POST emails to `/api/email/inbound` from Zapier/Make/Apps Script.
 4. **Railway**: New project → Deploy from this GitHub repo → Variables: everything from `.env.example`, plus
    `DASHBOARD_PASSWORD` and `SESSION_SECRET` (any long random string). Railway runs `scripts/start.sh` and health-checks `/api/health`.
-5. **Ask AI model (optional)**: any OpenAI-compatible API reads every question and writes the answer from the
+5. **Ask AI model (optional)**: with `ANTHROPIC_API_KEY` set, Anthropic answers every question (model: `ANTHROPIC_MODEL`,
+   default `claude-sonnet-5-5`; `claude-haiku-5-5` is cheaper and faster). The question and the figures behind each answer are
+   sent to Anthropic. Without an Anthropic key, any OpenAI-compatible API reads every question and writes the answer from the
    dashboard's own figures; a reply with any number that isn't in those figures is replaced by the dashboard's wording.
    The question **and the figures behind the answer** are sent to the model (FreeLLMAPI passes them to whichever
    provider it picks). For FreeLLMAPI running on your own PC over Tailscale:

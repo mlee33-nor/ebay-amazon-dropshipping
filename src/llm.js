@@ -6,7 +6,17 @@
 // proxy (Tailscale, set by scripts/start.sh).
 import { TOPICS } from './ask.js';
 
-export const llmConfigured = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
+// Two ways to reach a model: Anthropic's API (ANTHROPIC_API_KEY) or any OpenAI-compatible endpoint such as FreeLLMAPI
+// (AI_API_BASE + AI_API_KEY). With an Anthropic key, Anthropic answers everything (no FreeLLMAPI, so nothing depends on
+// a PC being on); without one, the OpenAI-compatible endpoint does.
+const anthropicOn = () => Boolean(process.env.ANTHROPIC_API_KEY);
+const compatOn = () => Boolean(process.env.AI_API_BASE && process.env.AI_API_KEY);
+export const llmConfigured = () => anthropicOn() || compatOn();
+const ANTHROPIC_DEFAULT = 'claude-sonnet-5-5';
+const anthropicModel = () => process.env.ANTHROPIC_MODEL || ANTHROPIC_DEFAULT;
+const anthropicBase = () => String(process.env.ANTHROPIC_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
+const providers = () => (anthropicOn() ? ['anthropic'] : compatOn() ? ['compat'] : []);
+export const llmProvider = () => (anthropicOn() ? `Anthropic ${anthropicModel()}` : compatOn() ? 'OpenAI-compatible' : null);
 const base = () => String(process.env.AI_API_BASE || '').replace(/\/+$/, '');
 const model = () => process.env.AI_MODEL || 'auto';
 
@@ -59,8 +69,29 @@ async function send(url, { method = 'GET', headers = {}, body, signal } = {}) {
   return { ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text, json: async () => JSON.parse(text) };
 }
 
-// One chat request: the reply text, or null for an error reply
-async function chat(messages, signal, { maxTokens = 800 } = {}) {
+// One chat request to the provider for this try: the reply text, or null for an error reply
+async function chat(messages, signal, { maxTokens = 800, attempt = 0 } = {}) {
+  const list = providers();
+  const which = list[Math.min(attempt, list.length - 1)];
+  return which === 'anthropic' ? chatAnthropic(messages, signal, maxTokens) : chatCompat(messages, signal, maxTokens);
+}
+
+// Anthropic Messages API. The system prompt goes in "system"; the key is sent only to Anthropic and never logged.
+async function chatAnthropic(messages, signal, maxTokens) {
+  const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const res = await fetch(`${anthropicBase()}/v1/messages`, {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model: anthropicModel(), max_tokens: maxTokens, temperature: 0, system, messages: messages.filter((m) => m.role !== 'system') }),
+  });
+  if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 200)}`); return null; }
+  const body = await res.json();
+  if (body?.stop_reason === 'max_tokens') { console.error('AI model (Anthropic): reply was cut off, asking again'); return null; }
+  return (body?.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('') || null;
+}
+
+async function chatCompat(messages, signal, maxTokens) {
   const res = await send(`${base()}/chat/completions`, {
     method: 'POST',
     signal,
@@ -78,13 +109,14 @@ async function chat(messages, signal, { maxTokens = 800 } = {}) {
 // provider). The first gets 40% of the time, the second the rest, so the whole wait is at most timeoutMs.
 async function twoTries(fn, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  let tries = 0;
   for (const ms of [Math.round(timeoutMs * 0.4), null]) { // a stalled first provider is dropped sooner
     const limit = ms ?? deadline - Date.now();
     if (limit < 50) break;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), limit);
     try {
-      const r = await fn(ctl.signal);
+      const r = await fn(ctl.signal, tries++);
       if (r) return r;
     } catch (e) {
       console.error(`AI model: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
@@ -102,8 +134,8 @@ export async function routeQuestion(question, { prev = null, timeoutMs = Number(
   if (!llmConfigured()) return null;
   const about = prev?.intent ? [prev.intent, prev.period?.label, Array.isArray(prev.product) && prev.product.length ? `product "${prev.product.join(' ')}"` : null].filter(Boolean).join(', ') : '';
   const before = about ? `\n(The previous question was about: ${about}. A short follow-up like "and July?" or "what about refunds" keeps that period and product unless it names new ones.)` : '';
-  return twoTries(async (signal) => {
-    const r = firstJson(await chat([{ role: 'system', content: SYSTEM + before }, { role: 'user', content: String(question).slice(0, 500) }], signal));
+  return twoTries(async (signal, attempt) => {
+    const r = firstJson(await chat([{ role: 'system', content: SYSTEM + before }, { role: 'user', content: String(question).slice(0, 500) }], signal, { attempt }));
     if (!r || typeof r.topic !== 'string' || !TOPICS[r.topic]) return null;
     const str = (v) => (typeof v === 'string' ? v.slice(0, 80) : '');
     return { topic: r.topic, period: str(r.period), compare_to: str(r.compare_to), product: str(r.product) };
@@ -272,8 +304,8 @@ export function checkReply(text, facts, question = '') {
 export async function writeAnswer(question, facts, { timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 40000) } = {}) {
   if (!llmConfigured()) return null;
   const lines = factLines(facts);
-  return twoTries(async (signal) => {
-    const out = await chat([{ role: 'system', content: WRITER }, { role: 'user', content: `Question: ${String(question).slice(0, 500)}\n\nFacts:\n${lines.map((l) => `- ${l}`).join('\n')}` }], signal, { maxTokens: 1200 });
+  return twoTries(async (signal, attempt) => {
+    const out = await chat([{ role: 'system', content: WRITER }, { role: 'user', content: `Question: ${String(question).slice(0, 500)}\n\nFacts:\n${lines.map((l) => `- ${l}`).join('\n')}` }], signal, { maxTokens: 1200, attempt });
     const text = String(out || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     if (!text) return null;
     const bad = checkReply(text, facts, question);
@@ -287,6 +319,18 @@ export async function checkModel({ timeoutMs = 15000 } = {}) {
   if (!llmConfigured()) return false;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  if (anthropicOn()) {
+    try {
+      const res = await fetch(`${anthropicBase()}/v1/models`, { signal: ctl.signal, headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' } });
+      console.log(res.ok ? `AI model: Anthropic reachable, using ${anthropicModel()}` : `AI model: Anthropic answered ${res.status} (check ANTHROPIC_API_KEY)`);
+      return res.ok;
+    } catch (e) {
+      console.error(`AI model: can't reach Anthropic: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   try {
     const res = await send(`${base()}/models`, { signal: ctl.signal, headers: { authorization: `Bearer ${process.env.AI_API_KEY}` } });
     const body = await res.json().catch(() => null);

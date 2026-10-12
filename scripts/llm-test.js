@@ -1,4 +1,4 @@
-// Hosted AI model connector (OpenAI-compatible, e.g. FreeLLMAPI) against a mock server: reading a question sends only the
+// Hosted AI model connectors (Anthropic, and OpenAI-compatible e.g. FreeLLMAPI) against mock servers: reading a question sends only the
 // question text, a bad or slow reply is ignored, an unusable reply is asked once more, an unknown topic is never used,
 // and with AI_PROXY set the request goes through that proxy (Tailscale on Railway).
 import http from 'node:http';
@@ -24,6 +24,7 @@ const mock = http.createServer((req, res) => {
 await new Promise((r) => mock.listen(0, r));
 process.env.AI_API_BASE = `http://127.0.0.1:${mock.address().port}/v1/`;
 process.env.AI_API_KEY = 'test-key';
+process.env.ANTHROPIC_API_KEY = ''; // a real key in .env is never used by tests
 process.env.DATABASE_URL = '';
 const { routeQuestion, llmConfigured } = await import('../src/llm.js');
 
@@ -119,6 +120,58 @@ await check('with AI_PROXY the request goes through the proxy', async () => {
   assert.equal(seen.at(-1).auth, 'Bearer test-key');
   delete process.env.AI_PROXY;
 });
+// ---- Anthropic: with ANTHROPIC_API_KEY set, every question goes to Anthropic's Messages API and nothing to the
+// OpenAI-compatible endpoint
+const ant = [];
+let antReply = { content: [{ type: 'text', text: '{"topic":"refunds","period":"september","compare_to":"","product":""}' }], stop_reason: 'end_turn' };
+let antStatus = 200;
+const anthropic = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    ant.push({ path: req.url, key: req.headers['x-api-key'], version: req.headers['anthropic-version'], auth: req.headers.authorization, body: JSON.parse(body || '{}') });
+    res.writeHead(antStatus, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(antReply));
+  });
+});
+await new Promise((r) => anthropic.listen(0, r));
+process.env.ANTHROPIC_API_BASE = 'http://127.0.0.1:' + anthropic.address().port;
+process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+delete process.env.ANTHROPIC_MODEL;
+await check('with an Anthropic key, Anthropic answers (Messages API, x-api-key, version header, Sonnet 5.5 by default)', async () => {
+  const before = seen.length;
+  assert.deepEqual(await routeQuestion('refunds in sept?'), { topic: 'refunds', period: 'september', compare_to: '', product: '' });
+  const r = ant.at(-1);
+  assert.equal(r.path, '/v1/messages');
+  assert.equal(r.key, 'sk-ant-test');
+  assert.equal(r.version, '2023-06-01');
+  assert.equal(r.auth, undefined, 'the key goes in x-api-key only');
+  assert.equal(r.body.model, 'claude-sonnet-5-5');
+  assert.ok(r.body.system && r.body.messages.every((m) => m.role !== 'system'), 'the system prompt is in "system"');
+  assert.equal(seen.length, before, 'nothing went to the OpenAI-compatible endpoint');
+});
+await check('ANTHROPIC_MODEL picks the model', async () => {
+  process.env.ANTHROPIC_MODEL = 'claude-haiku-5-5';
+  await routeQuestion('refunds in sept?');
+  assert.equal(ant.at(-1).body.model, 'claude-haiku-5-5');
+  delete process.env.ANTHROPIC_MODEL;
+});
+await check('an Anthropic error is retried on Anthropic, never sent elsewhere, and gives up cleanly', async () => {
+  const before = seen.length;
+  const n = ant.length;
+  antStatus = 529;
+  assert.equal(await routeQuestion('refunds in sept?'), null);
+  assert.equal(ant.length - n, 2, 'two tries');
+  assert.equal(seen.length, before);
+  antStatus = 200;
+});
+await check('a reply cut off at max_tokens is not used', async () => {
+  antReply = { content: [{ type: 'text', text: '{"topic":"refu' }], stop_reason: 'max_tokens' };
+  assert.equal(await routeQuestion('refunds in sept?'), null);
+});
+anthropic.close();
+process.env.ANTHROPIC_API_KEY = '';
+
 proxy.close();
 mock.close();
 console.log(failed ? '\nLLM: FAILED' : '\nLLM: ALL CHECKS PASSED');

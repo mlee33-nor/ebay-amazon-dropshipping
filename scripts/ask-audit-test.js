@@ -27,6 +27,7 @@ const mock = http.createServer((req, res) => {
 await new Promise((r) => mock.listen(0, r));
 process.env.AI_API_BASE = `http://127.0.0.1:${mock.address().port}/v1/`;
 process.env.AI_API_KEY = 'test-key';
+process.env.ANTHROPIC_API_KEY = ''; // a real key in .env is never used by tests
 
 const { initDb, q, closeDb } = await import('../src/db.js');
 const { importLedgerCsv } = await import('../src/ledger.js');
