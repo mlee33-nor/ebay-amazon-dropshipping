@@ -24,8 +24,14 @@ const ANTHROPIC_DEFAULT = 'claude-sonnet-5-5';
 const anthropicModel = () => process.env.ANTHROPIC_MODEL || ANTHROPIC_DEFAULT;
 const anthropicBase = () => String(process.env.ANTHROPIC_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
 export const llmProvider = () => (anthropicOn() ? `Anthropic ${anthropicModel()}` : null);
-// A key that isn't an API key (sk-ant-api...) is refused by the API; say so in the log instead of a bare 401
-const keyKind = () => { const k = anthropicKey(); return /^sk-ant-api\d\d-/.test(k) ? null : /^sk-ant-(\w+)/.test(k) ? `this is an sk-ant-${k.match(/^sk-ant-(\w+)/)[1]}- token, not an API key (sk-ant-api03-...)` : 'this does not look like an Anthropic API key (sk-ant-api03-...)'; };
+// A key the API won't take on its own, named in the log instead of a bare 401. A user key (sk-ant-usr-) works once
+// ANTHROPIC_WORKSPACE_ID says which workspace it is for.
+const keyKind = () => {
+  const k = anthropicKey();
+  if (/^sk-ant-api\d\d-/.test(k)) return null;
+  if (/^sk-ant-usr-/.test(k)) return process.env.ANTHROPIC_WORKSPACE_ID ? null : 'this is a user key (sk-ant-usr-): also set ANTHROPIC_WORKSPACE_ID (wrkspc_...)';
+  return 'this does not look like an Anthropic API key (sk-ant-api03-...)';
+};
 
 const SYSTEM = `You turn questions about an eBay-to-Amazon dropshipping business into a data lookup.
 Reply with one JSON object and nothing else: {"topic": "...", "period": "...", "compare_to": "...", "product": "..."}
@@ -70,12 +76,19 @@ async function chat(messages, signal, { maxTokens = 800 } = {}) {
   const res = await fetch(`${anthropicBase()}/v1/messages`, {
     method: 'POST',
     signal,
-    headers: { 'content-type': 'application/json', ...anthropicHeaders() },
-    body: JSON.stringify({ model: anthropicModel(), max_tokens: maxTokens, temperature: 0, system, messages: messages.filter((m) => m.role !== 'system') }),
+    // Current models think before answering (always on) and reject sampling settings such as temperature. Effort
+    // "low" suits short factual answers; max_tokens leaves room for the thinking as well as the reply. "fallbacks"
+    // lets Anthropic rerun a request one of its safety checks declines on another model, inside the same call.
+    headers: { 'content-type': 'application/json', 'anthropic-beta': 'server-side-fallback-2026-07-01', ...anthropicHeaders() },
+    body: JSON.stringify({
+      model: anthropicModel(), max_tokens: Math.max(maxTokens * 8, 8000), output_config: { effort: process.env.ANTHROPIC_EFFORT || 'low' },
+      fallbacks: 'default', system, messages: messages.filter((m) => m.role !== 'system'),
+    }),
   });
   if (!res.ok) { console.error(`AI model (Anthropic): ${res.status} ${(await res.text()).slice(0, 400)}${res.status === 401 && keyKind() ? ` (${keyKind()})` : ''}`); return null; }
   const body = await res.json();
   if (body?.stop_reason === 'max_tokens') { console.error('AI model (Anthropic): reply was cut off, asking again'); return null; }
+  if (body?.stop_reason === 'refusal') { console.error(`AI model (Anthropic): declined (${body.stop_details?.category || 'no category'})`); return null; }
   return (body?.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('') || null;
 }
 

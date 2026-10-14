@@ -121,6 +121,10 @@ await check('with an Anthropic key, Anthropic answers (Messages API, x-api-key, 
   assert.equal(r.version, '2023-06-01');
   assert.equal(r.auth, undefined, 'the key goes in x-api-key only');
   assert.equal(r.body.model, 'claude-sonnet-5-5');
+  assert.equal(r.body.temperature, undefined, 'no temperature: current models reject it (400)');
+  assert.equal(r.body.output_config?.effort, 'low');
+  assert.ok(r.body.max_tokens >= 8000, 'room for thinking as well as the reply');
+  assert.equal(r.body.fallbacks, 'default');
   assert.ok(r.body.system && r.body.messages.every((m) => m.role !== 'system'), 'the system prompt is in "system"');
 });
 await check('ANTHROPIC_WORKSPACE_ID is sent as anthropic-workspace-id (organization-level keys need it)', async () => {
