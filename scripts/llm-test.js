@@ -170,6 +170,18 @@ await check('the key also works saved under another spelling (anthropic_Api), an
   assert.equal(ant.length, n, 'an empty ANTHROPIC_API_KEY turns Anthropic off');
   delete process.env.anthropic_Api;
 });
+await check('an open question is answered from the business snapshot; an invented figure is dropped', async () => {
+  const { answerFreely } = await import('../src/llm.js');
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  const picture = { lines: ['[Profit, this pay cycle] Business profit this pay cycle: $30.07 from 23 sales.', '[Listings] You have 8,986 active eBay listings.'], partners: ['Myles', 'Drew'] };
+  antReply = { content: [{ type: 'text', text: 'You made **$30.07** from 23 sales this pay cycle. With 8,986 listings, ending the ones nobody views and adding new products is the way to grow.' }], stop_reason: 'end_turn' };
+  assert.ok((await answerFreely('how can we increase sales', picture) || '').includes('$30.07'));
+  assert.match(ant.at(-1).body.messages[0].content, /8,986 active eBay listings/, 'the snapshot is sent');
+  antReply = { content: [{ type: 'text', text: 'Raise prices 15% and you could make $500 more a month.' }], stop_reason: 'end_turn' };
+  let rejected = false;
+  assert.equal(await answerFreely('how can we increase sales', picture, { onReject: () => { rejected = true; } }), null);
+  assert.ok(rejected);
+});
 anthropic.close();
 process.env.ANTHROPIC_API_KEY = '';
 

@@ -28,7 +28,7 @@ function answerHtml(a) {
     parts.push(`<details class="ask-facts"><summary>${ICONS.search}<span>The numbers behind this</span></summary><div class="ask-facts-body">${f.bullets?.length ? bulletsHtml(f.bullets) : ''}${f.table ? tableHtml(f.table) : ''}</div></details>`);
   }
   if (a.understood) {
-    const by = p.friendly ? 'the dashboard’s answer, with a line from Claude' : a.writtenBy === 'dashboard' ? 'the dashboard’s own wording (the AI line didn’t match the numbers)' : a.writtenBy === 'dashboard-ai-off' ? 'the dashboard’s own wording (Claude couldn’t be reached; check the Anthropic key)' : a.understood.by === 'model' ? 'read by Claude' : 'built-in reader';
+    const by = a.writtenBy === 'claude' ? 'answered by Claude from your numbers' : p.friendly ? 'the dashboard’s answer, with a line from Claude' : a.writtenBy === 'dashboard' ? 'the dashboard’s own wording (the AI line didn’t match the numbers)' : a.writtenBy === 'dashboard-ai-off' ? 'the dashboard’s own wording (Claude couldn’t be reached; check the Anthropic key)' : a.understood.by === 'model' ? 'read by Claude' : 'built-in reader';
     parts.push(`<div class="ask-read" title="How the question was read. If it's wrong, rephrase the question.">${ICONS.search}<span>Answering: <b>${esc(a.understood.label)}</b>${a.understood.period ? ` · ${esc(a.understood.period)}` : ''}${a.understood.product ? ` · “${esc(a.understood.product)}”` : ''} · ${by}</span></div>`);
   }
   return parts.join('');

@@ -13,8 +13,8 @@ import { checkSheet } from './sheetcheck.js';
 import { businessDay } from './time.js';
 import { settleMonth, CYCLE_START } from '../public/js/settlement.js';
 import { syncEmail, emailStatus, emailConfigured, ingestMessage, reprocessEmail, dismissFailedEmail } from './email.js';
-import { ask } from './ask.js';
-import { routeQuestion, writeAnswer, llmConfigured, checkModel } from './llm.js';
+import { ask, businessPicture } from './ask.js';
+import { routeQuestion, writeAnswer, llmConfigured, checkModel, answerFreely } from './llm.js';
 import { syncListings, listingAnalytics, zeroViewListings } from './listings.js';
 import { promotionAnalytics, unpromotedListings } from './promotions.js';
 
@@ -640,15 +640,28 @@ app.post('/api/ask', async (req, res) => {
   try {
     const ai = llmConfigured();
     let a = null;
+    let open = false; // Claude read it as an open question ("how can we increase sales?", "hi", "what should we focus on?")
     if (ai) {
       step({ stage: 'reading' });
       const route = await routeQuestion(question, { prev: context });
-      if (route && route.topic !== 'other') { const b = await ask(question, context, route, { modelFirst: true }); if (b.understood) a = b; }
-      if (!a) step({ stage: 'reading', note: 'The AI model couldn’t place that question, so the built-in reader is answering.' });
+      open = route?.topic === 'other';
+      if (route && !open) { const b = await ask(question, context, route, { modelFirst: true }); if (b.understood) a = b; }
+      if (!a && !open) step({ stage: 'reading', note: 'The AI model couldn’t place that question, so the built-in reader is answering.' });
     }
-    if (!a) a = await ask(question, context, null);
+    // An open question isn't handed to the built-in reader (it would guess a topic from a stray word, like a product
+    // called "focus"); Claude answers it below. The reader answers everything else, or when Claude can't be reached.
+    if (!a) a = open ? { text: '', bullets: [], table: null, understood: null, context } : await ask(question, context, null);
     step({ stage: 'numbers', understood: a.understood || null });
-    if (ai && a.understood) {
+    // An open question (no topic the dashboard has an answer for): Claude answers it from a snapshot of the whole
+    // business, every figure checked against the books. If that fails, the built-in reader answers after all.
+    if (ai && !a.understood) {
+      step({ stage: 'writing' });
+      const picture = await businessPicture();
+      let rejected = false;
+      const text = await answerFreely(question, picture, { prev: context, onReject: () => { rejected = true; } });
+      if (text) a = { text, bullets: [], table: null, writtenBy: 'claude', understood: { topic: 'open', label: 'Open question', by: 'model', period: null, product: null }, context: a.context || context, partners: picture.partners };
+      else a = { ...(await ask(question, context, null)), writtenBy: rejected ? 'dashboard' : 'dashboard-ai-off' };
+    } else if (ai && a.understood) {
       step({ stage: 'writing' });
       let rejected = false;
       const text = await writeAnswer(question, a, { onReject: () => { rejected = true; } });

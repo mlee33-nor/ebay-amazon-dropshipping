@@ -6,6 +6,8 @@
 const KEEP_OPEN = /Settle page|In all, .* owes/;
 export function answerParts(a) {
   const f = a.facts;
+  // An open question Claude answered from the business snapshot: its answer is the answer
+  if (a.writtenBy === 'claude') return { headline: a.text, friendly: null, bullets: null, table: null, folded: null };
   if (a.friendly !== undefined) return { headline: a.text, friendly: a.friendly || null, bullets: a.bullets, table: a.table, folded: null };
   if (a.writtenBy === 'model' && f && f.text) {
     const open = (f.bullets || []).filter((b) => KEEP_OPEN.test(b));

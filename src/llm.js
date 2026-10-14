@@ -285,6 +285,30 @@ export function checkReply(text, facts, question = '') {
   return problems;
 }
 
+const ADVISOR = `You are the assistant in a small eBay-to-Amazon dropshipping business's dashboard, talking to the owners. Myles buys the items on Amazon; Drew collects the eBay payouts, pays operating costs and sends Myles his money each pay period (the 27th to the 26th, due the 26th). Profit is split 50/50. They list Amazon products on eBay and buy each one on Amazon when it sells.
+Answer the question directly and usefully, like a sharp business partner who knows these numbers. You may explain, compare, give your judgment and suggest concrete things to try (for example better titles or photos, pricing, promoting listings, ending listings that get no views, adding new products). For a greeting or "what can you do", say briefly what you can help with.
+Rules:
+- Every number you write (money, counts, percentages, dates) must be copied exactly from the facts below, with its minus sign. Never calculate, add, subtract, round, estimate or invent a number, and don't use a number that isn't in the facts, even in an example. Advice can be given without numbers.
+- If the question asks for a number the facts don't have (a forecast, a what-if), say it can't be known exactly from the books, then say what the facts do suggest.
+- Keep who pays whom, and whether something is paid, owed or still building up, exactly as the facts say, with the month or pay period they give it.
+- 3 to 8 sentences, plain language. Short lists are fine. You may put the most important figure in **bold**. No headings.`;
+
+// Claude's own answer to an open question, from the business snapshot (businessPicture in ask.js), or null. Shown only
+// when every figure in it is one of the snapshot's.
+export async function answerFreely(question, picture, { prev = null, timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 45000), onReject = null } = {}) {
+  if (!llmConfigured() || !picture?.lines?.length) return null;
+  const facts = { text: picture.lines[0], bullets: picture.lines.slice(1), table: null, partners: picture.partners };
+  const before = prev?.intent ? `\n(The previous question was about: ${prev.intent}${prev.period?.label ? `, ${prev.period.label}` : ''}.)` : '';
+  return twoTries(async (signal) => {
+    const out = await chat([{ role: 'system', content: ADVISOR + before }, { role: 'user', content: `Question: ${String(question).slice(0, 800)}\n\nFacts from the books:\n${picture.lines.map((l) => `- ${l}`).join('\n')}` }], signal, { maxTokens: 1500 });
+    const text = String(out || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    if (!text) return null;
+    const bad = checkReply(text, facts, question);
+    if (bad.length) { onReject?.(); console.error(`AI model: open answer didn't match the facts (${bad.slice(0, 3).join('; ')})`); return null; }
+    return text.slice(0, 3000);
+  }, timeoutMs);
+}
+
 // The model's friendly line about an answer the dashboard computed, or null. The dashboard's own answer stays the
 // headline; this is shown under it only if checkReply finds nothing wrong (so no figure can be made up or flipped).
 export async function writeAnswer(question, facts, { timeoutMs = Number(process.env.AI_WRITE_TIMEOUT_MS || 40000), onReject = null } = {}) {

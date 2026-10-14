@@ -444,6 +444,12 @@ const awaitingFor = (ctx, p) => ctx.orders.filter((o) => o.status === 'awaiting_
 
 // The fair comparison period for "why" questions
 function comparisonFor(ctx, p) {
+  if (!p) return null;
+  if (p.cycle) {
+    const pc = shiftMonth(p.cycle, -1);
+    const r = settlePeriodRange(pc, ctx.s.dueDay);
+    return { from: r.from, to: r.to, label: `the ${monthName(pc).split(' ')[0]} pay cycle (${dayLabel(r.from)}–${dayLabel(r.to)})`, cycle: pc, cycleTo: r.to };
+  }
   if (p.month && p.partial) {
     const pm = shiftMonth(p.month, -1);
     const day = Math.min(Number(ctx.today.slice(8)), daysIn(pm));
@@ -963,7 +969,8 @@ function answerSettlement(ctx, it) {
 }
 
 function answerCompare(ctx, it) {
-  let [a, b] = it.periods;
+  let [a, b] = it.periods || [];
+  if (!a && !b) { b = currentCycle(ctx); a = comparisonFor(ctx, b); }
   if (!b) {
     // "are we up or down vs August": now against the month named. "compare August": August against the one before.
     const now = defaultPeriod(ctx);
@@ -971,7 +978,7 @@ function answerCompare(ctx, it) {
     else { b = a; a = comparisonFor(ctx, b); }
   }
   if (!a || !b) return { text: 'Tell me the two periods, for example “compare August vs September” or “this month vs last month”.' };
-  const subject = it.periods[0]; // "is September better than August": September is the one asked about
+  const subject = (it.periods || [])[0] || b; // "is September better than August": September is the one asked about
   if (a.from && b.from && a.from > b.from) [a, b] = [b, a];
   const x = stats(rowsFor(ctx, a)); const y = stats(rowsFor(ctx, b));
   const ox = opexIn(ctx, a); const oy = opexIn(ctx, b);
@@ -1278,6 +1285,30 @@ export async function ask(question, prev = null, route = null, { modelFirst = fa
     product: it.product?.join(' ') || null,
   };
   return { ...ans, understood, context, partners: [ctx.s.A, ctx.s.B] };
+}
+
+// A snapshot of the whole business for open questions ("how can we increase sales?"): the dashboard's own answers to
+// a set of standard questions, from one load of the books. Claude reasons from these lines; every figure it may use is
+// one of theirs.
+const PICTURE = [
+  'how much did we make this pay cycle', 'how much did we make last pay cycle', 'what does drew owe', 'how many sales this pay cycle',
+  'how many listings do we have', 'why do we have more listings but fewer sales', 'top products all time', 'what should we stop selling',
+  'refunds this pay cycle', 'promoted listings this pay cycle', 'expenses this pay cycle', 'which sales are awaiting the amazon email',
+  'what was our best day', 'average sale this pay cycle',
+];
+export async function businessPicture() {
+  const ctx = await load();
+  const lines = [];
+  for (const q of PICTURE) {
+    try {
+      const a = await ask(q, null, null, { data: ctx });
+      if (!a.understood) continue;
+      const head = `[${a.understood.label}${a.understood.period ? `, ${a.understood.period}` : ''}]`;
+      lines.push(`${head} ${a.text}`, ...(a.bullets || []).slice(0, 8));
+      if (a.table) lines.push(a.table.head.join(' | '), ...a.table.rows.slice(0, 8).map((r) => r.join(' | ')));
+    } catch { /* one standard answer failing never stops the rest */ }
+  }
+  return { lines: lines.map((l) => String(l).replace(/\*\*/g, '')), partners: [ctx.s.A, ctx.s.B] };
 }
 
 export const _test = { parsePeriods, understand: (q, ctx, prev) => understand(q, ctx, prev), osa, listingsVsSales: (listings) => answerListingsVsSales({ listings }) };
